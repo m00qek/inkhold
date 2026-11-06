@@ -207,6 +207,12 @@
 .topbar__action[hidden] {
   display: none;
 }
+/* The short name of an icon-only tool: never shown on the bar; a phone's ⋯
+   menu reads it for the tool's row (`ui/barMenu.ts`). */
+.topbar__action-label,
+.segmented__label {
+  display: none;
+}
 .topbar__action-mark svg {
   width: 15px;
   height: 15px;

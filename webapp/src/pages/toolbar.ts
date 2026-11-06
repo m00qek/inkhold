@@ -3,6 +3,10 @@
 // (same controls, same order, in every viewer) split by a CSS divider.
 
 import { el } from "../ui/dom";
+import { ICONS, svg } from "../ui/icons";
+import { PHONE_QUERY } from "../ui/breakpoints";
+import { barMenuOpenFrom, barRows, openBarMenu, rowsOf, type BarRow } from "../ui/barMenu";
+import { closeOpenPopover } from "../ui/popover";
 
 /** A control built from data; `pressed` present makes it an `aria-pressed` toggle. */
 export interface ToolbarButton {
@@ -16,6 +20,8 @@ export interface ToolbarButton {
   iconOnly?: boolean;
   disabled?: boolean;
   pressed?: boolean;
+  /** On a phone, moves from the bar into ⋯ (an occasional tool). */
+  fold?: boolean;
   onClick?: (btn: HTMLButtonElement) => void;
 }
 
@@ -26,6 +32,8 @@ export interface ToolbarCustom {
   el: HTMLElement;
   /** Focusables joining the roving tabindex, in order. Defaults to `[]`. */
   focus?: HTMLElement[];
+  /** On a phone, moves from the bar into ⋯ (an occasional tool). */
+  fold?: boolean;
 }
 
 export type ToolbarControl = ToolbarButton | ToolbarCustom;
@@ -55,10 +63,14 @@ const ROVING_KEYS = new Set(["ArrowRight", "ArrowLeft", "Home", "End"]);
 
 export function createToolbar(spec: ToolbarSpec): Toolbar {
   const controls = new Map<string, HTMLElement>();
+  /** The view zone's occasional tools, which a phone keeps behind ⋯. */
+  const folded: (HTMLElement | null)[] = [];
   const focusables: HTMLElement[] = [];
 
   function render(control: ToolbarControl): HTMLElement {
+    if (control.fold) folded.push(control.kind === "custom" ? control.el : null);
     if (control.kind === "custom") {
+      if (control.fold) control.el.dataset["fold"] = "";
       controls.set(control.key, control.el);
       for (const f of control.focus ?? []) focusables.push(f);
       return control.el;
@@ -77,6 +89,10 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
     if (control.onClick) {
       const handler = control.onClick;
       btn.addEventListener("click", () => handler(btn));
+    }
+    if (control.fold) {
+      btn.dataset["fold"] = "";
+      folded[folded.length - 1] = btn;
     }
     controls.set(control.key, btn);
     focusables.push(btn);
@@ -106,7 +122,42 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
   root.append(zone("toolbar__group", spec.viewLabel, spec.view));
   // Decorative CSS divider, never a `|` glyph (it would be read aloud).
   root.append(el("span", { class: "toolbar__sep", "aria-hidden": "true" }));
-  root.append(zone("toolbar__group toolbar__group--file", spec.fileLabel, spec.file));
+  const fileZone = zone("toolbar__group toolbar__group--file", spec.fileLabel, spec.file);
+  root.append(fileZone);
+
+  // On a phone the occasional tools (`fold`) and the file's zone go behind
+  // ⋯: one menu, a View group then the file's, its own menus' rows brought
+  // in (`ui/barMenu.ts`). The bar keeps what reading uses. Wider, no ⋯.
+  const more = el("button", {
+    class: "btn toolbar__more",
+    type: "button",
+    "aria-label": "More",
+    title: "More",
+    "aria-haspopup": "menu",
+    "aria-expanded": "false",
+    hidden: true,
+    html: svg(ICONS.more, 1.8),
+  }) as HTMLButtonElement;
+  more.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (barMenuOpenFrom(more)) closeOpenPopover();
+    else {
+      const view = rowsOf(folded.filter((f): f is HTMLElement => f !== null));
+      const file = barRows(fileZone);
+      const rows: BarRow[] = [...(view.length > 0 ? [{ kind: "section", title: "View" } as BarRow, ...view] : [])];
+      if (rows.length > 0 && file.length > 0) rows.push({ kind: "sep" });
+      openBarMenu(more, [...rows, ...file]);
+    }
+  });
+  root.append(more);
+  focusables.push(more);
+  const phone = window.matchMedia(PHONE_QUERY);
+  const fold = () => {
+    fileZone.hidden = phone.matches;
+    more.hidden = !phone.matches;
+  };
+  phone.addEventListener("change", fold);
+  fold();
 
   // ---- roving tabindex ----
   // The bar is one tab stop. The handler stops the event once it acts so a
@@ -115,7 +166,10 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
   for (const [i, f] of focusables.entries()) f.tabIndex = i === 0 ? 0 : -1;
 
   function usable(): HTMLElement[] {
-    return focusables.filter((f) => !f.hidden && !(f as HTMLButtonElement).disabled);
+    // Not inside a hidden zone either (the file zone, folded on a phone).
+    return focusables.filter(
+      (f) => !f.hidden && !f.closest("[hidden]") && !(phone.matches && f.closest("[data-fold]")) && !(f as HTMLButtonElement).disabled,
+    );
   }
 
   function activate(next: HTMLElement): void {

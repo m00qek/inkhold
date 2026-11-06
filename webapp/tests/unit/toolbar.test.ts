@@ -165,7 +165,8 @@ describe("createToolbar", () => {
     const minus = [...bar.el.querySelectorAll('[tabindex="-1"]')];
     expect(zeros).toHaveLength(1);
     expect((zeros[0] as HTMLElement).textContent).toBe("Back");
-    expect(minus).toHaveLength(3);
+    // The three controls and the phone's ⋯ (hidden wider, and skipped then).
+    expect(minus).toHaveLength(4);
   });
 
   it("moves the tab stop to the next control on ArrowRight, and focuses it", () => {

@@ -4,7 +4,7 @@ import { cardList } from "../galleryCards";
 import type { Id } from "../../core/types";
 import { crumbHere, crumbLink, crumbSep } from "../../ui/crumbs";
 import { el } from "../../ui/dom";
-import { closeOpenMenu } from "../../ui/menu";
+import { closePopoverWithin } from "../../ui/popover";
 import { folderHref, go } from "../../router";
 import type { Entry, Folder, NoteSummary } from "../../core/types";
 import { MIN_GLOBAL_QUERY_LEN } from "../noteSearch";
@@ -84,7 +84,7 @@ export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
     });
     if (stale.length === 0) return;
 
-    closeOpenMenu(); // a folder row's menu is about to be replaced
+    closePopoverWithin(ctx.gallery); // a folder row's menu is about to be replaced
     folders.forEach((folder, i) => {
       if (!stale.includes(folder)) return;
       cards[i]!.replaceWith(ctx.features.galleryCards.folderCard(folder));
@@ -126,7 +126,7 @@ export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
     ctx.gallery.className = `gallery${searching || st.view === "list" ? " is-list" : ""}`;
     ctx.galleryEngine.reset();
     ctx.imgLazy?.disconnect(); // drop the previous repaint's native-image observations
-    closeOpenMenu(); // a card/row menu's DOM is about to be replaced
+    closePopoverWithin(ctx.gallery); // a card/row menu's DOM is about to be replaced
     ctx.gallery.replaceChildren();
     // Scheduled before appending; `spanTiles` knows which layouts span.
     ctx.scheduleSpan();

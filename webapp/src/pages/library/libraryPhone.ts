@@ -1,7 +1,8 @@
 // The library on a phone (below 700px, the breakpoint in `00-tokens.css`):
-// the rail becomes a drawer opened from the bar's ☰, the search box and the
-// bar's tools open from their own buttons, and a tab bar at the bottom holds
-// the four places a thumb goes most (Library, To-Do, Search, You). Wider than
+// the rail becomes a drawer opened from the bar's ☰, the bar's tools open
+// from ⋯ (shown only while the place has a tool), and a tab bar at the bottom
+// holds the four places a thumb goes most (Library, To-Do, Search, You);
+// its Search opens the search box across the bar. Wider than
 // that, none of this shows and nothing here acts: the CSS hides the buttons
 // and the tab bar, and every state is dropped when the window widens.
 //
@@ -15,6 +16,8 @@ import { onPlainClick } from "../../ui/link";
 import { accountHref, folderHref, go, todoHref } from "../../router";
 import type { Topbar } from "./libraryTopbar";
 import { PHONE_QUERY } from "../../ui/breakpoints";
+import { barMenuOpenFrom, barRows, openBarMenu } from "../../ui/barMenu";
+import { closeOpenPopover } from "../../ui/popover";
 
 
 export interface PhoneShellDeps {
@@ -28,6 +31,9 @@ export interface PhoneShellDeps {
   searchInput: HTMLInputElement;
   /** Which tab is the current place. */
   section(): "library" | "todo" | "you";
+  /** One level up from here (a folder's parent, To-Do's Lists, the folder a
+   *  search started from); null on a top-level place, which keeps ☰. */
+  up(): { href: string; label: string } | null;
 }
 
 export interface PhoneShell {
@@ -40,7 +46,8 @@ export interface PhoneShell {
 
 export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
   const mq = window.matchMedia(PHONE_QUERY);
-  const { menuBtn, searchToggle, moreBtn } = d.topbar;
+  const { menuBtn, moreBtn, tools, backLink } = d.topbar;
+  onPlainClick(backLink, () => go(backLink.getAttribute("href") ?? "#/"));
   const scrim = el("div", { class: "drawer-scrim", "aria-hidden": "true" });
   d.app.append(scrim);
 
@@ -69,7 +76,6 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
   // ---- search across the bar ----
   function openSearch(): void {
     d.root.classList.add("is-search-open");
-    searchToggle.setAttribute("aria-expanded", "true");
     tabSearch.setAttribute("aria-expanded", "true");
     d.searchInput.focus();
   }
@@ -77,23 +83,37 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
     // A query on screen keeps the box: it says what the results are for.
     if (d.searchInput.value.trim() !== "") return;
     d.root.classList.remove("is-search-open");
-    searchToggle.setAttribute("aria-expanded", "false");
     tabSearch.setAttribute("aria-expanded", "false");
   }
-  searchToggle.addEventListener("click", openSearch);
   d.searchInput.addEventListener("blur", () => setTimeout(closeSearch, 0));
 
   // ---- the bar's tools ----
+  // ⋯ opens them as one menu, the bar's groups as its groups (`ui/barMenu.ts`);
+  // the popover registry closes it on a choice, Escape or a click outside.
   function setTools(open: boolean): void {
-    d.root.classList.toggle("is-tools-open", open);
-    moreBtn.setAttribute("aria-expanded", String(open));
+    if (!open && barMenuOpenFrom(moreBtn)) closeOpenPopover();
   }
-  moreBtn.addEventListener("click", () => setTools(!d.root.classList.contains("is-tools-open")));
-  const onOutside = (e: Event) => {
-    const t = e.target as Element;
-    if (!t.closest?.(".tools, .topbar__more, .menu__pop")) setTools(false);
+  moreBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (barMenuOpenFrom(moreBtn)) {
+      closeOpenPopover();
+      return;
+    }
+    openBarMenu(moreBtn, barRows(tools));
+  });
+  // Each place shows and hides its own tools (sort over a folder, Lock console
+  // on an unlocked admin console, To-Do's list tools...). A place with none
+  // has no ⋯: an empty panel is a button that does nothing.
+  const hasTools = () =>
+    Array.from(tools.children).some((c) => c instanceof HTMLElement && !c.hidden && !c.classList.contains("tools__sep"));
+  const syncMore = () => {
+    const any = hasTools();
+    moreBtn.hidden = !any;
+    if (!any) setTools(false);
   };
-  document.addEventListener("click", onOutside, true);
+  const toolsWatch = new MutationObserver(syncMore);
+  toolsWatch.observe(tools, { subtree: true, childList: true, attributes: true, attributeFilter: ["hidden"] });
+  syncMore();
 
   // ---- the tab bar ----
   const tab = (href: string, label: string, icon: IconName, key: "library" | "todo" | "you") => {
@@ -117,7 +137,23 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
     tab(accountHref(), "You", "person", "you"),
   );
 
+  /** ‹ in ☰'s place below a top-level place; iPhones have no back button. */
+  function syncUp(): void {
+    const up = d.up();
+    backLink.hidden = up === null;
+    menuBtn.hidden = up !== null;
+    if (up) {
+      backLink.href = up.href;
+      backLink.setAttribute("aria-label", `Back to ${up.label}`);
+      backLink.title = `Back to ${up.label}`;
+    }
+  }
+  // The crumbs carry a folder's parent, and arrive with its listing.
+  const crumbWatch = new MutationObserver(syncUp);
+  crumbWatch.observe(d.topbar.crumbs, { childList: true, subtree: true, characterData: true });
+
   function sync(): void {
+    syncUp();
     const here = d.section();
     for (const a of tabbar.querySelectorAll<HTMLElement>("a[data-tab]")) {
       if (a.dataset["tab"] === here) a.setAttribute("aria-current", "page");
@@ -125,7 +161,7 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
     }
     if (d.searchInput.value.trim() !== "") {
       d.root.classList.add("is-search-open");
-      searchToggle.setAttribute("aria-expanded", "true");
+      tabSearch.setAttribute("aria-expanded", "true");
     }
   }
 
@@ -135,9 +171,6 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
     if (d.root.classList.contains("is-drawer-open")) {
       e.preventDefault();
       closeDrawer();
-    } else if (d.root.classList.contains("is-tools-open")) {
-      setTools(false);
-      moreBtn.focus();
     }
   };
   document.addEventListener("keydown", onKey);
@@ -162,9 +195,10 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
     sync,
     destroy() {
       document.removeEventListener("keydown", onKey);
-      document.removeEventListener("click", onOutside, true);
       window.removeEventListener("hashchange", onRoute);
       mq.removeEventListener("change", onWidth);
+      toolsWatch.disconnect();
+      crumbWatch.disconnect();
     },
   };
 }

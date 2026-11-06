@@ -9,6 +9,8 @@
 // the times and the order the tablet will merge by. A delete waits a few
 // seconds behind an Undo first, because once the tablet syncs it is gone there.
 
+import { setMenuRows } from "../../ui/barMenu";
+import { ICONS } from "../../ui/icons";
 import { el } from "../../ui/dom";
 import { DEFAULT_SECTION_TITLE } from "../../ui/menu";
 import type { Api } from "../../api/types";
@@ -213,7 +215,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
       host.status.title = sync.long;
     }
     if (snap?.enabled) {
-      if (view.kind === "list") host.listBtn.setAttribute("aria-label", `Options for the list ${viewTitle(view, snap.lists)}`);
+      if (view.kind === "list") host.listBtn.setAttribute("aria-label", `List options for ${viewTitle(view, snap.lists)}`);
     }
     host.crumbs.replaceChildren(placeTitle(visibleSnap(), view, Date.now()));
   }
@@ -320,12 +322,22 @@ export function createTodoPage(host: TodoHost): TodoPage {
     e.stopPropagation();
     if (host.listBtn.getAttribute("aria-expanded") === "true") return menus.close();
     // The card's ⋯ menu, header and all.
-    menus.pop(host.listBtn, [menus.section(DEFAULT_SECTION_TITLE), menus.item("Rename list", "edit", () => renameList()), menus.item("Delete list", "trash", () => deleteList(), true)]);
+    menus.pop(host.listBtn, listItems());
   };
+  const listItems = () => [menus.section(DEFAULT_SECTION_TITLE), menus.item("Rename list", "edit", () => renameList()), menus.item("Delete list", "trash", () => deleteList(), true)];
   const downloads = createTodoDownloads({ button: host.downloadBtn, menus, snapshot: () => snap, view: () => view, say });
   const onNewList = () => void newList();
   host.listBtn.addEventListener("click", onListBtn);
   host.newListBtn.addEventListener("click", onNewList);
+  // On a phone the bar folds into ⋯ (`ui/barMenu.ts`); these two are menus
+  // of their own, so they hand it their rows rather than opening a menu
+  // inside a menu.
+  setMenuRows(host.listBtn, () => [
+    { kind: "section", title: DEFAULT_SECTION_TITLE },
+    { kind: "item", label: "Rename list", icon: ICONS.edit, onSelect: () => renameList() },
+    { kind: "item", label: "Delete list", icon: ICONS.trash, danger: true, onSelect: () => deleteList() },
+  ]);
+  setMenuRows(host.downloadBtn, () => downloads.barRows());
 
   // ---- actions ----
 

@@ -1,8 +1,9 @@
 /* ---- the library on a phone (below 700px; `00-tokens.css`) ----
-   The rail is a drawer opened from the bar's ☰ (`libraryPhone.ts`), the bar
-   keeps a title and three buttons (☰, search, ⋯) whose search box and tools
-   open over it, and a tab bar at the bottom holds Library, To-Do, Search and
-   You. Wider, none of it shows. */
+   The rail is a drawer opened from the bar's ☰ (`libraryPhone.ts`); a place
+   below another has ‹ there instead, one level up (iPhones have no back
+   button of their own). The bar keeps a title and ⋯ (its tools as one
+   menu), and a tab bar at the bottom holds Library, To-Do, Search and You,
+   whose Search opens the box across the bar. Wider, none of it shows. */
 
 .topbar__phone,
 .tabbar,
@@ -87,6 +88,10 @@ html {
     color: var(--ink);
     cursor: pointer;
   }
+  /* ⋯ on a place with no tools (`libraryPhone.ts`). */
+  .topbar__phone[hidden] {
+    display: none;
+  }
   .topbar__phone svg {
     inline-size: 22px;
     block-size: 22px;
@@ -119,33 +124,22 @@ html {
   .sn-root.is-search-open .search {
     display: flex;
     position: absolute;
-    inset: var(--sp-1) var(--sp-2);
+    /* Beside ☰ or ‹, not over it: from results, ‹ is the way back. */
+    inset: var(--sp-1) var(--sp-2) var(--sp-1) calc(var(--hit-target-touch) + 2 * var(--sp-2));
     z-index: var(--z-raised);
+  }
+  /* The box says what this is; the title under it would peek out. */
+  .sn-root.is-search-open .crumbs {
+    visibility: hidden;
   }
   .sn-root.is-search-open .search input {
     /* 16px or more: below it iOS zooms the page on focus. */
     font-size: var(--fs-title);
   }
 
-  /* The bar's tools, as a panel under ⋯. */
+  /* The bar's tools: behind ⋯, as one menu (`ui/barMenu.ts`). */
   .tools {
     display: none;
-  }
-  .sn-root.is-tools-open .tools {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--sp-2);
-    position: absolute;
-    inset-block-start: 100%;
-    inset-inline-end: var(--sp-2);
-    z-index: var(--z-menu);
-    max-inline-size: calc(100vw - 2 * var(--sp-2));
-    padding: var(--sp-3);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-card);
-    background: var(--sheet);
-    box-shadow: 0 8px 24px var(--shadow);
   }
 
   /* The tab bar, under the content. */
@@ -235,18 +229,16 @@ html {
   .viewer__bar .toolbar__sep {
     display: none;
   }
-  /* The file's actions: icons only (each keeps its name in aria-label). */
-  .toolbar__group--file {
-    flex: none;
-    gap: 0;
-  }
-  .toolbar__group--file .btn {
-    gap: 0;
-    padding-inline: 0;
-    justify-content: center;
-  }
-  .toolbar__group--file .btn__label {
+  /* A viewer's occasional tools (Find, Recognized text, Layers, Pages,
+     Outline…) are behind ⋯ too: the bar keeps what reading uses. */
+  .toolbar [data-fold] {
     display: none;
+  }
+  /* The file's actions are behind ⋯ (`pages/toolbar.ts`), shown here only. */
+  .toolbar__more {
+    flex: none;
+    justify-content: center;
+    padding-inline: 0;
   }
   .reader__bar > .toolbar__group:not(.toolbar__group--file),
   .viewer__bar > .toolbar__group:not(.toolbar__group--file) {

@@ -81,6 +81,7 @@ export function createTodoMenus(): TodoMenus {
     const self: OpenPopover = {
       trigger,
       contains: (t) => box.contains(t) || trigger.contains(t),
+      pop: box,
       close: () => {
         box.remove();
         clearPopover(self);

@@ -41,10 +41,13 @@ export interface Topbar {
   todoNewListBtn: HTMLButtonElement;
   /** Phone only (`libraryPhone.ts`): opens the places drawer. */
   menuBtn: HTMLButtonElement;
-  /** Phone only: opens the search box across the bar. */
-  searchToggle: HTMLButtonElement;
-  /** Phone only: opens the bar's tools (sort, view, upload, To-Do's). */
+  /** Phone only: one level up, in ☰'s place, on a place below another. */
+  backLink: HTMLAnchorElement;
+  /** Phone only: opens the bar's tools (sort, view, upload, To-Do's); shown
+   *  only while there is one (`libraryPhone.ts`). */
   moreBtn: HTMLButtonElement;
+  /** The tools `moreBtn` opens. */
+  tools: HTMLElement;
   setView(view: View): void;
   /** Restores the caret the arriving keystroke's navigation took from the box. */
   restoreSearchFocus(): void;
@@ -71,8 +74,11 @@ function topbarAction(opts: {
     ...(opts.ariaLabel ? { "aria-label": opts.ariaLabel } : {}),
   }) as HTMLButtonElement;
   b.append(el("span", { class: "topbar__action-mark", html: svg(ICONS[opts.icon], 1.7) }));
-  if (opts.iconOnly) b.title = opts.ariaLabel ?? opts.label;
-  else b.append(el("span", { text: opts.label }));
+  if (opts.iconOnly) {
+    b.title = opts.ariaLabel ?? opts.label;
+    // The row name in a phone's ⋯ menu (`ui/barMenu.ts`); never shown here.
+    b.append(el("span", { class: "topbar__action-label", text: opts.label }));
+  } else b.append(el("span", { text: opts.label }));
   return b;
 }
 
@@ -136,8 +142,9 @@ export function createTopbar(deps: TopbarDeps): Topbar {
   sortSelect.value = deps.initialSort;
   sortSelect.addEventListener("change", () => deps.onSort(sortSelect.value as SortKey));
 
-  const gridBtn = el("button", { type: "button", "aria-label": "Grid view", "aria-pressed": "true", html: svg(ICONS.grid, 1.7) });
-  const listBtn = el("button", { type: "button", "aria-label": "List view", "aria-pressed": "false", html: svg(ICONS.list, 1.7) });
+  // Row names for a phone's ⋯ menu (`segmented__label`); never shown here.
+  const gridBtn = el("button", { type: "button", "aria-label": "Grid view", "aria-pressed": "true", html: svg(ICONS.grid, 1.7) + '<span class="segmented__label">Grid</span>' });
+  const listBtn = el("button", { type: "button", "aria-label": "List view", "aria-pressed": "false", html: svg(ICONS.list, 1.7) + '<span class="segmented__label">List</span>' });
   gridBtn.addEventListener("click", () => deps.onView("grid"));
   listBtn.addEventListener("click", () => deps.onView("list"));
 
@@ -198,19 +205,25 @@ export function createTopbar(deps: TopbarDeps): Topbar {
   });
   uploadBtn.addEventListener("click", () => filePicker.click());
 
-  // On a phone the bar keeps a title and three buttons; the rest opens from them.
+  // On a phone the bar keeps ☰, a title and ⋯; search is the tab bar's.
   const phoneButton = (cls: string, label: string, icon: IconName, controls: string) =>
     el("button", { class: `topbar__phone ${cls}`, type: "button", "aria-label": label, "aria-controls": controls, "aria-expanded": "false", html: svg(ICONS[icon], 1.7) }) as HTMLButtonElement;
   const menuBtn = phoneButton("topbar__menu", "Places", "menu", "rail");
-  const searchToggle = phoneButton("topbar__search-toggle", "Search", "search", "search-box");
+  const backLink = el("a", {
+    class: "topbar__phone topbar__back",
+    href: "#/",
+    hidden: true,
+    html: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>',
+  }) as HTMLAnchorElement;
   const moreBtn = phoneButton("topbar__more", "More", "more", "tools");
 
+  const tools = el("div", { class: "tools", id: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, todoStatus, todoListBtn, todoDownloadBtn, todoNewListBtn, lockAdminBtn);
   const topbar = el(
     "div",
     { class: "topbar" },
     menuBtn,
+    backLink,
     crumbs,
-    searchToggle,
     el(
       "div",
       { class: "search", id: "search-box", role: "search" },
@@ -220,7 +233,7 @@ export function createTopbar(deps: TopbarDeps): Topbar {
       el("span", { class: "search__ocr", "aria-hidden": "true", text: "OCR" }),
     ),
     moreBtn,
-    el("div", { class: "tools", id: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, todoStatus, todoListBtn, todoDownloadBtn, todoNewListBtn, lockAdminBtn),
+    tools,
     filePicker,
   );
 
@@ -239,8 +252,9 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     todoDownloadBtn,
     todoNewListBtn,
     menuBtn,
-    searchToggle,
+    backLink,
     moreBtn,
+    tools,
     setView(view) {
       gridBtn.setAttribute("aria-pressed", String(view === "grid"));
       listBtn.setAttribute("aria-pressed", String(view === "list"));

@@ -730,13 +730,30 @@ Touch is its own question, `(pointer: coarse)`, never inferred from width.
 - **Phone** (`pages/library/libraryPhone.ts`, `styles/23-phone.css`): the
   rail is a drawer from the bar's ☰ (modal: the rest is inert, focus goes in
   and back to ☰; Escape, the scrim or a link closes it). The bar keeps ☰, the
-  place's name, a search button (the box opens across the bar and stays
-  while it holds a query) and ⋯ (sort, view, upload, To-Do's tools). A tab
-  bar holds Library, To-Do, Search and You; it gives way to a viewer's own
-  bar. Cards run two columns. Viewers keep Back, the title and the file's
-  actions (icons) on top and their reading controls in a bar at the bottom;
-  their panels open as sheets above it. Menus are sheets along the bottom
-  (`placePop` sets `data-sheet`). On a touch screen controls are 44px.
+  place's name and ⋯ (its tools as one menu; shown only when it has some).
+  A tab bar holds Library, To-Do, Search and You; its Search opens the box
+  across the bar, which stays while it holds a query. The tab bar gives way
+  to a viewer's own bar. Cards run two columns. Viewers keep ‹, the title and ⋯ on top and
+  one row of reading controls at the bottom (paging and zoom; text size for
+  text); their occasional tools (`fold` in the toolbar spec: Find,
+  Recognized text, Layers, Pages, Outline) and the file's actions are in
+  ⋯, the tools under "View", ticked while on. Panels open as sheets above
+  the bottom row and start closed on a phone. Every place below another has
+  ‹ in ☰'s place, one level up (a folder's parent, Lists, the folder a
+  search started from): iPhones have no back button. Menus are sheets
+  along the bottom (`placePop` sets `data-sheet`). On a touch screen controls are 44px.
+- **A bar with no room folds into ⋯** (`ui/barMenu.ts`): its controls become
+  ONE menu, in the bar's order, a divider wherever the bar has one (and
+  around each choice). A select becomes its options and a pressed-button
+  group its buttons, the current one ticked (`menuitemradio`); a button
+  with a menu of its own brings that menu's rows in (`setMenuRows`, else its
+  in-page `.menu__pop`), so there is never a menu inside a menu; any other
+  button is a row with its icon and name. Rows only forward to the bar's
+  control. On a phone: the library bar's tools, To-Do's (New list, the
+  list's actions, Download), and each viewer's file zone. ⋯ shows only when
+  there is something behind it. Sheets along the bottom stay open through
+  scrolls and resizes (no trigger holds them), and a gallery repaint closes
+  only menus whose trigger it replaces.
 - **Tablet:** the rail is a strip of icons; names stay in the accessibility
   tree and in a tooltip.
 - **Text size:** the rail's width, the account page's label gutter and the

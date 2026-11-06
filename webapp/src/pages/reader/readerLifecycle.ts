@@ -1,5 +1,6 @@
 // The reader's lifecycle: opening a note (live, from the bin or as a version preview), and closing it.
 
+import { isPhone } from "../../ui/breakpoints";
 import type { NoteMeta, NoteSummary } from "../../core/types";
 import { dispatchApiFailure } from "../../api/client";
 import { fileKind, formatBytes, rawFileUrl, historyFileUrl } from "../../core/fileKind";
@@ -111,8 +112,9 @@ export function createReaderLifecycle(ctx: ReaderCtx): Reader {
         st.layersAvail = "unknown";
         ctx.noteLayerCtl.release();
         ctx.panels.refreshLayersUi();
-        // Page index back to default open, only on a real file change.
-        st.pageIndexOpen = true;
+        // Page index back to default open, only on a real file change. Closed
+        // on a phone, where it opens as a sheet over the page.
+        st.pageIndexOpen = !isPhone();
       }
       ctx.panels.setMode(kind);
       ctx.root.classList.add("is-open");

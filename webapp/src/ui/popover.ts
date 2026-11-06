@@ -69,6 +69,9 @@ export interface OpenPopover {
   trigger: HTMLElement;
   contains: (target: Node) => boolean;
   close: () => void;
+  /** The pop itself, when `placePop` placed it: a sheet (`data-sheet`) is
+   *  not tied to its trigger, so scrolling and resizing leave it open. */
+  pop?: HTMLElement;
 }
 
 let current: OpenPopover | null = null;
@@ -77,6 +80,12 @@ let listenersInstalled = false;
 /** Close any open popover; call before replacing the DOM its trigger lives in. */
 export function closeOpenPopover(): void {
   current?.close();
+}
+
+/** Close the open popover only if its trigger is inside `root`: a repaint
+ *  of `root` must not close a menu that belongs elsewhere (a bar's ⋯). */
+export function closePopoverWithin(root: Element): void {
+  if (current && root.contains(current.trigger)) current.close();
 }
 
 function installListeners(): void {
@@ -88,9 +97,22 @@ function installListeners(): void {
     current.close();
   });
   // A fixed pop doesn't ride content scroll: close on any (captured) scroll or
-  // resize rather than strand it beside a moved trigger.
-  window.addEventListener("scroll", () => current?.close(), true);
-  window.addEventListener("resize", () => current?.close());
+  // resize rather than strand it beside a moved trigger. Not a sheet along
+  // the bottom (a phone's menus), which no trigger holds, and not a scroll
+  // of the pop's own rows.
+  const anchored = () => current !== null && current.pop?.hasAttribute("data-sheet") !== true;
+  window.addEventListener(
+    "scroll",
+    (e) => {
+      if (!anchored()) return;
+      if (e.target instanceof Node && current?.pop?.contains(e.target)) return;
+      current?.close();
+    },
+    true,
+  );
+  window.addEventListener("resize", () => {
+    if (anchored()) current?.close();
+  });
   // Capture + stopPropagation so Escape doesn't also reach the reader or router.
   document.addEventListener(
     "keydown",

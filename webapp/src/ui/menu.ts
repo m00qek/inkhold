@@ -110,6 +110,7 @@ export function createMenu(spec: MenuSpec): HTMLElement {
     trigger,
     contains: (t) => menu.contains(t) || pop.contains(t),
     close,
+    pop,
   };
 
   function isOpen(): boolean {

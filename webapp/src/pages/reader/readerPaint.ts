@@ -112,7 +112,11 @@ export function createReaderPaint(ctx: ReaderCtx): ReaderPaint {
     const layersW = ctx.panels.layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
     const pagesW = st.pageIndexOpen ? tokenPx("--panel-w-narrow", 180) + gap : 0;
     const maxW = Math.max(rect.width - 56 - ocrW - layersW - pagesW, 80);
-    if (w > maxW) {
+    // Fit keeps the whole page in view. A zoom step is a size, and may be
+    // wider than the stage, which then scrolls sideways: clamping it too
+    // threw every step away wherever Fit already filled the width (a phone,
+    // a tablet held upright), so handwriting could never be enlarged there.
+    if (st.zoom === FIT_PAGE && w > maxW) {
       w = maxW;
       h = w / aspect;
     }

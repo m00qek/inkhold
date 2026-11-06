@@ -280,6 +280,16 @@
   flex-direction: column;
   gap: 2px;
 }
+/* A ticked choice in a menu (`ui/barMenu.ts`): the tick at the row's end. */
+.menu__item-check {
+  margin-inline-start: auto;
+  color: var(--accent);
+}
+.menu__item-check svg {
+  display: block;
+  inline-size: 1rem;
+  block-size: 1rem;
+}
 .menu__item:hover:not(:disabled) {
   background: var(--hover);
 }
@@ -335,7 +345,9 @@
   position: relative;
   overflow: auto;
   display: grid;
-  place-items: center;
+  /* `safe`: a zoomed page wider than the stage overflows to the end only;
+     plain `center` splits it, and the half past the start can't be scrolled to. */
+  place-items: safe center;
   padding: 28px;
 }
 .page {

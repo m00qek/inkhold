@@ -12,7 +12,7 @@ import { createPhoneShell } from "./libraryPhone";
 import { createPlace } from "../../ui/place";
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
-import { binNotePageHref, destinationHref, folderHref, go, notePageHref, todoHref } from "../../router";
+import { binNotePageHref, current, destinationHref, folderHref, go, notePageHref, todoHref } from "../../router";
 import { createBackupNotice } from "./backupNotice";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -295,6 +295,23 @@ export function createAppShell(deps: AppDeps): AppShell {
     topbar: ctx.topbar,
     searchInput: ctx.topbar.searchInput,
     section: () => (st.destination === TODO_KEY ? "todo" : st.destination === ACCOUNT_KEY ? "you" : "library"),
+    up: () => {
+      const r = current();
+      if (r.name === "todo") return r.view === "" ? null : { href: todoHref(""), label: "Lists" };
+      if (r.name === "search") {
+        // Back to where the search started, named as the rail names it.
+        const here = st.listing?.folderId === st.folderId ? st.listing?.path.at(-1) : undefined;
+        const label = st.folderId === null ? "Library" : here ? ctx.rail.labelFor(here) : "folder";
+        return { href: folderHref(st.folderId), label };
+      }
+      if (r.name === "folder") {
+        // The crumbs' last link is the parent (Library for a top folder).
+        const links = ctx.topbar.crumbs.querySelectorAll("a[href]");
+        const parent = links[links.length - 1];
+        return parent ? { href: parent.getAttribute("href")!, label: (parent.textContent ?? "").trim() || "Library" } : { href: folderHref(null), label: "Library" };
+      }
+      return null;
+    },
   });
   column.append(phone.tabbar);
 

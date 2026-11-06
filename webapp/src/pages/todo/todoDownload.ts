@@ -8,6 +8,7 @@ import { notePageHref } from "../../router";
 import { listName, type TodoView } from "./todoModel";
 import { exportName, exportTasks, toICalendar, toTodoTxt, type ExportScope } from "./todoExport";
 import type { TodoMenus } from "./todoMenus";
+import type { BarRow } from "../../ui/barMenu";
 
 export interface TodoDownloadsDeps {
   button: HTMLButtonElement;
@@ -21,6 +22,9 @@ export interface TodoDownloadsDeps {
 export interface TodoDownloads {
   /** What Download saves on this page; null: the button hides. */
   scope(): { title: string; scope: ExportScope; name: string } | null;
+  /** Download's rows for a bar folded into ⋯ (`ui/barMenu.ts`): headed
+   *  "Download", since that menu holds more than downloads. */
+  barRows(): BarRow[];
   destroy(): void;
 }
 
@@ -54,15 +58,28 @@ export function createTodoDownloads(d: TodoDownloadsDeps): TodoDownloads {
   const onClick = (e: MouseEvent) => {
     e.stopPropagation();
     if (d.button.getAttribute("aria-expanded") === "true") return d.menus.close();
+    const rows = items();
+    if (rows.length === 0) return;
+    d.menus.pop(d.button, rows);
+  };
+  function barRows(): BarRow[] {
+    if (!scope()) return [];
+    return [
+      { kind: "section", title: "Download" },
+      { kind: "item", label: "Tasks", ext: ".ics", onSelect: () => save("ics") },
+      { kind: "item", label: "Plain text", ext: ".txt", onSelect: () => save("txt") },
+    ];
+  }
+  function items(): HTMLElement[] {
     const where = scope();
-    if (!where) return;
-    d.menus.pop(d.button, [
+    if (!where) return [];
+    return [
       d.menus.section(where.title),
       d.menus.fileItem("Tasks", ".ics", () => save("ics")),
       d.menus.fileItem("Plain text", ".txt", () => save("txt")),
-    ]);
-  };
+    ];
+  }
   d.button.addEventListener("click", onClick);
 
-  return { scope, destroy: () => d.button.removeEventListener("click", onClick) };
+  return { scope, barRows, destroy: () => d.button.removeEventListener("click", onClick) };
 }

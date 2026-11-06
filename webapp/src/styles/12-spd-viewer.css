@@ -36,7 +36,9 @@
   min-height: 0;
   overflow: auto;
   display: grid;
-  place-items: center;
+  /* `safe`: at 100% a sketch is wider than a phone; centred plainly, its
+     start would sit out of scroll reach. */
+  place-items: safe center;
   padding: 24px;
 }
 /* The zoom surface: one absolute canvas per layer; zoom only resizes this box.

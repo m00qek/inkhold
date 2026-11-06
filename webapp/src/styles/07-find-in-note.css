@@ -130,7 +130,9 @@
   /* A definite row so the image's `max-height: 100%` resolves (else `Fit` only
      fits width); `minmax(0, 1fr)` because `1fr` floors at min-content. */
   grid-template-rows: minmax(0, 1fr);
-  place-items: center;
+  /* `safe`: a zoomed image wider or taller than the stage overflows to the
+     end only; centred plainly, its start was out of scroll reach. */
+  place-items: safe center;
   padding: 28px;
   min-height: 0;
 }

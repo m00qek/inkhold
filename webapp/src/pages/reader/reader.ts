@@ -6,6 +6,7 @@
 // (`readerContext.ts` has the rule); the behaviour is in the parts, one
 // concern each: overlays, navigation, panels, painting, features, lifecycle.
 
+import { isPhone } from "../../ui/breakpoints";
 import { el } from "../../ui/dom";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -146,7 +147,8 @@ export function createReader(deps: ReaderDeps): Reader {
     previewViewOnly: false,
     layersPanelOpen: false,
     layersAvail: "unknown",
-    pageIndexOpen: true,
+    // Docked beside the page; on a phone it would cover it (a sheet).
+    pageIndexOpen: !isPhone(),
     urlSuspended: false,
     urlTimer: undefined,
   };
@@ -273,10 +275,10 @@ export function createReader(deps: ReaderDeps): Reader {
     view: [
       { kind: "custom", key: "pager", el: pager.el, focus: pager.focus },
       { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
-      { kind: "custom", key: "find", el: findBar.toggle, focus: [findBar.toggle] },
-      { kind: "custom", key: "ocr", el: buttons.ocrToggle, focus: [buttons.ocrToggle] },
-      { kind: "custom", key: "layers", el: buttons.layersToggle, focus: [buttons.layersToggle] },
-      { kind: "custom", key: "pages", el: buttons.pagesToggle, focus: [buttons.pagesToggle] },
+      { kind: "custom", key: "find", el: findBar.toggle, focus: [findBar.toggle], fold: true },
+      { kind: "custom", key: "ocr", el: buttons.ocrToggle, focus: [buttons.ocrToggle], fold: true },
+      { kind: "custom", key: "layers", el: buttons.layersToggle, focus: [buttons.layersToggle], fold: true },
+      { kind: "custom", key: "pages", el: buttons.pagesToggle, focus: [buttons.pagesToggle], fold: true },
     ],
     file: [
       { kind: "custom", key: "versions", el: buttons.versionsBtn, focus: [buttons.versionsBtn] },

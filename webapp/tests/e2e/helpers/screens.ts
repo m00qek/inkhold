@@ -3,7 +3,7 @@ import type { Page } from "@playwright/test";
 // The screens and sizes the semantic guard (`semantics.spec.ts`) and the
 // pixel comparison (`visual.spec.ts`) both visit.
 
-/** On a phone the rail is a drawer, the search box and the bar's tools open from buttons. */
+/** On a phone the rail is a drawer, the bar's tools open from ⋯, search from the tab bar. */
 async function phoneOpens(page: Page, button: string): Promise<void> {
   if ((page.viewportSize()?.width ?? 1280) >= 700) return;
   await page.locator(`.topbar__phone[aria-label="${button}"]`).click();
@@ -13,11 +13,18 @@ async function railLink(page: Page, name: string) {
   await page.locator(".rail").getByText(name, { exact: true }).click();
 }
 async function searchFor(page: Page, q: string) {
-  await phoneOpens(page, "Search");
+  if ((page.viewportSize()?.width ?? 1280) < 700) {
+    await page.getByRole("navigation", { name: "Sections" }).getByRole("button", { name: "Search" }).click();
+  }
   await page.getByRole("searchbox").first().fill(q);
 }
+/** A bar tool; on a phone it is a row of the ⋯ menu. */
 async function barButton(page: Page, name: string) {
-  await phoneOpens(page, "More");
+  if ((page.viewportSize()?.width ?? 1280) < 700) {
+    await phoneOpens(page, "More");
+    await page.getByRole("menu").getByRole("menuitem", { name }).click();
+    return;
+  }
   await page.getByRole("button", { name }).click();
 }
 

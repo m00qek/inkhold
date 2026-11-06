@@ -304,12 +304,12 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     view: [
       { kind: "custom", key: "pager", el: pager.el, focus: pager.focus },
       { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
-      { kind: "custom", key: "find", el: findToggle, focus: [findToggle] },
-      { kind: "custom", key: "pages", el: pagesToggle, focus: [pagesToggle] },
-      { kind: "custom", key: "outline", el: outlineOpener.el, focus: [outlineOpener.el] },
+      { kind: "custom", key: "find", el: findToggle, focus: [findToggle], fold: true },
+      { kind: "custom", key: "pages", el: pagesToggle, focus: [pagesToggle], fold: true },
+      { kind: "custom", key: "outline", el: outlineOpener.el, focus: [outlineOpener.el], fold: true },
       // Shown only when a `.mark` exists.
-      { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle] },
-      { kind: "custom", key: "copy", el: copy.btn, focus: [copy.btn] },
+      { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle], fold: true },
+      { kind: "custom", key: "copy", el: copy.btn, focus: [copy.btn], fold: true },
       { kind: "custom", key: "copy-live", el: copy.live, focus: [] },
     ],
     file: [

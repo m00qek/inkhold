@@ -1,0 +1,66 @@
+// @vitest-environment happy-dom
+import { describe, expect, it, vi } from "vitest";
+import { barRows, setMenuRows, type BarRow } from "../../src/ui/barMenu";
+
+/** A bar like the library's: sort, view, a divider, then actions. */
+function bar(): { root: HTMLElement; select: HTMLSelectElement; list: HTMLButtonElement; upload: HTMLButtonElement } {
+  const root = document.createElement("div");
+  root.innerHTML = `
+    <span class="select"><select aria-label="Sort notes"><option value="recent">Recent</option><option value="title">Title</option></select></span>
+    <div class="segmented" role="group" aria-label="View">
+      <button aria-label="Grid view" aria-pressed="true"><svg><path d="g"/></svg><span class="segmented__label">Grid</span></button>
+      <button aria-label="List view" aria-pressed="false"><svg><path d="l"/></svg><span class="segmented__label">List</span></button>
+    </div>
+    <span class="tools__sep" aria-hidden="true"></span>
+    <button class="btn topbar__action" aria-label="Upload a file to this folder"><span class="topbar__action-mark"><svg><path d="u"/></svg></span><span class="topbar__action-label">Upload</span></button>
+    <button class="btn topbar__action is-danger" hidden><span>Empty bin</span></button>
+    <span class="todo-sync" role="status">Saving…</span>`;
+  return {
+    root,
+    select: root.querySelector("select")!,
+    list: root.querySelectorAll("button")[1] as HTMLButtonElement,
+    upload: root.querySelectorAll("button")[2] as HTMLButtonElement,
+  };
+}
+const shape = (rows: BarRow[]) =>
+  rows.map((r) => (r.kind === "item" ? `${r.label}${r.checked === true ? " ✓" : r.checked === false ? " ○" : ""}` : r.kind === "sep" ? "—" : `[${r.title}]`));
+
+describe("a bar folded into ⋯", () => {
+  it("keeps the bar's order and groups; choices are ticked; hidden tools and status lines stay out", () => {
+    expect(shape(barRows(bar().root))).toEqual(["[Sort]", "Recent ✓", "Title ○", "—", "[View]", "Grid ✓", "List ○", "—", "Upload"]);
+  });
+
+  it("forwards a choice to the bar's own control", () => {
+    const b = bar();
+    const changed = vi.fn();
+    b.select.addEventListener("change", changed);
+    const listClick = vi.fn();
+    b.list.addEventListener("click", listClick);
+    const rows = barRows(b.root);
+    const pick = (label: string) => (rows.find((r) => r.kind === "item" && r.label === label) as Extract<BarRow, { kind: "item" }>).onSelect();
+    pick("Title");
+    expect(b.select.value).toBe("title");
+    expect(changed).toHaveBeenCalledOnce();
+    pick("List");
+    expect(listClick).toHaveBeenCalledOnce();
+  });
+
+  it("brings a menu button's own rows in, never a menu inside a menu", () => {
+    const root = document.createElement("div");
+    const btn = document.createElement("button");
+    btn.setAttribute("aria-haspopup", "menu");
+    btn.textContent = "List options";
+    root.append(btn);
+    setMenuRows(btn, () => [{ kind: "section", title: "Actions" }, { kind: "item", label: "Rename list", onSelect: () => {} }]);
+    expect(shape(barRows(root))).toEqual(["[Actions]", "Rename list"]);
+  });
+
+  it("reads an in-page menu's rows when the button registered none", () => {
+    const root = document.createElement("div");
+    root.innerHTML = `<div class="menu"><button aria-haspopup="menu" aria-label="Download"></button>
+      <div class="menu__pop"><div><div class="menu__head">Whole notebook</div><button class="menu__item"><span>Supernote</span><kbd>.note</kbd></button></div></div></div>`;
+    const rows = barRows(root);
+    expect(shape(rows)).toEqual(["[Whole notebook]", "Supernote"]);
+    expect((rows[1] as Extract<BarRow, { kind: "item" }>).ext).toBe(".note");
+  });
+});

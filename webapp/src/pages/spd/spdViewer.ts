@@ -163,7 +163,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     leading: [{ el: back, focus: [back] }, { el: title }],
     view: [
       { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
-      { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle] },
+      { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle], fold: true },
     ],
     file: [
       { kind: "custom", key: "versions", el: versionsBtn, focus: [versionsBtn] },
