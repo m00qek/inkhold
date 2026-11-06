@@ -6,19 +6,19 @@
 import type { Theme } from "../core/types";
 import { readLocal, writeLocal } from "./storage";
 
-export const THEME_KEY = "sn.theme";
+const THEME_KEY = "sn.theme";
 
 function isTheme(value: unknown): value is Theme {
   return value === "light" || value === "dark";
 }
 
-export function readStoredTheme(): Theme | null {
+function readStoredTheme(): Theme | null {
   const raw = readLocal(THEME_KEY);
   return isTheme(raw) ? raw : null;
 }
 
 /** Persist an explicit choice. A storage failure must not break the toggle. */
-export function storeTheme(theme: Theme): void {
+function storeTheme(theme: Theme): void {
   writeLocal(THEME_KEY, theme);
 }
 

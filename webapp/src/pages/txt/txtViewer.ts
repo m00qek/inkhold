@@ -84,7 +84,7 @@ export class TxtLoadError extends Error {
 }
 
 /** A `.txt` is small, so a plain `fetch().text()`; preferences via guarded `ui/storage.ts`. */
-export function defaultTxtSeam(): TxtSeam {
+function defaultTxtSeam(): TxtSeam {
   return {
     async fetchText(url: string, signal: AbortSignal): Promise<string> {
       // `bytesBudget` adds the stall timeout to the caller's signal.

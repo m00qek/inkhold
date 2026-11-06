@@ -9,6 +9,7 @@ import { tokenPx } from "../../ui/sidePanel";
 import type { PageLayer } from "../../core/types";
 import type { ReaderCtx } from "./readerContext";
 import { DPR_CAP, ZOOM_SCALE } from "./reader";
+import { contentBox } from "../../ui/dom";
 
 export interface ReaderPaint {
   /** A `?v=` 404'd (STALE_PAGE): refetch the metadata and rebuild. */
@@ -103,10 +104,7 @@ export function createReaderPaint(ctx: ReaderCtx): ReaderPaint {
     // Size the page: fit the stage's content box (or a zoom step), clamp to
     // width. Its padding, not a constant: on a phone an open panel is a sheet the
     // stage pads itself clear of, so Fit lands the page above it.
-    const rect = ctx.stage.getBoundingClientRect();
-    const cs = getComputedStyle(ctx.stage);
-    const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) || 0;
-    const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) || 0;
+    const box = contentBox(ctx.stage);
     const aspect = page.width / page.height;
     // Docked side panels take their widths from the layout tokens; a phone's
     // are sheets below the page and take none.
@@ -115,13 +113,13 @@ export function createReaderPaint(ctx: ReaderCtx): ReaderPaint {
     const ocrW = beside && ctx.ocr.isOpen() ? tokenPx("--panel-w", 268) + gap : 0;
     const layersW = beside && ctx.panels.layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
     const pagesW = beside && st.pageIndexOpen ? tokenPx("--panel-w-narrow", 180) + gap : 0;
-    const maxW = Math.max(rect.width - padX - ocrW - layersW - pagesW, 80);
+    const maxW = Math.max(box.w - ocrW - layersW - pagesW, 80);
     // Fit keeps the whole page in view. A zoom step is a size, and a pinch a
     // factor of Fit; either may be wider than the stage, which then scrolls
     // sideways: clamping them too threw every step away wherever Fit already
     // filled the width (a phone, a tablet held upright), so handwriting could
     // never be enlarged there.
-    const fitH = Math.min(Math.min(Math.max(rect.height - padY, 120), 1000), maxW / aspect);
+    const fitH = Math.min(Math.min(Math.max(box.h, 120), 1000), maxW / aspect);
     let h = fitH;
     // Note mode only, so `zoom` is a note-ladder value.
     if (st.pinch !== null) h = fitH * st.pinch;

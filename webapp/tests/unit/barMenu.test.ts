@@ -45,7 +45,7 @@ describe("a bar folded into ⋯", () => {
     expect(listClick).toHaveBeenCalledOnce();
   });
 
-  it("brings a menu button's own rows in, never a menu inside a menu", () => {
+  it("brings a short menu button's own rows in, not as a menu inside a menu", () => {
     const root = document.createElement("div");
     const btn = document.createElement("button");
     btn.setAttribute("aria-haspopup", "menu");

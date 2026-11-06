@@ -15,7 +15,7 @@ export function pinAspect(tile: HTMLElement, aspect: number, row: boolean): void
 }
 
 /** ISO A4 portrait: a `.pdf` tile's shape until page 0 has rendered once. */
-export const A4_ASPECT = 210 / 297;
+const A4_ASPECT = 210 / 297;
 
 /**
  * Types whose tile shape is learned from the pixels (images, and `.pdf` page 0,

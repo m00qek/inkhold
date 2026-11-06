@@ -56,7 +56,7 @@ export const DEFAULT_TEXT_BUDGET = 2 * 1024 * 1024;
  * A non-tier-1 document may take at most a quarter of the budget, so at least
  * four coexist; in practice only imported books hit it.
  */
-export const PER_DOCUMENT_FRACTION = 0.25;
+const PER_DOCUMENT_FRACTION = 0.25;
 
 export function perDocumentCap(budgetBytes: number): number {
   return Math.floor(budgetBytes * PER_DOCUMENT_FRACTION);

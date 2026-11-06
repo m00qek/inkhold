@@ -51,7 +51,7 @@ export interface TodoPaint {
 }
 
 /** Shared by every row's `aria-describedby`: what the keyboard can do. */
-export const ROW_HELP_ID = "todo-row-help";
+const ROW_HELP_ID = "todo-row-help";
 
 const icon = (name: IconName, cls = "todo-ico"): HTMLElement => el("span", { class: cls, "aria-hidden": "true", html: svg(ICONS[name]) });
 

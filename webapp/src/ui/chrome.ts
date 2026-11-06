@@ -27,7 +27,7 @@ export function brandMark(px = 26): string {
   );
 }
 
-export function wordmark(): HTMLElement {
+function wordmark(): HTMLElement {
   return el(
     "p",
     { class: "wordmark" },
@@ -41,7 +41,7 @@ export function sheet(...content: (Node | string)[]): HTMLElement {
 }
 
 /** The floating light/dark toggle for the pre-auth views (no bitmaps to repaint). */
-export function themeToggle(): HTMLElement {
+function themeToggle(): HTMLElement {
   const btn = el("button", {
     class: "theme",
     type: "button",

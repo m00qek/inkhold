@@ -7,7 +7,7 @@
 // concern each: overlays, navigation, panels, painting, features, lifecycle.
 
 import { isPhone } from "../../ui/breakpoints";
-import { attachPinch } from "../../ui/pinchZoom";
+import { attachPinch, isFit, pinchLabel } from "../../ui/pinchZoom";
 import { el } from "../../ui/dom";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -172,19 +172,21 @@ export function createReader(deps: ReaderDeps): Reader {
   const linkLayer = createLinkLayer();
   const pageEl = el("div", { class: "page" }, pageCanvas, noteLayerCtl.el, linkLayer.el);
 
+  // Before the panels, whose × closes each through its switch.
+  const buttons = createReaderButtons();
   // Beside the page in `.page-wrap`, so opening it narrows the page.
   const ocrPanel = createSidePanel({
     ariaLabel: "Recognized text",
     icon: svg(VIEWER_IC.text, 1.7),
     label: "Recognized text",
     hookPrefix: "ocr",
-    onClose: () => closeWith(buttons.ocrToggle)(),
+    onClose: closeWith(buttons.ocrToggle),
   });
   // No `onOpacity`: `.note` layers carry no opacity (device-confirmed).
   const layersPanel = createLayersPanel({
     id: "note-layers-panel",
     hookPrefix: "note",
-    onClose: () => closeWith(buttons.layersToggle)(),
+    onClose: closeWith(buttons.layersToggle),
     onToggle: (id, visible) => {
       noteLayerCtl.setVisible(id, visible);
       // A toggle may enable the Original-view export group.
@@ -199,7 +201,7 @@ export function createReader(deps: ReaderDeps): Reader {
   // The shared page index, docked left and open by default.
   const pageIndexPanel = createPageIndex({
     id: "note-pages-panel",
-    onClose: () => closeWith(buttons.pagesToggle)(),
+    onClose: closeWith(buttons.pagesToggle),
     // The ruled-paper placeholder is note-specific, hence its own hook.
     stripHook: "note-filmstrip",
     onPick: (index) => ctx.nav.goToPage(index),
@@ -255,7 +257,6 @@ export function createReader(deps: ReaderDeps): Reader {
   // Icon-only by the user's explicit call, overriding the toolbar's icon+label
   // default for consequential actions; don't add the label back.
   const exportMenu = createViewerExportMenu({ toast: deps.toast, haspopup: "true" });
-  const buttons = createReaderButtons();
   // Bin-origin cluster (retention countdown + menu), swapped in for Move to bin.
   const binActions = createBinViewerActions({
     getMeta: () => st.meta,
@@ -367,13 +368,13 @@ export function createReader(deps: ReaderDeps): Reader {
   const { ocr, find, nav, panels } = ctx;
   // Pinch and double tap, on the note's page and on an image.
   const pinchTo = (k: number): void => {
-    if (k <= 1.001) {
+    if (isFit(k)) {
       st.pinch = null;
       st.zoom = FIT_PAGE;
       zoomStepper.set(FIT_PAGE);
     } else {
       st.pinch = k;
-      zoomStepper.set(`${k.toFixed(1)}×` as Zoom);
+      zoomStepper.show(pinchLabel(k));
     }
   };
   attachPinch({

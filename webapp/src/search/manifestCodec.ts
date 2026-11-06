@@ -183,7 +183,7 @@ export class Cursor {
 }
 
 /** The error names the wire version, not `index_version`, so nobody bumps the latter to fix a codec change. */
-export function readMagic(cursor: Cursor, magic: readonly number[], version: number): void {
+function readMagic(cursor: Cursor, magic: readonly number[], version: number): void {
   if (cursor.bytes.length < magic.length + 1) {
     throw new SearchWireError("search index payload is shorter than its header");
   }

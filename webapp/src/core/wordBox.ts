@@ -13,7 +13,7 @@ export interface BoxPx {
 }
 
 /** Slack for float noise when checking a scaled box against the page. */
-export const BOUNDS_SLACK_PX = 1;
+const BOUNDS_SLACK_PX = 1;
 
 /** A usable scale — a positive, finite number of pixels per millimetre. */
 export function isUsableScale(pxPerMm: number | null): pxPerMm is number {

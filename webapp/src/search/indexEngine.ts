@@ -128,7 +128,7 @@ function compileCore(url: string): Promise<WebAssembly.Module> {
 export type CoreLoader = () => Promise<SearchCoreExports>;
 
 /** A fresh instance of the cached module per call. */
-export function browserCoreLoader(url: string = DEFAULT_WASM_URL): CoreLoader {
+function browserCoreLoader(url: string = DEFAULT_WASM_URL): CoreLoader {
   return async () => {
     const mod = await compileCore(url);
     const instance = await WebAssembly.instantiate(mod, {});

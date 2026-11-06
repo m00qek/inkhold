@@ -21,10 +21,15 @@ export interface PinchTarget {
   setScale(k: number): void;
 }
 
-export const PINCH_MIN = 1;
-export const PINCH_MAX = 5;
+const PINCH_MIN = 1;
+const PINCH_MAX = 5;
 /** Where a double tap from Fit lands. */
-export const DOUBLE_TAP_SCALE = 2.5;
+const DOUBLE_TAP_SCALE = 2.5;
+
+/** Whether a factor the gesture settled on is Fit itself (the viewer goes back to its Fit rung). */
+export const isFit = (k: number): boolean => k <= 1.001;
+/** A pinch in the zoom stepper's readout: its factor of Fit. */
+export const pinchLabel = (k: number): string => `${k.toFixed(1)}×`;
 
 const TAP_SLOP = 12;
 const TAP_MS = 300;

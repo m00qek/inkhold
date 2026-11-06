@@ -11,7 +11,7 @@ import { placePageRect, type Size } from "./markGeometry";
  * sync. A refusal never throws: it costs the page its highlights, links or
  * outline, nothing more.
  */
-export function parseRecords<T>(
+function parseRecords<T>(
   json: string,
   one: (r: Record<string, unknown>) => T | null,
 ): T[] {

@@ -3,6 +3,7 @@
 import { FIT_PAGE, FIT_WIDTH } from "../viewer/viewerControls";
 import { VIEWER_DEBOUNCE_MS } from "../viewer/viewerChrome";
 import type { ReaderCtx } from "./readerContext";
+import { contentBox } from "../../ui/dom";
 
 export interface ReaderNav {
   /** What the URL should say the search is: nothing while the bar is shut. */
@@ -116,11 +117,8 @@ export function createReaderNav(ctx: ReaderCtx): ReaderNav {
     const nw = img.naturalWidth;
     const nh = img.naturalHeight;
     if (nw <= 0 || nh <= 0) return img.clientWidth;
-    const stage = ctx.files.el.getBoundingClientRect();
-    const cs = getComputedStyle(ctx.files.el);
-    const aw = stage.width - (parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) || 0);
-    const ah = stage.height - (parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) || 0);
-    return nw * Math.min(1, aw / nw, ah / nh);
+    const box = contentBox(ctx.files.el);
+    return nw * Math.min(1, box.w / nw, box.h / nh);
   }
 
   function sizeImage(): void {

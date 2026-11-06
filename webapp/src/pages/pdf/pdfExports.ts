@@ -39,7 +39,7 @@ const domCanvasFactory: CanvasFactory = (w, h) => {
 };
 
 /** The page's own layer id; the ORA writes it as `layer_0.png` and {@link inkAlpha} skips it. */
-export const DOCUMENT_LAYER_ID = 0;
+const DOCUMENT_LAYER_ID = 0;
 
 /**
  * A PDF page and its ink as one layered model. A `.mark` page has one real ink

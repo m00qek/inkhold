@@ -36,7 +36,7 @@ export type TemplateProvider = (noteId: Id, hash: Hash) => Promise<ImageBitmap |
  * would otherwise accumulate until `createImageBitmap` fails mid-export. Safe
  * because consumers draw the bitmap synchronously and never retain it.
  */
-export const templateCacheMax = 8;
+const templateCacheMax = 8;
 
 export function createTemplateProvider(
   api: Pick<Api, "getTemplate">,

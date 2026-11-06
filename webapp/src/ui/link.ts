@@ -5,7 +5,7 @@
 // to the browser.
 
 /** The main button, no modifier: the app's to handle; anything else opens a tab or window. */
-export function isPlainClick(e: MouseEvent): boolean {
+function isPlainClick(e: MouseEvent): boolean {
   return e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey;
 }
 

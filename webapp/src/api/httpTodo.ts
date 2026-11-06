@@ -18,7 +18,7 @@ type Raw = Partial<{
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 /** The server omits null optionals: absent is "none", never 0. */
-export function todoOf(r: Raw): TodoSnapshot {
+function todoOf(r: Raw): TodoSnapshot {
   return {
     enabled: r.enabled === true,
     lists: (r.lists ?? []).flatMap((l) => (typeof l.id === "string" ? [{ id: l.id, title: l.title ?? "", waiting: l.waiting === true }] : [])),

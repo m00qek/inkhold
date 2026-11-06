@@ -14,6 +14,7 @@ import { binNotePageHref, notePageHref } from "../../router";
 import { placePanelOverPage } from "../../render/markGeometry";
 import type { PdfWord } from "../../render/pdfWire";
 import type { PdfSession } from "../../render/pdfClient";
+import { contentBox } from "../../ui/dom";
 
 /**
  * Zoom steps relative to fit, since PDF page sizes vary about 7x (absolute steps
@@ -122,13 +123,9 @@ export function createPdfPageRenderer(opts: PdfPageRendererOptions): PdfPageRend
   let pageSizePtNow: { width: number; height: number } | null = null;
 
   function stageInner(): { w: number; h: number; gap: number } {
-    const rect = main.getBoundingClientRect();
     const cs = getComputedStyle(main);
-    const padX = parseFloat(cs.paddingLeft || "0") + parseFloat(cs.paddingRight || "0");
-    const padY = parseFloat(cs.paddingTop || "0") + parseFloat(cs.paddingBottom || "0");
     return {
-      w: rect.width <= 0 ? 0 : rect.width - padX,
-      h: rect.height - padY,
+      ...contentBox(main),
       gap: parseFloat(cs.columnGap || cs.gap || "0") || 0,
     };
   }

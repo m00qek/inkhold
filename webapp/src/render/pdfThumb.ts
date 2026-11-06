@@ -26,7 +26,7 @@ const SIZE_UNKNOWN = 1;
  * enough not to keep a second wasm instance around. Also recovers from a dead
  * worker, since a dead session drains the queue at once.
  */
-export const IDLE_RELEASE_MS = 15_000;
+const IDLE_RELEASE_MS = 15_000;
 
 /** The browser seams, injectable so the queue is testable without a worker. */
 export interface PdfThumbSeam {
@@ -35,7 +35,7 @@ export interface PdfThumbSeam {
   supported(): boolean;
 }
 
-export function defaultPdfThumbSeam(): PdfThumbSeam {
+function defaultPdfThumbSeam(): PdfThumbSeam {
   return { createSession: createPdfSession, supported: supportsWasmExceptions };
 }
 

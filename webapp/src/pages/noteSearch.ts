@@ -136,7 +136,7 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
 * Groups expansions per typed token. A two-word group is a distance tie
 * (alternatives, joined with "or"). Shared by the notice and the deep link.
 */
-export function groupExpansions(expansions: readonly Expansion[]): Map<string, string[]> {
+function groupExpansions(expansions: readonly Expansion[]): Map<string, string[]> {
   const groups = new Map<string, string[]>();
   for (const e of expansions) {
     const held = groups.get(e.typed);

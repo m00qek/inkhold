@@ -20,6 +20,8 @@ export interface ZoomStepper<V> {
   el: HTMLElement;
   focus: HTMLButtonElement[];
   set(value: V): void;
+  /** A readout off the ladder (a pinch's factor of Fit), until the next `set` or step. */
+  show(text: string): void;
 }
 
 export function createZoomStepper<V>(opts: {
@@ -46,7 +48,8 @@ export function createZoomStepper<V>(opts: {
   const set = (value: V): void => void (readout.textContent = opts.format(value));
   out.addEventListener("click", () => set(opts.onStep(-1)));
   plus.addEventListener("click", () => set(opts.onStep(1)));
-  return { el: pager, focus: [out, plus], set };
+  const show = (text: string): void => void (readout.textContent = text);
+  return { el: pager, focus: [out, plus], set, show };
 }
 
 /**

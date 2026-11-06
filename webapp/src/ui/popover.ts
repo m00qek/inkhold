@@ -6,7 +6,7 @@
 import { isPhone } from "./breakpoints";
 import { el } from "./dom";
 
-export const VIEWPORT_MARGIN = 8;
+const VIEWPORT_MARGIN = 8;
 const TRIGGER_GAP = 6;
 
 /**

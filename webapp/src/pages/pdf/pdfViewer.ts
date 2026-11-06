@@ -17,7 +17,7 @@ import type { VersionSubject, Viewer, ViewerDeps } from "../viewer/viewer";
 import { createPdfOutlinePanel } from "./pdfOutlinePanel";
 import { closeWith } from "../../ui/sidePanel";
 import { isPhone } from "../../ui/breakpoints";
-import { attachPinch } from "../../ui/pinchZoom";
+import { attachPinch, isFit, pinchLabel } from "../../ui/pinchZoom";
 import { createPdfThumbStrip } from "./pdfThumbStrip";
 import { createPdfPageRenderer, PDF_LAYER_ID, ZOOMS, type Zoom } from "./pdfPageRenderer";
 import { createLinkLayer } from "../linkLayer";
@@ -55,7 +55,7 @@ export interface PdfSeam {
   supported(): boolean;
 }
 
-export function defaultPdfSeam(): PdfSeam {
+function defaultPdfSeam(): PdfSeam {
   return { createSession: createPdfSession, supported: supportsWasmExceptions };
 }
 
@@ -196,12 +196,39 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     },
   });
 
+  // ---- panel switches ----
+  // Before the panels, whose × closes each through its switch.
+  const pagesToggle = el("button", {
+    class: "btn",
+    type: "button",
+    "aria-pressed": "false",
+    "aria-controls": "pdf-pages-panel",
+    "aria-label": "Pages",
+    title: "Pages",
+    html: svg(VIEWER_IC.pages, 1.8),
+  }) as HTMLButtonElement;
+  const outlineOpener = contextualOpener({
+    icon: VIEWER_IC.outline,
+    label: "Outline",
+    reason: "this document has none",
+    attrs: { "aria-pressed": "false", "aria-controls": "pdf-outline-panel" },
+  });
+  const layersToggle = el("button", {
+    class: "btn",
+    type: "button",
+    "aria-pressed": "false",
+    "aria-controls": "pdf-layers-panel",
+    "aria-label": "Annotations",
+    title: "Annotations",
+    html: svg(VIEWER_IC.layers, 1.8),
+  }) as HTMLButtonElement;
+
   // ---- annotations panel ----
   // The shared layers panel, with the PDF itself as the bottom row (`PDF_LAYER_ID`).
   const layersPanel = createLayersPanel({
     id: "pdf-layers-panel",
     hookPrefix: "pdf",
-    onClose: () => closeWith(layersToggle)(),
+    onClose: closeWith(layersToggle),
     onToggle: (id, visible) => {
       if (id === PDF_LAYER_ID) canvas.style.visibility = visible ? "" : "hidden";
       else markCtl.setVisible(id, visible);
@@ -236,19 +263,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     },
     inkRaster: (bytes, dst) => markCtl.inkRaster(bytes, dst),
     onPick: (i) => void ctx.nav.go(i),
-    onClose: () => closeWith(pagesToggle)(),
+    onClose: closeWith(pagesToggle),
   });
   const pagesPanel = thumbs.panel;
 
-  const pagesToggle = el("button", {
-    class: "btn",
-    type: "button",
-    "aria-pressed": "false",
-    "aria-controls": "pdf-pages-panel",
-    "aria-label": "Pages",
-    title: "Pages",
-    html: svg(VIEWER_IC.pages, 1.8),
-  }) as HTMLButtonElement;
 
   pagesToggle.addEventListener("click", () =>
     docks.set(docks.left() === "pages" ? null : "pages", docks.right(), "left"),
@@ -257,27 +275,12 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   // ---- outline ----
   const outlinePanel = createPdfOutlinePanel({
     onPick: (page) => void ctx.nav.go(page),
-    onClose: () => closeWith(outlineOpener.el)(),
-  });
-  const outlineOpener = contextualOpener({
-    icon: VIEWER_IC.outline,
-    label: "Outline",
-    reason: "this document has none",
-    attrs: { "aria-pressed": "false", "aria-controls": "pdf-outline-panel" },
+    onClose: closeWith(outlineOpener.el),
   });
   outlineOpener.el.addEventListener("click", () =>
     docks.set(docks.left() === "outline" ? null : "outline", docks.right(), "left"),
   );
 
-  const layersToggle = el("button", {
-    class: "btn",
-    type: "button",
-    "aria-pressed": "false",
-    "aria-controls": "pdf-layers-panel",
-    "aria-label": "Annotations",
-    title: "Annotations",
-    html: svg(VIEWER_IC.layers, 1.8),
-  }) as HTMLButtonElement;
   layersToggle.addEventListener("click", () => docks.set(docks.left(), !docks.right(), "right"));
 
   const docks = createPdfDocks({
@@ -531,13 +534,13 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     surface: () => (stage.isConnected ? stage : null),
     scale: () => renderer.relativeScale(),
     setScale: (k) => {
-      if (k <= 1.001) {
+      if (isFit(k)) {
         st.pinch = null;
         st.zoom = FIT_PAGE;
         zoomStepper.set(FIT_PAGE);
       } else {
         st.pinch = k;
-        zoomStepper.set(`${k.toFixed(1)}×` as Zoom);
+        zoomStepper.show(pinchLabel(k));
       }
       void renderer.paint();
     },

@@ -223,8 +223,8 @@ html {
   }
 
   /* Every viewer's bar (note, PDF, text, sketch): the top row keeps Back, the
-     title and the file's actions as icons; the reading controls (paging,
-     zoom, find, panels) become a bar at the bottom, where a thumb is. */
+     title, Find and ⋯ (the file's actions); paging and the panel switches
+     become a bar at the bottom, where a thumb is. */
   .reader__bar,
   .viewer__bar {
     /* Not a container here: a container would hold the bottom bar (fixed,
@@ -267,8 +267,8 @@ html {
   .viewer__bar .toolbar__sep {
     display: none;
   }
-  /* A viewer's occasional tools (Find, Recognized text, Layers, Pages,
-     Outline…) are behind ⋯ too: the bar keeps what reading uses. */
+  /* A viewer's occasional tools (`fold`: the zoom stepper, a pinch's
+     one-finger way; a PDF's Copy) are behind ⋯ too. */
   .toolbar [data-fold] {
     display: none;
   }

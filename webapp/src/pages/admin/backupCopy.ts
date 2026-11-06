@@ -70,7 +70,7 @@ export function backupsCard(b: AdminBackups, nowMs: number = Date.now()): { valu
 
 export type RunStatus = "ok" | "failed" | "check-failed";
 
-export function runStatus(r: BackupRun): RunStatus {
+function runStatus(r: BackupRun): RunStatus {
   if (r.lastError !== null) return "failed";
   return r.verifyError !== null ? "check-failed" : "ok";
 }

@@ -24,17 +24,17 @@ export type RangeFetcher = (start: number, end: number) => Promise<RangeResult>;
  * 25.5 MB; 32 KB: 65 req, 3.8 MB). It equals `INK_STREAM_CHUNK` in
  * `pdf_shim.c`, so one MuPDF read spans at most two blocks (one coalesced request).
  */
-export const BLOCK_SIZE = 32 * 1024;
+const BLOCK_SIZE = 32 * 1024;
 
 /** 32 MB of blocks, LRU; an evicted block is a miss, not an error. */
-export const CACHE_CAP_BYTES = 32 * 1024 * 1024;
+const CACHE_CAP_BYTES = 32 * 1024 * 1024;
 
 /**
  * Blocks prefetched past a read that continues the previous one. Read-ahead on
  * every read doubled requests on real documents; sequential-only covers large
  * image streams.
  */
-export const READ_AHEAD_BLOCKS = 4;
+const READ_AHEAD_BLOCKS = 4;
 
 /**
  * The head and tail windows fetched at open, where the header, trailer and xref

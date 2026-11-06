@@ -132,7 +132,7 @@ export function inkRecordIndices(records: readonly SnpgRecord[]): number[] {
 }
 
 /** Fallback names matching the device's own defaults. */
-export const SLOT_NAMES: Record<LayerSlot, string> = {
+const SLOT_NAMES: Record<LayerSlot, string> = {
   main: "Main Layer",
   layer1: "Layer 1",
   layer2: "Layer 2",

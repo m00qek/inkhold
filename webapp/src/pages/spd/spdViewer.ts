@@ -3,7 +3,7 @@
 // protobuf layer tree (see `parsers/spd/spd-format.md`). Each layer gets its own
 // base-resolution canvas drawn once; opacity, visibility and zoom are pure CSS.
 
-import { el } from "../../ui/dom";
+import { contentBox, el } from "../../ui/dom";
 import { bytesBudget } from "../../api/client";
 import type { NoteMeta, NoteSummary } from "../../core/types";
 import { formatBytes, rawFileUrl, historyFileUrl } from "../../core/fileKind";
@@ -15,7 +15,7 @@ import { backWord, createViewerHeader, createViewerBody, createVersionBanner } f
 import { createBinViewerActions } from "../../ui/binViewerActions";
 import { createLayersPanel, type PanelLayer } from "../layersPanel";
 import { closeWith } from "../../ui/sidePanel";
-import { attachPinch } from "../../ui/pinchZoom";
+import { attachPinch, isFit, pinchLabel } from "../../ui/pinchZoom";
 import { exportSpdPng, exportSpdOra, type ExportWhich } from "./spdExport";
 import type { ExportLayer, LayeredExportModel } from "../../export/layered";
 import { parseSpd, spdBbox, spdBaseDims, browserLoader, browserDecodeTile, REFERENCE_LAYER_ID, TILE, DEFAULT_WASM_URL, type SpdDecoderExports, type SpdDoc, type SpdLayer, type SpdBbox, type TileBitmap } from "../../render/spdDecode";
@@ -75,11 +75,10 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
   }) as HTMLButtonElement;
 
   // Own readout class: a shared `.zoom` would match several mounted viewers.
-  // A rung's index, or a pinch's own readout.
-  const zoomStepper = createZoomStepper<number | string>({
+  const zoomStepper = createZoomStepper({
     readoutClass: "spd-zoom",
     initial: 0,
-    format: (i) => (typeof i === "string" ? i : ZOOMS[i]!),
+    format: (i: number) => ZOOMS[i]!,
     onStep: (dir) => {
       // A step leaves a pinch for the ladder, from the rung it was on.
       pinch = null;
@@ -315,10 +314,9 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
   function fitScale(): number {
     const { w, h } = baseDims();
     // The content box: on a phone the stage pads itself clear of the layers sheet.
-    const rect = stage.getBoundingClientRect();
-    const cs = getComputedStyle(stage);
-    const availW = Math.max(rect.width - (parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) || 48), 64);
-    const availH = Math.max(rect.height - (parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) || 48), 64);
+    const box = contentBox(stage);
+    const availW = Math.max(box.w, 64);
+    const availH = Math.max(box.h, 64);
     return Math.min(1, availW / w, availH / h) || 1;
   }
 
@@ -355,13 +353,13 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     surface: () => (doc ? canvasWrap : null),
     scale: () => zoomScale() / (fitScale() || 1),
     setScale: (k) => {
-      if (k <= 1.001) {
+      if (isFit(k)) {
         pinch = null;
         zoomIdx = 0;
         zoomStepper.set(0);
       } else {
         pinch = k;
-        zoomStepper.set(`${k.toFixed(1)}×`);
+        zoomStepper.show(pinchLabel(k));
       }
       applyZoom();
     },

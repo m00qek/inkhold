@@ -12,8 +12,8 @@ export class HttpError extends Error {
  * Per-request transfer deadline: a stalled block must end in a load error, not
  * "Opening…" forever.
  */
-export const BLOCK_TIMEOUT_MS = 120_000;
-export const WHOLE_TIMEOUT_MS = 300_000;
+const BLOCK_TIMEOUT_MS = 120_000;
+const WHOLE_TIMEOUT_MS = 300_000;
 
 /** The caller's signal plus a deadline. Call `done()` on every path, or the timer leaks. */
 export function budget(signal: AbortSignal, ms: number): { signal: AbortSignal; done: () => void } {

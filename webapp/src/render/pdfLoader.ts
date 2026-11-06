@@ -239,11 +239,6 @@ export function browserLoader(
     })());
 }
 
-const defaultPdfDecoder = browserLoader(DEFAULT_WASM_URL);
-export function loadPdfDecoder(): Promise<PdfDecoderExports> {
-  return defaultPdfDecoder();
-}
-
 // ---- typed wrapper ----
 
 /** The last MuPDF message, or a fallback. Read immediately after a failure. */

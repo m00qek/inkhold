@@ -61,7 +61,7 @@ export interface LocalSearch {
  * document about the words still beats a note that mentions them once.
  * Unknown (offline) is not penalised.
  */
-export function tierWeight(tier: Tier | null): number {
+function tierWeight(tier: Tier | null): number {
   if (tier === "other") return 0.6;
   if (tier === "marked") return 0.8;
   return 1;
@@ -77,7 +77,7 @@ export function density(hit: Pick<LocalHit, "pages" | "pageCount">): number {
   return hit.pages.length / (size + 2);
 }
 
-export function relevance(hit: LocalHit): number {
+function relevance(hit: LocalHit): number {
   return tierWeight(hit.tier) * density(hit);
 }
 
