@@ -58,6 +58,18 @@ test.describe("a folder is a place", () => {
     await expect(currentNavItem(page)).toHaveText(/^Projects/);
   });
 
+  // Regression: the listing's repaint skips an open bin (so a restore can't close
+  // it), and nothing else closed it, so a folder not yet loaded never showed.
+  test("leaving the bin for a folder not yet loaded shows the folder", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/bin");
+    await expect(page.locator("main h1")).toHaveText("Recycle bin");
+    await page.goto("/#/folder/projects");
+    await expect(page.locator("main h1")).toHaveText("Projects");
+    await expect(page.locator("#crumbs")).toHaveText("Library/Note/Projects");
+    await expect(page.locator("#gallery .card")).toHaveCount(2);
+  });
+
   test("Back and Forward step through folders", async ({ page }) => {
     await signedIn(page);
     await page.goto("/");

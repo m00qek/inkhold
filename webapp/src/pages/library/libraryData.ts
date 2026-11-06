@@ -93,6 +93,10 @@ export function createLibraryData(ctx: LibraryCtx): LibraryData {
       // Cache miss: drop `listing` now (it describes the old folder, and any repaint
       // meanwhile would mix the two); only the paint waits.
       st.listing = undefined;
+      // Leaving the bin: its repaint is how it closes, and the listing's own
+      // repaint skips an open bin (so a restore inside it can't close it).
+      // Without this, a folder not yet cached never replaced the bin.
+      if (ctx.bin.isOpen()) ctx.render.renderGallery();
       scheduleLoadingPaint(id);
     }
     await refetch(id, cached);
