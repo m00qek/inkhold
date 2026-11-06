@@ -84,8 +84,10 @@
   --desk: #e9e6dc;
   --sheet: #fcfbf7;
   --ink: #1c1b17;
-  --ink-soft: #6a675c;
-  --ink-faint: #97927f;
+  /* Both at least 4.5:1 on every surface they sit on (sheet, desk, the
+     reader's bar, the bin's note), with a visible step between them. */
+  --ink-soft: #4f4c43;
+  --ink-faint: #666253;
   --line: #cbc6b6; /* the underline affordance under fields, hairline borders */
   --rule: rgba(28, 27, 23, 0.05); /* the sheet's faint horizontal rules */
   /* The list separator, between `--rule` (1.10:1) and `--line` (1.65:1) at 1.33:1. */
@@ -113,7 +115,7 @@
     --sheet: #17171a;
     --ink: #e9e6dd;
     --ink-soft: #a7a396;
-    --ink-faint: #726f64;
+    --ink-faint: #838073; /* 4.5:1 on the darkest surface */
     --line: rgba(233, 230, 221, 0.18);
     --rule: rgba(233, 230, 221, 0.055);
     --row-rule: rgba(233, 230, 221, 0.15);
@@ -143,7 +145,7 @@
   --sheet: #17171a;
   --ink: #e9e6dd;
   --ink-soft: #a7a396;
-  --ink-faint: #726f64;
+  --ink-faint: #838073;
   --line: rgba(233, 230, 221, 0.18);
   --rule: rgba(233, 230, 221, 0.055);
   --row-rule: rgba(233, 230, 221, 0.15);

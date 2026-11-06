@@ -37,7 +37,8 @@ function compare(found: Findings, was: Record<string, number>): string[] {
 
 for (const v of VARIANTS) {
   test.describe(`semantics, ${v.name}`, () => {
-    test.use({ viewport: { width: v.width, height: v.height }, colorScheme: v.dark ? "dark" : "light", hasTouch: v.name === "phone" });
+    // No motion: axe would measure a card's colour halfway through its fade-in.
+    test.use({ viewport: { width: v.width, height: v.height }, colorScheme: v.dark ? "dark" : "light", hasTouch: v.name === "phone", reducedMotion: "reduce" });
     for (const s of SCREENS) {
       test(s.name, async ({ page }) => {
         await signedIn(page);
