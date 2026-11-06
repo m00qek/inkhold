@@ -287,7 +287,7 @@ export function cardButton(page: Page, name: string | RegExp): Locator {
  * gallery repaint. Use before clicking a category in a test that measures.
  */
 export async function railSettled(page: Page): Promise<void> {
-  await page.getByRole("navigation", { name: "Folders" }).and(page.locator('[aria-busy="false"]')).waitFor();
+  await page.getByRole("group", { name: "Folders" }).and(page.locator('[aria-busy="false"]')).waitFor();
 }
 
 /**

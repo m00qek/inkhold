@@ -82,7 +82,7 @@ const POLL_MS = 30_000;
 const FRESH_MS = 60_000;
 
 export function createTodoPage(host: TodoHost): TodoPage {
-  const root = el("section", { class: "todo", "aria-labelledby": "todo-title", hidden: true });
+  const root = el("section", { class: "todo", "aria-label": "To-Do", hidden: true });
   host.content.append(root);
 
   const menus = createTodoMenus();

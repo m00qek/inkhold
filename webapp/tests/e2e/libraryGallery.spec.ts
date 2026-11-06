@@ -38,7 +38,7 @@ test.describe("library rail + gallery", () => {
     test("singular halves, and the root's folder-only case", async ({ page }) => {
       await signedIn(page);
       await page.goto("/");
-      await expect(page.getByRole("navigation", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
+      await expect(page.getByRole("group", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
 
       // Six categories plus promoted NOTE/Scratch, Archive and Files.
       await expect(head(page)).toHaveText("9 folders");

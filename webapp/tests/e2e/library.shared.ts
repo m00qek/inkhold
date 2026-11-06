@@ -15,6 +15,6 @@ export async function openCategory(page: Page, name: string): Promise<void> {
 /** A rail anchor/subfolder located by its exact visible name (ignoring count). */
 export function navItem(page: Page, name: string): Locator {
   return page
-    .getByRole("navigation", { name: "Folders" })
+    .getByRole("navigation", { name: "Library" })
     .locator(".nav__item", { has: page.locator(".nav__name", { hasText: new RegExp(`^${name}$`) }) });
 }

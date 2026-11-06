@@ -7,7 +7,7 @@ import { ICONS, svg } from "./icons";
 import { getPortalRoot, placePop, openPopover, clearPopover, closeOpenPopover, type OpenPopover } from "./popover";
 
 const MORE_GLYPH =
-  '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>';
+  '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>';
 
 export interface MenuItemSpec {
   label: string;

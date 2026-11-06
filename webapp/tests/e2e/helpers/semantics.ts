@@ -38,10 +38,11 @@ async function axe(page: Page): Promise<Findings> {
 function structure(opts: CheckOptions): Record<string, string[]> {
   const found: Record<string, string[]> = {};
   const add = (rule: string, e: Element | string) => {
-    const d =
+    const d0 =
       typeof e === "string"
         ? e
         : (e.tagName.toLowerCase() + (e.id ? `#${e.id}` : "") + (typeof e.className === "string" && e.className.trim() ? "." + e.className.trim().split(/\s+/).slice(0, 2).join(".") : "")).slice(0, 80);
+    const d = typeof e === "string" ? d0 : `${d0} "${(e.textContent ?? "").trim().slice(0, 16)}"`;
     (found[rule] ??= []).push(d);
   };
   const shown = (e: Element) => {
@@ -56,7 +57,7 @@ function structure(opts: CheckOptions): Record<string, string[]> {
   const mains = [...document.querySelectorAll("main,[role=main]")].filter(inAccessibilityTree);
   if (mains.length !== 1) add("one-main", `${mains.length} main landmarks`);
   if (![...document.querySelectorAll("header,[role=banner]")].some((e) => inAccessibilityTree(e) && !e.closest("main,article,section,aside,nav,dialog"))) add("banner-landmark", "no top-level <header>");
-  if (![...document.querySelectorAll("search,[role=search]")].some(inAccessibilityTree) && document.querySelector("input[type=search]")) add("search-landmark", "a search box outside <search>");
+  for (const e of document.querySelectorAll("input[type=search]")) if (shown(e) && !e.closest("search,[role=search]")) add("search-landmark", e);
   for (const e of document.querySelectorAll("aside,[role=complementary]")) if (inAccessibilityTree(e) && e.querySelector("nav")) add("nav-in-aside", e);
 
   // Live regions: small announcers only, never a whole screen.
@@ -118,6 +119,6 @@ function structure(opts: CheckOptions): Record<string, string[]> {
 export async function checkPage(page: Page, opts: CheckOptions): Promise<Findings> {
   const out = await axe(page);
   const mine = await page.evaluate(structure, opts);
-  for (const [rule, els] of Object.entries(mine)) out[rule] = { count: els.length, samples: els.slice(0, 4) };
+  for (const [rule, els] of Object.entries(mine)) out[rule] = { count: els.length, samples: els.slice(0, process.env.SEMANTICS_SHOW ? 100 : 4) };
   return out;
 }

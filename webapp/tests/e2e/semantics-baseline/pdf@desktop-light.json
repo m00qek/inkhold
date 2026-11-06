@@ -1,19 +1,8 @@
 {
  "axe/color-contrast": 5,
- "axe/landmark-main-is-top-level": 1,
- "axe/landmark-no-duplicate-main": 1,
- "axe/landmark-unique": 1,
  "axe/page-has-heading-one": 1,
- "banner-landmark": 1,
- "broken-reference": 1,
- "icon-not-hidden": 21,
- "live-region-too-big": 6,
- "nav-in-aside": 1,
- "navigates-by-button": 8,
+ "navigates-by-button": 12,
  "one-h1": 1,
- "one-main": 1,
  "own-title": 1,
- "search-landmark": 1,
- "skip-link": 1,
  "target-size": 1
 }

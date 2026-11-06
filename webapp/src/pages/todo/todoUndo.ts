@@ -16,7 +16,8 @@ export interface UndoToast {
 export function createUndoToast(onUndo: () => void): UndoToast {
   const msg = el("span", { class: "bin-toast__msg" });
   const undo = el("button", { class: "bin-toast__action", type: "button", text: "Undo" });
-  const bar = el("div", { class: "bin-toast todo-undo", role: "status", "aria-live": "polite" }, el("span", { class: "bin-toast__lines" }, msg), undo);
+  // The message is announced; the Undo beside it is not.
+  const bar = el("div", { class: "bin-toast todo-undo" }, el("span", { class: "bin-toast__lines", role: "status" }, msg), undo);
   undo.addEventListener("click", onUndo);
   let gone: ReturnType<typeof setTimeout> | undefined;
 

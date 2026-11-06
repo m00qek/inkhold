@@ -16,7 +16,10 @@ let portalRoot: HTMLElement | null = null;
 export function getPortalRoot(): HTMLElement {
   if (!portalRoot || !portalRoot.isConnected) {
     portalRoot = el("div", { class: "menu-portal" });
-    document.body.appendChild(portalRoot);
+    // Inside the page's <main> where there is one, so a menu is never content
+    // outside every landmark; it is `position: fixed`, so where it sits in
+    // the tree doesn't move it.
+    (document.querySelector("main") ?? document.body).appendChild(portalRoot);
   }
   return portalRoot;
 }

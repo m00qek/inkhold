@@ -8,7 +8,7 @@ test.describe("library rail + gallery", () => {
     await signedIn(page);
     await page.goto("/");
 
-    await expect(page.getByRole("navigation", { name: "Folders" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Library" })).toBeVisible();
 
     for (const label of ["Note", "Document", "MyStyle", "Export", "Screenshot", "Inbox"]) {
       const item = navItem(page, label);
@@ -197,7 +197,7 @@ test.describe("library rail + gallery", () => {
       await expect(page.locator("#gallery .card--category")).toHaveCount(6);
       await expect(page.locator("#gallery").getByText("NOTE", { exact: true })).toHaveCount(0);
 
-      await expect(page.getByRole("navigation", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
+      await expect(page.getByRole("group", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
       await expect(page.locator("#gallery .card--category")).toHaveCount(6);
       await expect(page.locator("#gallery").getByText("NOTE", { exact: true })).toHaveCount(0);
     });
@@ -227,7 +227,7 @@ test.describe("library rail + gallery", () => {
       });
       await page.goto("/?real");
       // Until the walk lands an unresolved category is unknown, not empty.
-      await expect(page.getByRole("navigation", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
+      await expect(page.getByRole("group", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
 
       const before = treeCalls.length;
       await openCategory(page, "Export");
@@ -273,7 +273,7 @@ test.describe("library rail + gallery", () => {
     test("the root gallery lists the categories, not the raw containers", async ({ page }) => {
       await signedIn(page);
       await page.goto("/");
-      await expect(page.getByRole("navigation", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
+      await expect(page.getByRole("group", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
 
       const titles = page.locator("#gallery .card--folder .card__title");
       const names = await titles.allTextContents();
@@ -291,7 +291,7 @@ test.describe("library rail + gallery", () => {
     test("a user folder made inside a container is still reachable from the root", async ({ page }) => {
       await signedIn(page);
       await page.goto("/");
-      await expect(page.getByRole("navigation", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
+      await expect(page.getByRole("group", { name: "Folders" })).toHaveAttribute("aria-busy", "false");
 
       // Flattening NOTE without promoting `NOTE/Scratch` would make it unreachable.
       const scratch = page.locator(".card--folder", { hasText: "Scratch" });
@@ -315,7 +315,7 @@ test.describe("library rail + gallery", () => {
       }
 
       await page.goto("/#/folder/dir-note");
-      await expect(page.getByRole("navigation", { name: "Folders" })).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "Library" })).toBeVisible();
       await expect(page.locator("#gallery")).toBeVisible();
       await expect(page.getByRole("region", { name: "Reader" })).toBeHidden();
     });

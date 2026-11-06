@@ -100,7 +100,7 @@ test.describe("non-.note files", () => {
     await page.goto("/");
 
     await page
-      .getByRole("navigation", { name: "Folders" })
+      .getByRole("navigation", { name: "Library" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Screenshot$/ }) })
       .click();
 
@@ -113,7 +113,7 @@ test.describe("non-.note files", () => {
     await expect(shot.locator(".thumb canvas")).toHaveCount(0);
 
     await page
-      .getByRole("navigation", { name: "Folders" })
+      .getByRole("navigation", { name: "Library" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Document$/ }) })
       .click();
     const note = card(page, "Attention Is All You Need");

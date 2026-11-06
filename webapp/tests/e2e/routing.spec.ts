@@ -12,7 +12,7 @@ import { fakeFileHash } from "../../src/api/fake";
 /** A rail anchor/subfolder/destination located by its exact visible name. */
 function navItem(page: Page, name: string): Locator {
   return page
-    .getByRole("navigation", { name: "Folders" })
+    .getByRole("navigation", { name: "Library" })
     .locator(".nav__item", { has: page.locator(".nav__name", { hasText: new RegExp(`^${name}$`) }) });
 }
 
@@ -22,7 +22,7 @@ function reader(page: Page): Locator {
 
 /** The row the rail is currently marking as where you are. */
 function currentNavItem(page: Page): Locator {
-  return page.getByRole("navigation", { name: "Folders" }).locator('.nav__item[aria-current="true"]');
+  return page.getByRole("navigation", { name: "Library" }).locator('.nav__item[aria-current="true"]');
 }
 
 const searchBox = (page: Page) => page.getByRole("searchbox", { name: "Search notes" });

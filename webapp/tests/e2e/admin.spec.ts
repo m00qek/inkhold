@@ -125,7 +125,7 @@ test.describe("admin: the topbar", () => {
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeHidden();
 
     await page
-      .getByRole("navigation", { name: "Folders" })
+      .getByRole("navigation", { name: "Library" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Note$/ }) })
       .click();
     await expect(page.locator(".sn-root")).not.toHaveClass(/is-destination/);

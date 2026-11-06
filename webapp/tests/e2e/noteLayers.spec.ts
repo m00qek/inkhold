@@ -233,7 +233,7 @@ test.describe(".note layers panel (real decoder)", () => {
     await reader(page).getByRole("button", { name: "Move to bin" }).click();
     await expect(page.locator(".bin-toast")).toContainText("Moved");
     await page
-      .getByRole("navigation", { name: "Folders" })
+      .getByRole("navigation", { name: "Library" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Recycle bin$/ }) })
       .click();
     await expect(page.locator(".bin")).toBeVisible();

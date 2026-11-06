@@ -192,8 +192,8 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     crumbs,
     el(
       "div",
-      { class: "search" },
-      el("span", { class: "search__glyph-wrap", html: `<svg class="search__glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">${ICONS.search}</svg>` }),
+      { class: "search", role: "search" },
+      el("span", { class: "search__glyph-wrap", html: `<svg class="search__glyph" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">${ICONS.search}</svg>` }),
       searchInput,
       // `aria-hidden`: the placeholder already says it.
       el("span", { class: "search__ocr", "aria-hidden": "true", text: "OCR" }),

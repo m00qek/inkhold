@@ -115,7 +115,7 @@ test.describe("reader", () => {
     const toggle = (page: import("@playwright/test").Page) =>
       page.getByRole("button", { name: "Recognized text" });
     const panel = (page: import("@playwright/test").Page) =>
-      page.getByRole("complementary", { name: "Recognized text" });
+      page.getByRole("region", { name: "Recognized text" });
 
     test("toggling shows and hides the panel and tracks aria-pressed", async ({ page }) => {
       await signedIn(page);
@@ -155,7 +155,7 @@ test.describe("reader", () => {
 
       // Close the default-open page index, so the right panel is the only variable.
       await page.getByRole("button", { name: "Pages" }).click();
-      await expect(page.getByRole("complementary", { name: "Pages" })).toBeHidden();
+      await expect(page.getByRole("region", { name: "Pages" })).toBeHidden();
 
       const pageEl = page.locator(".page");
       const wide = await pageEl.evaluate((el: HTMLElement) => el.offsetWidth);
@@ -216,7 +216,7 @@ test.describe("reader", () => {
   });
 
   test.describe("the page index side panel", () => {
-    const pagesPanel = (page: Page) => page.getByRole("complementary", { name: "Pages" });
+    const pagesPanel = (page: Page) => page.getByRole("region", { name: "Pages" });
     const pagesToggle = (page: Page) => page.locator(".reader__bar").getByRole("button", { name: "Pages" });
 
     test("rides the shared side-panel primitive, docked LEFT, open by default", async ({ page }) => {
@@ -239,7 +239,7 @@ test.describe("reader", () => {
       const pageBox = (await page.locator(".page").boundingBox())!;
       expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(pageBox.x + 2);
 
-      await expect(page.getByRole("complementary", { name: "Recognized text" })).toBeHidden();
+      await expect(page.getByRole("region", { name: "Recognized text" })).toBeHidden();
       await expect(
         page.locator(".reader__bar").getByRole("button", { name: "Recognized text" }),
       ).toHaveAttribute("aria-pressed", "false");
@@ -274,7 +274,7 @@ test.describe("reader", () => {
 
       // A right dock on a stage too narrow for both collapses the left page index.
       await page.locator(".reader__bar").getByRole("button", { name: "Recognized text" }).click();
-      await expect(page.getByRole("complementary", { name: "Recognized text" })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Recognized text" })).toBeVisible();
       await expect(pagesPanel(page)).toBeHidden();
       await expect(pagesToggle(page)).toHaveAttribute("aria-pressed", "false");
     });

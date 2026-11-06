@@ -55,7 +55,7 @@ const usbFailing = (): Run => ({
   verifyError: null,
 });
 
-const notice = (page: Page) => page.getByRole("complementary", { name: "Backups" });
+const notice = (page: Page) => page.getByRole("region", { name: "Backups" });
 
 async function unlock(page: Page): Promise<void> {
   await page.getByLabel("Password", { exact: true }).fill(PASSWORD);

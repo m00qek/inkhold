@@ -13,7 +13,7 @@ import { fakeFileHash } from "../../src/api/fake";
 /** The bin's rail row, by its exact name (ignoring the count badge). */
 export function binRow(page: Page) {
   return page
-    .getByRole("navigation", { name: "Folders" })
+    .getByRole("navigation", { name: "Library" })
     .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Recycle bin$/ }) });
 }
 
@@ -90,7 +90,7 @@ export function reader(page: Page): Locator {
  *  row's delete is the "…" menu's Move to bin item. */
 export async function trashFromFiles(page: Page, name: string): Promise<void> {
   await page
-    .getByRole("navigation", { name: "Folders" })
+    .getByRole("navigation", { name: "Library" })
     .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Files$/ }) })
     .click();
   await page.getByRole("button", { name: "List view" }).click();

@@ -148,7 +148,7 @@ test.describe("universal search", () => {
     await signedIn(page);
     await page.goto("/");
     await railSettled(page);
-    await page.getByRole("navigation", { name: "Folders" }).getByText("Document", { exact: true }).click();
+    await page.getByRole("navigation", { name: "Library" }).getByText("Document", { exact: true }).click();
     await expect(cardButton(page, /Attention Is All You Need/)).toBeVisible();
 
     await searchBox(page).fill("Beta");
@@ -442,7 +442,7 @@ test.describe("universal search", () => {
     await signedIn(page);
     await page.goto("/");
     await railSettled(page);
-    await page.getByRole("navigation", { name: "Folders" }).getByText("Note", { exact: true }).click();
+    await page.getByRole("navigation", { name: "Library" }).getByText("Note", { exact: true }).click();
     const card = cardButton(page, /Weekly review/);
     await expect(card).toBeVisible();
 
@@ -461,7 +461,7 @@ test.describe("universal search", () => {
       await signedIn(page);
       await page.goto("/");
       await railSettled(page);
-      await page.getByRole("navigation", { name: "Folders" }).getByText("Note", { exact: true }).click();
+      await page.getByRole("navigation", { name: "Library" }).getByText("Note", { exact: true }).click();
       await expect(page.locator("#crumbs")).toContainText("Note");
 
       await searchBox(page).fill("Aurora");

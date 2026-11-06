@@ -85,7 +85,7 @@ test.describe("recycle bin", () => {
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeHidden();
 
     await page
-      .getByRole("navigation", { name: "Folders" })
+      .getByRole("navigation", { name: "Library" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Note$/ }) })
       .click();
     await expect(page.locator(".sn-root")).not.toHaveClass(/is-destination/);
@@ -279,7 +279,7 @@ test.describe("recycle bin", () => {
     await page.goto("/");
     await railSettled(page);
     await page
-      .getByRole("navigation", { name: "Folders" })
+      .getByRole("navigation", { name: "Library" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Note$/ }) })
       .click();
     await page.getByRole("button", { name: "List view" }).click();

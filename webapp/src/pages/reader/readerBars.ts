@@ -12,7 +12,8 @@ export interface ReaderVersionBanner {
 
 /** History mode only; Restore is the one mutating action on this surface. */
 export function createVersionBanner(): ReaderVersionBanner {
-  const versionBannerText = el("span", { class: "banner__text version-banner__text" });
+  // The text is what is announced; the button beside it is not.
+  const versionBannerText = el("span", { class: "banner__text version-banner__text", role: "status" });
   const restoreVersionBtn = el("button", {
     class: "btn banner__act version-banner__restore",
     type: "button",
@@ -20,7 +21,7 @@ export function createVersionBanner(): ReaderVersionBanner {
   }) as HTMLButtonElement;
   const versionBanner = el(
     "div",
-    { class: "banner version-banner", role: "status", hidden: true },
+    { class: "banner version-banner", hidden: true },
     el("span", { class: "banner__badge version-banner__badge", "aria-hidden": "true", html: svg(VIEWER_IC.restore, 1.6) }),
     versionBannerText,
     restoreVersionBtn,

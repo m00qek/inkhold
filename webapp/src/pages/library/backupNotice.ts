@@ -36,8 +36,9 @@ export function createBackupNotice(deps: BackupNoticeDeps): BackupNoticeHandle {
   const text = el("span", { class: "banner__text" });
   const open = el("button", { class: "btn banner__act", type: "button", text: "Open backups" });
   open.addEventListener("click", () => deps.onOpen());
+  // A named region in the header: a notice, not content beside the page.
   const root = el(
-    "aside",
+    "section",
     { class: "banner backup-notice", "aria-label": "Backups", hidden: true },
     el("span", { class: "banner__badge", "aria-hidden": "true", html: svg(ICONS.archive, 1.6) }),
     text,

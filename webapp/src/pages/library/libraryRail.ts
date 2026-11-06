@@ -61,7 +61,7 @@ export function installLibraryRail(ctx: LibraryCtx): void {
     };
   }
   // `aria-busy` until the walk lands: counts are provisional.
-  const nav = el("nav", { class: "nav", "aria-label": "Folders", "aria-busy": "true" });
+  const nav = el("div", { class: "nav", role: "group", "aria-label": "Folders", "aria-busy": "true" });
 
   /** The shell keeps only where the user is; the tree lives in `folderCache.ts`. */
   ctx.folderCache = createFolderCache({
@@ -134,9 +134,10 @@ export function installLibraryRail(ctx: LibraryCtx): void {
 
   // The storage meter stays under the nameplate: room for the file you're about
   // to drop should be visible at a glance.
+  // The rail is the app's navigation landmark: the places, and who you are.
   ctx.sidebar = el(
-    "aside",
-    { class: "rail" },
+    "nav",
+    { class: "rail", "aria-label": "Library" },
     el(
       "div",
       { class: "brand" },

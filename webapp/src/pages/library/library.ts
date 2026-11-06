@@ -111,6 +111,19 @@ function readStoredSort(): SortKey {
   return raw === "title" || raw === "pages" || raw === "recent" ? raw : "recent";
 }
 
+/**
+ * "Skip to content", the first thing a keyboard reaches: past the rail and the
+ * bar. Not followed as a link: the hash is the router's.
+ */
+function skipLink(target: HTMLElement): HTMLElement {
+  const a = el("a", { class: "skip-link", href: "#content", text: "Skip to content" });
+  a.addEventListener("click", (e) => {
+    e.preventDefault();
+    target.focus();
+  });
+  return a;
+}
+
 export function createAppShell(deps: AppDeps): AppShell {
   const { renderer, cache, live, identity } = deps;
 
@@ -144,7 +157,9 @@ export function createAppShell(deps: AppDeps): AppShell {
 
   // ---- DOM skeleton ----
   const gallery = el("section", { class: "gallery", id: "gallery", "aria-label": "Notes" });
-  const content = el("div", { class: "content" }, gallery);
+  // The one <main>: what the bar and the rail are around. Focusable from code,
+  // for the skip link and a change of screen.
+  const content = el("main", { class: "content", id: "content", tabindex: "-1" }, gallery);
   const toastEl = el("div", { class: "toast", role: "status", "aria-live": "polite" });
 
   /**
@@ -261,7 +276,8 @@ export function createAppShell(deps: AppDeps): AppShell {
   ctx.root = el(
     "div",
     { class: "sn-root" },
-    el("div", { class: "app" }, ctx.sidebar, el("main", { class: "main" }, el("div", { class: "main__head" }, ctx.topbar.el, backupNotice.el), content)),
+    skipLink(content),
+    el("div", { class: "app" }, ctx.sidebar, el("div", { class: "main" }, el("header", { class: "main__head" }, ctx.topbar.el, backupNotice.el), content)),
     toastEl,
   );
 

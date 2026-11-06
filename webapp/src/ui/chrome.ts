@@ -10,7 +10,7 @@ const MOON = '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>';
 
 function themeGlyph(): string {
   const paths = currentTheme() === "dark" ? SUN : MOON;
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+  return `<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
 }
 
 /**
@@ -37,7 +37,7 @@ export function wordmark(): HTMLElement {
 }
 
 export function sheet(...content: (Node | string)[]): HTMLElement {
-  return el("section", { class: "sheet" }, wordmark(), ...content);
+  return el("main", { class: "sheet" }, wordmark(), ...content);
 }
 
 /** The floating light/dark toggle for the pre-auth views (no bitmaps to repaint). */

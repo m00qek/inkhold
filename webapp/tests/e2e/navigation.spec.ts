@@ -6,7 +6,7 @@ import { signedIn, cardButton, railSettled } from "./helpers/app";
 
 function navItem(page: Page, name: string): Locator {
   return page
-    .getByRole("navigation", { name: "Folders" })
+    .getByRole("navigation", { name: "Library" })
     .locator(".nav__item", { has: page.locator(".nav__name", { hasText: new RegExp(`^${name}$`) }) });
 }
 

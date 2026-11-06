@@ -261,7 +261,7 @@ test.describe("the account page", () => {
   test("a non-admin can open it, even though the admin console is shut to them", async ({ page }) => {
     await signedIn(page);
     await page.goto("/");
-    await expect(page.getByRole("navigation", { name: "Folders" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Library" })).toBeVisible();
     await expect(page.locator(".rail").getByRole("button", { name: "Admin" })).toHaveCount(0);
 
     await page.getByRole("button", { name: "Your account" }).click();
@@ -287,7 +287,7 @@ test.describe("the account page", () => {
     await expect(page.locator("#upload")).toBeVisible();
 
     await page
-      .getByRole("navigation", { name: "Folders" })
+      .getByRole("navigation", { name: "Library" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Recycle bin$/ }) })
       .click();
     await expect(page.locator("#empty-bin")).toBeVisible();

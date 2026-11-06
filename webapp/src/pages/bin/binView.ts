@@ -102,8 +102,9 @@ export function createBinView(opts: BinViewOptions): BinView {
   const toastAction = el("button", { class: "bin-toast__action", type: "button", hidden: true });
   const toastEl = el(
     "div",
-    { class: "bin-toast", role: "status", "aria-live": "polite" },
-    el("span", { class: "bin-toast__lines" }, toastMsg, toastSub),
+    { class: "bin-toast" },
+    // The lines are announced; the action beside them is not.
+    el("span", { class: "bin-toast__lines", role: "status" }, toastMsg, toastSub),
     toastAction,
   );
   root.append(toastEl);

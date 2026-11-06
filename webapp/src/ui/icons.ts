@@ -52,5 +52,5 @@ export const ICONS = {
 export type IconName = keyof typeof ICONS;
 
 export function svg(paths: string, sw = 1.6): string {
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+  return `<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
 }

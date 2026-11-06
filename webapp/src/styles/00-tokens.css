@@ -32,6 +32,8 @@
   --control-h-sm: 28px;
   /* The smallest pointer target for a control drawn smaller (the To-Do check). */
   --hit-target: 32px;
+  /* The smallest thing a finger is asked to hit (WCAG 2.5.5, platform guides). */
+  --hit-target-touch: 44px;
   --topbar-control-h: var(--control-h);
 
   /* The layers panel's opacity fill-bar track height. */

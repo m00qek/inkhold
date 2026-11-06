@@ -49,7 +49,7 @@ test.describe("accessibility — library & reader", () => {
     await signedIn(page);
     await page.goto("/");
 
-    await expect(page.getByRole("navigation", { name: "Folders" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Library" })).toBeVisible();
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Your account: ana@household.lan" })).toBeVisible();
   });

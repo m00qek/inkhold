@@ -114,7 +114,7 @@ test.describe("recycle bin", () => {
     await openBin(page);
 
     await page
-      .getByRole("navigation", { name: "Folders" })
+      .getByRole("navigation", { name: "Library" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Note$/ }) })
       .click();
 

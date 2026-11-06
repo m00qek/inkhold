@@ -14,6 +14,8 @@ import { SCREENS, VARIANTS, settle } from "./helpers/screens";
 
 const BASELINE = fileURLToPath(new URL("./semantics-baseline/", import.meta.url));
 const UPDATE = process.env.SEMANTICS_UPDATE === "1";
+/** SEMANTICS_SHOW=<rule> prints that rule's samples on every screen. */
+const SHOW = process.env.SEMANTICS_SHOW;
 
 
 
@@ -43,6 +45,7 @@ for (const v of VARIANTS) {
         await settle(page);
         const found = await checkPage(page, { ownTitle: s.ownTitle, minTarget: v.minTarget });
         const key = `${s.name}@${v.name}`;
+        if (SHOW && found[SHOW]) console.log(`${key} ${SHOW}: ${found[SHOW].samples.join(" | ")}`);
         if (UPDATE) {
           mkdirSync(BASELINE, { recursive: true });
           const counts = Object.fromEntries(Object.entries(found).map(([r, f]) => [r, f.count]).sort());

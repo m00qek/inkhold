@@ -347,3 +347,31 @@
     transition: none;
   }
 }
+
+/* "Skip to content": off screen until a keyboard reaches it, then over the rail. */
+.skip-link {
+  position: absolute;
+  inset-block-start: var(--sp-2);
+  inset-inline-start: var(--sp-2);
+  z-index: var(--z-popover);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius);
+  background: var(--ink);
+  color: var(--sheet);
+  font-size: var(--fs-body);
+  text-decoration: none;
+  min-block-size: var(--hit-target-touch);
+  display: inline-flex;
+  align-items: center;
+  transform: translateY(-200%);
+}
+.skip-link:focus {
+  transform: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The main area takes focus from code (the skip link, a change of screen); the
+   ring would frame the whole screen. */
+.content:focus {
+  outline: none;
+}

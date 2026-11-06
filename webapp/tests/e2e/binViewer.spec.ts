@@ -108,7 +108,7 @@ test.describe("recycle bin", () => {
     // A repaint is served from the tier cache, with no second raw fetch.
     const before = raw.binHits();
     await page
-      .getByRole("navigation", { name: "Folders" })
+      .getByRole("navigation", { name: "Library" })
       .locator(".nav__item", { has: page.locator(".nav__name", { hasText: /^Note$/ }) })
       .click();
     await openBin(page);

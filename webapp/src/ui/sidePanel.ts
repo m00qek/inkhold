@@ -44,7 +44,8 @@ export function createSidePanel(opts: SidePanelOptions): SidePanel {
 
   const body = el("div", { class: `side-panel__body${hook("__body")}` });
   const root = el(
-    "aside",
+    // A named region beside the page, inside <main>: not a top-level aside.
+    "section",
     {
       class: `side-panel${opts.wide ? " side-panel--wide" : ""}${hook()}`,
       ...(opts.id ? { id: opts.id } : {}),
