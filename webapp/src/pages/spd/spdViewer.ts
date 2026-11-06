@@ -14,6 +14,8 @@ import { createViewerExportMenu } from "../viewer/viewerExportMenu";
 import { backWord, createViewerHeader, createViewerBody, createVersionBanner } from "../viewer/viewerChrome";
 import { createBinViewerActions } from "../../ui/binViewerActions";
 import { createLayersPanel, type PanelLayer } from "../layersPanel";
+import { closeWith } from "../../ui/sidePanel";
+import { attachPinch } from "../../ui/pinchZoom";
 import { exportSpdPng, exportSpdOra, type ExportWhich } from "./spdExport";
 import type { ExportLayer, LayeredExportModel } from "../../export/layered";
 import { parseSpd, spdBbox, spdBaseDims, browserLoader, browserDecodeTile, REFERENCE_LAYER_ID, TILE, DEFAULT_WASM_URL, type SpdDecoderExports, type SpdDoc, type SpdLayer, type SpdBbox, type TileBitmap } from "../../render/spdDecode";
@@ -73,11 +75,14 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
   }) as HTMLButtonElement;
 
   // Own readout class: a shared `.zoom` would match several mounted viewers.
-  const zoomStepper = createZoomStepper({
+  // A rung's index, or a pinch's own readout.
+  const zoomStepper = createZoomStepper<number | string>({
     readoutClass: "spd-zoom",
     initial: 0,
-    format: (i: number) => ZOOMS[i]!,
+    format: (i) => (typeof i === "string" ? i : ZOOMS[i]!),
     onStep: (dir) => {
+      // A step leaves a pinch for the ladder, from the rung it was on.
+      pinch = null;
       zoomIdx = Math.max(0, Math.min(ZOOMS.length - 1, zoomIdx + dir));
       applyZoom();
       return zoomIdx;
@@ -162,8 +167,9 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     className: "viewer__bar",
     leading: [{ el: back, focus: [back] }, { el: title }],
     view: [
-      { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
-      { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle], fold: true },
+      // On a phone a pinch zooms; the stepper waits in ⋯ as its one-finger way.
+      { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus, fold: true },
+      { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle] },
     ],
     file: [
       { kind: "custom", key: "versions", el: versionsBtn, focus: [versionsBtn] },
@@ -188,6 +194,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
   const layersPanel = createLayersPanel({
     id: "spd-layers-panel",
     hookPrefix: "spd",
+    onClose: closeWith(layersToggle),
     onToggle: (id, visible) => setLayerVisible(id, visible),
     onOpacity: (id, opacity01) => setLayerOpacity(id, opacity01),
     paintThumb: (pl) => {
@@ -213,6 +220,8 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
   /** Z-order, index 0 = topmost (mirrors `doc.layers`). */
   let layerViews: LayerView[] = [];
   let zoomIdx = 0;
+  /** A pinch's size as a factor of Fit; set, it stands in for `zoomIdx`. */
+  let pinch: number | null = null;
   let panelOpen = false;
   /** Bumped on every open/hide/destroy so a stale async render cannot paint. */
   let renderToken = 0;
@@ -287,6 +296,8 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     layersPanel.el.hidden = !open;
     layersToggle.setAttribute("aria-pressed", String(open));
     layersToggle.setAttribute("aria-expanded", String(open));
+    // The panel narrows the stage (or, on a phone, pads it clear of the sheet).
+    applyZoom();
   }
   layersToggle.addEventListener("click", () => setPanelOpen(!panelOpen));
 
@@ -296,11 +307,18 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
 
   function zoomScale(): number {
     const z = ZOOMS[zoomIdx]!;
+    if (pinch !== null) return fitScale() * pinch;
     if (z !== FIT_PAGE) return Number.parseInt(z, 10) / 100;
+    return fitScale();
+  }
+
+  function fitScale(): number {
     const { w, h } = baseDims();
+    // The content box: on a phone the stage pads itself clear of the layers sheet.
     const rect = stage.getBoundingClientRect();
-    const availW = Math.max(rect.width - 48, 64);
-    const availH = Math.max(rect.height - 48, 64);
+    const cs = getComputedStyle(stage);
+    const availW = Math.max(rect.width - (parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) || 48), 64);
+    const availH = Math.max(rect.height - (parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) || 48), 64);
     return Math.min(1, availW / w, availH / h) || 1;
   }
 
@@ -330,6 +348,24 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
     applyZoom();
   }
   window.addEventListener("resize", onResize);
+
+  // Pinch and double tap on the sketch.
+  attachPinch({
+    scroller: stage,
+    surface: () => (doc ? canvasWrap : null),
+    scale: () => zoomScale() / (fitScale() || 1),
+    setScale: (k) => {
+      if (k <= 1.001) {
+        pinch = null;
+        zoomIdx = 0;
+        zoomStepper.set(0);
+      } else {
+        pinch = k;
+        zoomStepper.set(`${k.toFixed(1)}×`);
+      }
+      applyZoom();
+    },
+  });
 
   /**
    * Never rejects. Each tile is drawn once onto its layer canvas and `.close()`d
@@ -413,6 +449,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
         canvasWrap.append(v.canvas);
       }
       zoomIdx = 0;
+      pinch = null;
       zoomStepper.set(0);
       buildLayersPanel();
       showBody(true);
@@ -442,6 +479,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       meta = null;
       setPanelOpen(false);
       zoomIdx = 0;
+      pinch = null;
       zoomStepper.set(0);
 
       header.setName(summary.name);

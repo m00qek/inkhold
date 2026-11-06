@@ -15,6 +15,8 @@ export interface ReaderNav {
   onKey(e: KeyboardEvent): void;
   /** Applies the image zoom ladder to the `<img>` stage. */
   sizeImage(): void;
+  /** The image's size now, as a factor of Fit. */
+  imageScale(): number;
 }
 
 export function createReaderNav(ctx: ReaderCtx): ReaderNav {
@@ -108,7 +110,27 @@ export function createReaderNav(ctx: ReaderCtx): ReaderNav {
   }
 
   /** Apply the current zoom step to the image preview. */
+  /** The image's width at Fit: whole in the stage's content box, never enlarged. */
+  function imageFitWidth(): number {
+    const img = ctx.files.img;
+    const nw = img.naturalWidth;
+    const nh = img.naturalHeight;
+    if (nw <= 0 || nh <= 0) return img.clientWidth;
+    const stage = ctx.files.el.getBoundingClientRect();
+    const cs = getComputedStyle(ctx.files.el);
+    const aw = stage.width - (parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) || 0);
+    const ah = stage.height - (parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) || 0);
+    return nw * Math.min(1, aw / nw, ah / nh);
+  }
+
   function sizeImage(): void {
+    const img = ctx.files.img;
+    if (st.pinch !== null) {
+      img.style.maxWidth = "none";
+      img.style.maxHeight = "none";
+      img.style.width = `${Math.round(imageFitWidth() * st.pinch)}px`;
+      return;
+    }
     if (st.zoom === FIT_PAGE) {
       // Back to the CSS rule: fit the stage in both axes.
       ctx.files.img.style.width = "";
@@ -132,5 +154,11 @@ export function createReaderNav(ctx: ReaderCtx): ReaderNav {
     }
   }
 
-  return { urlQuery, findQuery, syncUrl, queueUrlSync, goToPage, onKey, sizeImage };
+  function imageScale(): number {
+    if (st.pinch !== null) return st.pinch;
+    if (st.zoom === FIT_PAGE) return 1;
+    return ctx.files.img.clientWidth / Math.max(1, imageFitWidth());
+  }
+
+  return { urlQuery, findQuery, syncUrl, queueUrlSync, goToPage, onKey, sizeImage, imageScale };
 }

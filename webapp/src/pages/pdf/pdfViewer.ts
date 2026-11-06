@@ -15,6 +15,9 @@ import { createViewerExportMenu } from "../viewer/viewerExportMenu";
 import { createViewerHeader, createViewerBody, createVersionBanner } from "../viewer/viewerChrome";
 import type { VersionSubject, Viewer, ViewerDeps } from "../viewer/viewer";
 import { createPdfOutlinePanel } from "./pdfOutlinePanel";
+import { closeWith } from "../../ui/sidePanel";
+import { isPhone } from "../../ui/breakpoints";
+import { attachPinch } from "../../ui/pinchZoom";
 import { createPdfThumbStrip } from "./pdfThumbStrip";
 import { createPdfPageRenderer, PDF_LAYER_ID, ZOOMS, type Zoom } from "./pdfPageRenderer";
 import { createLinkLayer } from "../linkLayer";
@@ -64,6 +67,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     pageIndex: 0,
     pageCount: 0,
     zoom: FIT_PAGE,
+    pinch: null,
     fromBin: false,
     meta: null,
     markId: null,
@@ -119,9 +123,12 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     format: (z) => z,
     labels: { out: "Zoom out", in: "Zoom in" },
     onStep: (dir) => {
+      // A step leaves a pinch for the ladder, from the rung it was on.
+      const pinched = st.pinch !== null;
+      st.pinch = null;
       const at = ZOOMS.indexOf(st.zoom);
       const next = ZOOMS[Math.min(ZOOMS.length - 1, Math.max(0, at + dir))]!;
-      if (next !== st.zoom) {
+      if (next !== st.zoom || pinched) {
         st.zoom = next;
         void renderer.paint();
       }
@@ -194,6 +201,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   const layersPanel = createLayersPanel({
     id: "pdf-layers-panel",
     hookPrefix: "pdf",
+    onClose: () => closeWith(layersToggle)(),
     onToggle: (id, visible) => {
       if (id === PDF_LAYER_ID) canvas.style.visibility = visible ? "" : "hidden";
       else markCtl.setVisible(id, visible);
@@ -228,6 +236,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     },
     inkRaster: (bytes, dst) => markCtl.inkRaster(bytes, dst),
     onPick: (i) => void ctx.nav.go(i),
+    onClose: () => closeWith(pagesToggle)(),
   });
   const pagesPanel = thumbs.panel;
 
@@ -246,7 +255,10 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   );
 
   // ---- outline ----
-  const outlinePanel = createPdfOutlinePanel({ onPick: (page) => void ctx.nav.go(page) });
+  const outlinePanel = createPdfOutlinePanel({
+    onPick: (page) => void ctx.nav.go(page),
+    onClose: () => closeWith(outlineOpener.el)(),
+  });
   const outlineOpener = contextualOpener({
     icon: VIEWER_IC.outline,
     label: "Outline",
@@ -303,12 +315,15 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     // Pager, zoom, find: the reader's order, so the two paged viewers agree.
     view: [
       { kind: "custom", key: "pager", el: pager.el, focus: pager.focus },
-      { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
-      { kind: "custom", key: "find", el: findToggle, focus: [findToggle], fold: true },
-      { kind: "custom", key: "pages", el: pagesToggle, focus: [pagesToggle], fold: true },
-      { kind: "custom", key: "outline", el: outlineOpener.el, focus: [outlineOpener.el], fold: true },
+      // On a phone a pinch zooms; the stepper waits in ⋯ as its one-finger way.
+      { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus, fold: true },
+      // On a phone, beside ⋯ in the top row, where search usually is.
+      { kind: "custom", key: "find", el: findToggle, focus: [findToggle], top: true },
+      // Panel switches stay on the bar everywhere: their state is worth seeing.
+      { kind: "custom", key: "pages", el: pagesToggle, focus: [pagesToggle] },
+      { kind: "custom", key: "outline", el: outlineOpener.el, focus: [outlineOpener.el] },
       // Shown only when a `.mark` exists.
-      { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle], fold: true },
+      { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle] },
       { kind: "custom", key: "copy", el: copy.btn, focus: [copy.btn], fold: true },
       { kind: "custom", key: "copy-live", el: copy.live, focus: [] },
     ],
@@ -351,17 +366,21 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       pageIndex: () => st.pageIndex,
       pageCount: () => st.pageCount,
       zoom: () => st.zoom,
+      pinch: () => st.pinch,
       meta: () => st.meta,
       fromBin: () => st.fromBin,
       markId: () => st.markId,
       markPages: () => markPages,
       // Mounted panels only; {@link tooTight} weighs hypothetical ones.
+      // A phone's panels are sheets below the page, beside nothing.
       dockedPanels: () =>
-        [
-          docks.left() === "pages" ? pagesPanel.el : null,
-          docks.left() === "outline" ? outlinePanel.el : null,
-          docks.right() ? layersPanel.el : null,
-        ].filter((panel): panel is HTMLElement => panel !== null),
+        isPhone()
+          ? []
+          : [
+              docks.left() === "pages" ? pagesPanel.el : null,
+              docks.left() === "outline" ? outlinePanel.el : null,
+              docks.right() ? layersPanel.el : null,
+            ].filter((panel): panel is HTMLElement => panel !== null),
     },
     dom: { main, stage, canvas, body, markCtl, linkLayer, selectLayer, layersPanel },
     // Through arrows: `find` is built below and the two reference each other.
@@ -505,6 +524,24 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   ctx.lifecycle = createPdfLifecycle(ctx);
   document.addEventListener("keydown", ctx.nav.onKey);
   document.addEventListener("copy", ctx.nav.onCopy);
+
+  // Pinch and double tap on the page.
+  attachPinch({
+    scroller: main,
+    surface: () => (stage.isConnected ? stage : null),
+    scale: () => renderer.relativeScale(),
+    setScale: (k) => {
+      if (k <= 1.001) {
+        st.pinch = null;
+        st.zoom = FIT_PAGE;
+        zoomStepper.set(FIT_PAGE);
+      } else {
+        st.pinch = k;
+        zoomStepper.set(`${k.toFixed(1)}×` as Zoom);
+      }
+      void renderer.paint();
+    },
+  });
 
   return {
     el: root,

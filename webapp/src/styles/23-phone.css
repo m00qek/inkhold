@@ -185,6 +185,38 @@ html {
     padding: var(--sp-2) var(--sp-3) var(--sp-8);
   }
 
+  /* The bin: a row is the tile and its name across, ⋯ at the end, and the
+     countdown under the name (beside it, it left the name a letter). */
+  .bin__row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: var(--sp-3);
+    row-gap: 0;
+  }
+  .bin__row > .bin__open {
+    grid-area: 1 / 1;
+  }
+  .bin__row > .bin__actions {
+    grid-area: 1 / 2 / 3 / 3;
+  }
+  .bin__row > .life {
+    grid-area: 2 / 1;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    inline-size: auto;
+    /* Under the name: past the tile and the lead's gap. */
+    margin-inline-start: calc(var(--preview-h-list) * 3 / 4 + 14px);
+  }
+  .bin__row > .life .life__track {
+    flex: 1;
+    max-inline-size: 8rem;
+  }
+  .bin__row > .life .life__label {
+    margin-block-start: 0;
+  }
+
   /* Reading: the reader's own bar takes the bottom. */
   .sn-root.is-reading .tabbar {
     display: none;
@@ -199,7 +231,7 @@ html {
        below) inside the top one. The phone layout is the media query's. */
     container-type: normal;
     flex-wrap: nowrap;
-    gap: var(--sp-1);
+    gap: var(--sp-2);
     padding: var(--sp-1) var(--sp-2);
   }
   .backbtn__label,
@@ -211,13 +243,19 @@ html {
     clip-path: inset(50%);
     white-space: nowrap;
   }
+  /* The title keeps clear of ‹ (more than the buttons' gap: words against a
+     frame read as cramped), and both its lines stop at … short of 🔍 and ⋯
+     (a bin's subtitle is a whole path). */
   .reader__title,
   .viewer__title {
     flex: 1;
     min-inline-size: 0;
+    margin-inline-start: var(--sp-1);
   }
   .reader__title b,
-  .viewer__title b {
+  .viewer__title b,
+  .reader__title span,
+  .viewer__title span {
     display: block;
     overflow: hidden;
     white-space: nowrap;
@@ -233,6 +271,12 @@ html {
      Outline…) are behind ⋯ too: the bar keeps what reading uses. */
   .toolbar [data-fold] {
     display: none;
+  }
+  /* The top row's tools (Find), beside ⋯ (`pages/toolbar.ts`). */
+  .toolbar__top {
+    display: flex;
+    flex: none;
+    gap: var(--sp-2);
   }
   /* The file's actions are behind ⋯ (`pages/toolbar.ts`), shown here only. */
   .toolbar__more {
@@ -253,24 +297,100 @@ html {
     border-block-start: 1px solid var(--line);
     background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
   }
-  /* A viewer's panels (pages, recognized text, layers, outline) open over
-     the page as a sheet above that bar, not docked beside it. */
-  .side-panel,
-  .side-panel--wide,
-  .pages {
+  /* Paging, then the panel switches: two groups, a wider gap between. */
+  :is(.reader__bar, .viewer__bar) > .toolbar__group > .pager:not([data-fold]) {
+    margin-inline-end: var(--sp-3);
+  }
+  /* A viewer's panels (pages, recognized text, layers, outline) are one sheet
+     sitting on that bar, not docked beside the page: one open at a time
+     (the viewers enforce it), a fixed height so the page, which the stage
+     fits above it, never jumps as the panel's content arrives. Its head stays
+     put while the body scrolls, and carries the × that closes it. */
+  :is(.reader, .viewer) .side-panel {
     position: fixed;
-    inset-inline: var(--sp-2);
-    inset-block-end: calc(2 * var(--hit-target-touch) + 3 * var(--sp-2) + env(safe-area-inset-bottom, 0px));
+    inset-inline: 0;
+    inset-block-end: var(--phone-bar-h);
     z-index: var(--z-menu);
     inline-size: auto;
-    max-block-size: 55vh;
+    block-size: var(--phone-sheet-h);
+    max-block-size: none;
+    margin: 0;
+    padding-block-start: 0;
+    border-inline: 0;
+    border-block-end: 0;
+    border-radius: var(--radius-card) var(--radius-card) 0 0;
     box-shadow: 0 -6px 24px var(--shadow);
+  }
+  :is(.reader, .viewer) .side-panel__head {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: 1;
+    padding-block: var(--sp-1);
+    background: var(--sheet);
+  }
+  /* Pages: a short sheet, the thumbnails in a row swiped sideways
+     (`filmstrip--row`, pages/pageIndex.ts), so the page keeps most of the
+     screen. The head stays at the start as the row scrolls. */
+  :is(.reader, .viewer) .pages {
+    block-size: var(--phone-strip-h);
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+  }
+  :is(.reader, .viewer) .pages .side-panel__head {
+    inset-inline-start: 0;
+  }
+  .pages .side-panel__body {
+    block-size: var(--preview-h-filmstrip);
+    /* Clear of the head for the current page's outline. A margin, since the
+       rows are positioned against the body's padding box. */
+    margin-block-start: var(--sp-2);
+  }
+  .filmstrip--row .filmstrip__page {
+    justify-content: flex-start;
+  }
+  .side-panel__close {
+    display: inline-flex;
+    justify-content: center;
+    margin-inline-start: auto;
+    padding-inline: 0;
+    inline-size: var(--hit-target-touch);
+    border-color: transparent;
+    background: transparent;
+    color: var(--ink-soft);
+  }
+  .side-panel__close svg {
+    inline-size: 18px;
+    block-size: 18px;
+  }
+
+  /* The stage runs under that bar (the viewer fills the content's padding
+     box), so it pads itself clear of the bar, and of an open sheet: a Fit page
+     lands above both, and a zoomed one scrolls all the way into view. */
+  :is(.reader, .viewer) {
+    --sheet-open: 0px;
+  }
+  :is(.reader, .viewer):has(.side-panel:not([hidden])) {
+    --sheet-open: var(--phone-sheet-h);
+  }
+  :is(.reader, .viewer):has(.pages:not([hidden])) {
+    --sheet-open: var(--phone-strip-h);
+  }
+  .reader .stage,
+  .reader .filestage,
+  .viewer--pdf .pdf-wrap,
+  .spd-stage,
+  .viewer > .viewer__main {
+    padding-block-end: calc(var(--sp-6) + var(--phone-bar-h) + var(--sheet-open));
   }
 
   /* Menus: a sheet along the bottom, full width, rows a finger's height. */
+  /* Any menu-like pop, whatever width it has elsewhere (Version history's
+     296px): the sheet is the screen's width. */
   .menu__pop--float[data-sheet] {
     inset-inline: 0;
     inset-block: auto 0;
+    inline-size: auto;
     min-inline-size: 0;
     max-inline-size: none;
     max-block-size: 70vh;
@@ -286,7 +406,7 @@ html {
 
   /* The page keeps clear of that bar. */
   .sn-root.is-reading .content {
-    padding-block-end: calc(2 * var(--hit-target-touch) + 3 * var(--sp-2));
+    padding-block-end: var(--phone-bar-h);
   }
 }
 

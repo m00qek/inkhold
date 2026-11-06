@@ -1,6 +1,7 @@
 // The reader's modes and side panels: which controls show, and how the docks share the stage.
 
 import { type FileKind } from "../../core/fileKind";
+import { isPhone } from "../../ui/breakpoints";
 import { tokenPx, MIN_PAGE_W } from "../../ui/sidePanel";
 import { toPanelLayers } from "../noteLayers";
 import type { ReaderCtx } from "./readerContext";
@@ -15,6 +16,8 @@ export interface ReaderPanels {
   setPageIndexOpen(next: boolean): void;
   /** Never squeeze the page from both sides: shuts the page index if needed. */
   relieveDoubleSqueeze(): void;
+  /** On a phone the panels share one sheet: opening `kept` shuts the other right panel. */
+  soloOnPhone(kept: "ocr" | "layers"): void;
   collapseRightPanels(): void;
   refreshLayersUi(): void;
   /** Whether the decoded layer stack belongs to the focused page. */
@@ -75,6 +78,8 @@ export function createReaderPanels(ctx: ReaderCtx): ReaderPanels {
 
   /** The page index plus the right dock(s) would leave the page below {@link MIN_PAGE_W}. */
   function bothSidesTooTight(): boolean {
+    // A phone's panels are sheets in one place, so any two are one too many.
+    if (isPhone()) return true;
     const leftW = tokenPx("--panel-w-narrow", 180) + tokenPx("--panel-gap", 22);
     return ctx.stage.getBoundingClientRect().width - 56 - leftW - rightPanelsWidth() < MIN_PAGE_W;
   }
@@ -99,6 +104,15 @@ export function createReaderPanels(ctx: ReaderCtx): ReaderPanels {
    *  a stage too narrow to hold both docks, collapse the LEFT page index. */
   function relieveDoubleSqueeze(): void {
     if (st.pageIndexOpen && st.mode === "note" && bothSidesTooTight()) setPageIndexOpen(false);
+  }
+
+  function soloOnPhone(kept: "ocr" | "layers"): void {
+    if (!isPhone()) return;
+    if (kept === "layers" && ctx.ocr.isOpen()) ctx.ocr.toggle();
+    if (kept === "ocr" && st.layersPanelOpen) {
+      st.layersPanelOpen = false;
+      refreshLayersUi();
+    }
   }
 
   /** The symmetric half: reopening the page index on a narrow stage closes right docks. */
@@ -139,5 +153,5 @@ export function createReaderPanels(ctx: ReaderCtx): ReaderPanels {
     return page !== undefined && page.hash !== "" && ctx.noteLayerCtl.isPresented(page.hash, ctx.getTheme());
   }
 
-  return { setMode, refreshFindUi, layersPanelShown, bothSidesTooTight, setPageIndexOpen, relieveDoubleSqueeze, collapseRightPanels, refreshLayersUi, stackIsCurrent };
+  return { setMode, refreshFindUi, layersPanelShown, bothSidesTooTight, setPageIndexOpen, relieveDoubleSqueeze, soloOnPhone, collapseRightPanels, refreshLayersUi, stackIsCurrent };
 }

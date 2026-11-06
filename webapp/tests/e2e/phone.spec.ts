@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { railSettled, signedIn } from "./helpers/app";
+import { servePdf } from "./pdfViewer.shared";
 
 // The library on a phone (below 700px): the rail is a drawer from ☰, the bar
 // opens its tools from ⋯, a tab bar holds the four places and search,
@@ -117,16 +118,18 @@ test.describe("on a phone", () => {
     await expect(menu).toHaveCount(0);
   });
 
-  test("a viewer's file actions fold into ⋯: one menu, downloads brought in, no menu inside a menu", async ({ page }) => {
+  test("a viewer's file actions fold into ⋯: one menu, its long Download behind one row", async ({ page }) => {
     await signedIn(page);
     await page.goto("/#/note/141");
     const bar = page.locator(".reader__bar");
     await expect(bar.getByRole("button", { name: "Move to bin" })).toBeHidden();
+    await expect(bar.getByRole("button", { name: "Next page" })).toBeEnabled();
     await bar.getByRole("button", { name: "More" }).click();
     const menu = page.locator(".menu__pop--float.is-open");
     await expect(menu).toHaveAttribute("data-sheet", "");
     await expect(menu.getByRole("menuitem", { name: "Version history" })).toBeVisible();
-    await expect(menu.getByRole("menuitem", { name: /^Supernote/ })).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "Download" })).toHaveAttribute("aria-haspopup", "menu");
+    await expect(menu.getByRole("menuitem", { name: /^Supernote/ })).toHaveCount(0);
     await expect(menu.getByRole("menuitem", { name: "Move to bin" })).toBeVisible();
     // The page loading behind it does not close it.
     await page.waitForTimeout(800);
@@ -174,12 +177,20 @@ test.describe("on a phone", () => {
     await expect(page).toHaveURL(/#\/folder\/note$/);
   });
 
-  test("a note reads with one row of reading controls; its tools are under View in ⋯; Pages starts closed", async ({ page }) => {
+  test("a note's bar holds paging and its panel switches; Find sits by ⋯; zoom is under View in ⋯; Pages starts closed", async ({ page }) => {
     await signedIn(page);
     await page.goto("/#/note/101");
     const bar = page.locator(".reader__bar");
     await expect(bar.getByRole("button", { name: "Next page" })).toBeVisible();
-    for (const tool of ["Find in this note", "Recognized text", "Pages"]) await expect(bar.getByRole("button", { name: tool }), tool).toBeHidden();
+    for (const tool of ["Recognized text", "Pages"]) await expect(bar.getByRole("button", { name: tool }), tool).toBeVisible();
+    for (const tool of ["Zoom in", "Zoom out"]) await expect(bar.getByRole("button", { name: tool }), tool).toBeHidden();
+    // Find in the top row, beside ⋯, level with the title.
+    const find = bar.getByRole("button", { name: "Find in this note" });
+    await expect(find).toBeVisible();
+    const more = (await bar.getByRole("button", { name: "More" }).boundingBox())!;
+    const findBox = (await find.boundingBox())!;
+    expect(Math.round(findBox.y)).toBe(Math.round(more.y));
+    expect(findBox.x).toBeLessThan(more.x);
     await expect(page.getByRole("region", { name: "Pages" })).toBeHidden();
     // The controls left on the bar fit one row.
     const rows = await bar.locator(".toolbar__group:not(.toolbar__group--file) button:visible").evaluateAll((bs) => new Set(bs.map((b) => Math.round(b.getBoundingClientRect().top))).size);
@@ -187,13 +198,98 @@ test.describe("on a phone", () => {
     await bar.getByRole("button", { name: "More" }).click();
     const menu = page.locator(".menu__pop--float.is-open");
     await expect(menu.locator(".menu__section").first()).toHaveText("View");
-    // A panel switch is ticked while on.
-    const pages = menu.getByRole("menuitemcheckbox", { name: "Pages" });
-    await expect(pages).toHaveAttribute("aria-checked", "false");
+    await expect(menu.getByRole("menuitemcheckbox", { name: "Find in this note" })).toHaveCount(0);
+    for (const tool of ["Zoom out", "Zoom in"]) await expect(menu.getByRole("menuitem", { name: tool }), tool).toBeVisible();
+    await expect(menu.getByRole("menuitemcheckbox", { name: "Pages" })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    // A panel switch shows whether it is on.
+    const pages = bar.getByRole("button", { name: "Pages" });
+    await expect(pages).toHaveAttribute("aria-pressed", "false");
     await pages.click();
     await expect(page.getByRole("region", { name: "Pages" })).toBeVisible();
+    await expect(pages).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("a long menu of the bar's (Download) is one row that opens in place, with a way back", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/101");
+    const bar = page.locator(".reader__bar");
+    // The note's own rows (its downloads) arrive with it.
+    await expect(bar.getByRole("button", { name: "Next page" })).toBeEnabled();
+    await expect(page.locator(".stage .page canvas").first()).toBeVisible();
     await bar.getByRole("button", { name: "More" }).click();
-    await expect(menu.getByRole("menuitemcheckbox", { name: "Pages" })).toHaveAttribute("aria-checked", "true");
+    const menu = page.locator(".menu__pop--float.is-open");
+    await expect(menu.getByRole("menuitem", { name: "Move to bin" })).toBeVisible();
+    await expect(menu.getByText(".ora")).toHaveCount(0);
+    const download = menu.getByRole("menuitem", { name: "Download" });
+    await expect(download).toHaveAttribute("aria-haspopup", "menu");
+    await download.click();
+    await expect(menu).toBeVisible();
+    await expect(menu.getByText(".ora")).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "Move to bin" })).toHaveCount(0);
+    const back = menu.getByRole("menuitem", { name: "Download" });
+    await expect(back).toBeFocused();
+    await back.click();
+    await expect(menu.getByRole("menuitem", { name: "Move to bin" })).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "Download" })).toHaveAttribute("aria-haspopup", "menu");
+  });
+
+  test("Version history from ⋯ is a sheet the screen's width", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/101");
+    const bar = page.locator(".reader__bar");
+    await expect(bar.getByRole("button", { name: "Next page" })).toBeEnabled();
+    await bar.getByRole("button", { name: "More" }).click();
+    await page.locator(".menu__pop--float.is-open").getByRole("menuitem", { name: "Version history" }).click();
+    const sheet = page.locator(".vh.is-open");
+    await expect(sheet).toHaveAttribute("data-sheet", "");
+    const box = (await sheet.boundingBox())!;
+    expect(Math.round(box.x)).toBe(0);
+    expect(Math.round(box.width)).toBe(390);
+    expect(Math.round(box.y + box.height)).toBe(844);
+  });
+
+  // Zoom on a phone is a pinch, and a double tap back to Fit. Dispatched as
+  // touch events, which is what the viewer listens to.
+  test("a pinch zooms the page sharp, a double tap puts it back to Fit", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/101");
+    const sheet = page.locator(".stage .page");
+    await expect(sheet).toBeVisible();
+    const fit = (await sheet.boundingBox())!.width;
+    const can = await page.locator(".stage").evaluate((stage) => {
+      // Desktop WebKit has `Touch` but won't let a script make one.
+      try {
+        new Touch({ identifier: 0, target: stage, clientX: 0, clientY: 0 });
+      } catch {
+        return false;
+      }
+      const r = stage.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const pair = (d: number) => [1, 2].map((id) => new Touch({ identifier: id, target: stage, clientX: cx + (id === 1 ? -d : d) / 2, clientY: cy }));
+      const fire = (type: string, touches: Touch[]) => stage.dispatchEvent(new TouchEvent(type, { touches, targetTouches: touches, changedTouches: touches, bubbles: true, cancelable: true }));
+      fire("touchstart", pair(100));
+      for (let i = 1; i <= 5; i++) fire("touchmove", pair(100 + 30 * i));
+      fire("touchend", []);
+      return true;
+    });
+    test.skip(!can, "this browser won't let a script make touches");
+    // 250 / 100: the page re-renders at 2.5 × Fit, its own box, not a stretched picture.
+    await expect.poll(async () => (await sheet.evaluate((el) => el.offsetWidth)) / fit).toBeGreaterThan(2.3);
+    await expect(sheet).toHaveCSS("transform", "none");
+    const canvas = page.locator(".stage .page canvas").first();
+    await expect.poll(() => canvas.evaluate((c: HTMLCanvasElement) => c.width)).toBeGreaterThan(fit * 2);
+    // Double tap: back to Fit.
+    await page.locator(".stage").evaluate((stage) => {
+      const r = stage.getBoundingClientRect();
+      const t = new Touch({ identifier: 3, target: stage, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
+      for (let i = 0; i < 2; i++) {
+        stage.dispatchEvent(new TouchEvent("touchstart", { touches: [t], targetTouches: [t], changedTouches: [t], bubbles: true, cancelable: true }));
+        stage.dispatchEvent(new TouchEvent("touchend", { touches: [], targetTouches: [], changedTouches: [t], bubbles: true, cancelable: true }));
+      }
+    });
+    await expect.poll(async () => Math.round((await sheet.boundingBox())!.width)).toBe(Math.round(fit));
   });
 
   // Regression: every step was clamped back to the stage's width, so where Fit
@@ -204,7 +300,9 @@ test.describe("on a phone", () => {
     const sheet = page.locator(".stage .page");
     await expect(sheet).toBeVisible();
     const fit = (await sheet.boundingBox())!.width;
-    await page.locator(".reader__bar").getByRole("button", { name: /zoom in/i }).click();
+    // The one-finger way: Zoom in, under ⋯.
+    await page.locator(".reader__bar").getByRole("button", { name: "More" }).click();
+    await page.locator(".menu__pop--float.is-open").getByRole("menuitem", { name: "Zoom in" }).click();
     await expect.poll(async () => (await sheet.boundingBox())!.width).toBeGreaterThan(fit * 1.3);
     await expect.poll(async () => (await sheet.boundingBox())!.width).toBeGreaterThan(390);
     // Scrolled to its start, the page's start is on screen (`safe center`).
@@ -248,6 +346,60 @@ test.describe("on a phone", () => {
     // The tab bar gives way to the reader's own.
     await expect(page.getByRole("navigation", { name: "Sections" })).toBeHidden();
   });
+
+  // A panel used to float over the page while the page still shrank to make
+  // room beside it: a sliver of a page, hidden behind the panel.
+  test("a reader's panels are one sheet on its bar, the page fits above it, × closes it", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/101");
+    const bar = page.locator(".reader__bar");
+    const sheetPage = page.locator(".stage .page");
+    await expect(sheetPage).toBeVisible();
+    const alone = (await sheetPage.boundingBox())!;
+    const open = (name: string) => bar.getByRole("button", { name }).click();
+
+    await open("Recognized text");
+    const text = page.getByRole("region", { name: "Recognized text" });
+    await expect(text).toBeVisible();
+    const controls = (await bar.locator(".toolbar__group:not(.toolbar__group--file)").boundingBox())!;
+    let panel = (await text.boundingBox())!;
+    expect(Math.abs(panel.y + panel.height - controls.y)).toBeLessThanOrEqual(1);
+    expect(Math.round(panel.width)).toBe(390);
+    await expect.poll(async () => { const b = (await sheetPage.boundingBox())!; return b.y + b.height; }).toBeLessThanOrEqual(panel.y);
+    expect((await sheetPage.boundingBox())!.width).toBeGreaterThan(alone.width * 0.6);
+
+    // One at a time: Pages takes the sheet's place, its pages in a row.
+    await open("Pages");
+    const pages = page.getByRole("region", { name: "Pages" });
+    await expect(pages).toBeVisible();
+    await expect(text).toBeHidden();
+    const tops = await pages.locator(".filmstrip__page").evaluateAll((rows) => new Set(rows.map((r) => Math.round(r.getBoundingClientRect().top))).size);
+    expect(tops).toBe(1);
+    panel = (await pages.boundingBox())!;
+    await expect.poll(async () => { const b = (await sheetPage.boundingBox())!; return b.y + b.height; }).toBeLessThanOrEqual(panel.y);
+
+    await pages.getByRole("button", { name: "Close pages" }).click();
+    await expect(pages).toBeHidden();
+    await expect(bar.getByRole("button", { name: "Pages" })).toBeFocused();
+    await expect.poll(async () => (await sheetPage.boundingBox())!.height).toBeGreaterThan(panel.height);
+  });
+
+  test("a PDF's panel is a sheet too, the page above it", async ({ page }) => {
+    await signedIn(page);
+    await servePdf(page);
+    await page.goto("/#/note/178");
+    const bar = page.locator(".viewer--pdf .viewer__bar");
+    const pdfPage = page.locator(".viewer--pdf .pdf-page");
+    await expect(pdfPage).toBeVisible({ timeout: 20_000 });
+    await bar.getByRole("button", { name: "Pages" }).click();
+    const pages = page.getByRole("region", { name: "Pages" });
+    await expect(pages).toBeVisible();
+    const panel = (await pages.boundingBox())!;
+    await expect.poll(async () => { const b = (await pdfPage.boundingBox())!; return b.y + b.height; }).toBeLessThanOrEqual(panel.y);
+    await expect.poll(async () => (await pdfPage.boundingBox())!.width).toBeGreaterThan(200);
+    await pages.getByRole("button", { name: "Close pages" }).click();
+    await expect(pages).toBeHidden();
+  });
 });
 
 test.describe("at desktop width", () => {
@@ -259,5 +411,12 @@ test.describe("at desktop width", () => {
     await expect(page.getByRole("button", { name: "Places" })).toBeHidden();
     await expect(page.getByRole("navigation", { name: "Sections" })).toBeHidden();
     await expect(page.getByRole("navigation", { name: "Library" })).toBeVisible();
+  });
+
+  test("a docked panel has no ×: its toggle on the bar closes it", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/101");
+    await expect(page.getByRole("region", { name: "Pages" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close pages" })).toBeHidden();
   });
 });

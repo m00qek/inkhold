@@ -7,6 +7,7 @@
 // concern each: overlays, navigation, panels, painting, features, lifecycle.
 
 import { isPhone } from "../../ui/breakpoints";
+import { attachPinch } from "../../ui/pinchZoom";
 import { el } from "../../ui/dom";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -24,7 +25,7 @@ import { createViewerExportMenu } from "../viewer/viewerExportMenu";
 import { originSubtitle, createViewerHeader } from "../viewer/viewerChrome";
 import { createBinViewerActions, type BinRetention } from "../../ui/binViewerActions";
 import { createLayersPanel } from "../layersPanel";
-import { createSidePanel } from "../../ui/sidePanel";
+import { closeWith, createSidePanel } from "../../ui/sidePanel";
 import { createPageIndex } from "../pageIndex";
 import { createLinkLayer } from "../linkLayer";
 import { buildNoteLayerThumb, createNoteLayersController } from "../noteLayers";
@@ -140,6 +141,8 @@ export function createReader(deps: ReaderDeps): Reader {
     summaryRecognized: false,
     pageIndex: 0,
     zoom: FIT_PAGE,
+    pinch: null,
+    fitScale: 1,
     open: false,
     paintToken: 0,
     fromBin: false,
@@ -175,11 +178,13 @@ export function createReader(deps: ReaderDeps): Reader {
     icon: svg(VIEWER_IC.text, 1.7),
     label: "Recognized text",
     hookPrefix: "ocr",
+    onClose: () => closeWith(buttons.ocrToggle)(),
   });
   // No `onOpacity`: `.note` layers carry no opacity (device-confirmed).
   const layersPanel = createLayersPanel({
     id: "note-layers-panel",
     hookPrefix: "note",
+    onClose: () => closeWith(buttons.layersToggle)(),
     onToggle: (id, visible) => {
       noteLayerCtl.setVisible(id, visible);
       // A toggle may enable the Original-view export group.
@@ -194,6 +199,7 @@ export function createReader(deps: ReaderDeps): Reader {
   // The shared page index, docked left and open by default.
   const pageIndexPanel = createPageIndex({
     id: "note-pages-panel",
+    onClose: () => closeWith(buttons.pagesToggle)(),
     // The ruled-paper placeholder is note-specific, hence its own hook.
     stripHook: "note-filmstrip",
     onPick: (index) => ctx.nav.goToPage(index),
@@ -234,6 +240,8 @@ export function createReader(deps: ReaderDeps): Reader {
     format: (z: Zoom) => z,
     onStep: (dir) => {
       // Unknown values fall back to `Fit ⇕`, a rung both ladders carry.
+      // A step leaves a pinch for the ladder, from the rung it was on.
+      st.pinch = null;
       const ladder: readonly Zoom[] = st.mode === "image" ? IMAGE_ZOOMS : ZOOMS;
       const at = ladder.indexOf(st.zoom);
       const from = at < 0 ? Math.max(0, ladder.indexOf(FIT_PAGE)) : at;
@@ -274,11 +282,14 @@ export function createReader(deps: ReaderDeps): Reader {
     leading: [{ el: header.back, focus: [header.back] }, { el: header.title }],
     view: [
       { kind: "custom", key: "pager", el: pager.el, focus: pager.focus },
-      { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus },
-      { kind: "custom", key: "find", el: findBar.toggle, focus: [findBar.toggle], fold: true },
-      { kind: "custom", key: "ocr", el: buttons.ocrToggle, focus: [buttons.ocrToggle], fold: true },
-      { kind: "custom", key: "layers", el: buttons.layersToggle, focus: [buttons.layersToggle], fold: true },
-      { kind: "custom", key: "pages", el: buttons.pagesToggle, focus: [buttons.pagesToggle], fold: true },
+      // On a phone a pinch zooms; the stepper waits in ⋯ as its one-finger way.
+      { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus, fold: true },
+      // On a phone, beside ⋯ in the top row, where search usually is.
+      { kind: "custom", key: "find", el: findBar.toggle, focus: [findBar.toggle], top: true },
+      // Panel switches stay on the bar everywhere: their state is worth seeing.
+      { kind: "custom", key: "ocr", el: buttons.ocrToggle, focus: [buttons.ocrToggle] },
+      { kind: "custom", key: "layers", el: buttons.layersToggle, focus: [buttons.layersToggle] },
+      { kind: "custom", key: "pages", el: buttons.pagesToggle, focus: [buttons.pagesToggle] },
     ],
     file: [
       { kind: "custom", key: "versions", el: buttons.versionsBtn, focus: [buttons.versionsBtn] },
@@ -354,15 +365,51 @@ export function createReader(deps: ReaderDeps): Reader {
 
   // --- toolbar and find-bar events -----------------------------------------
   const { ocr, find, nav, panels } = ctx;
+  // Pinch and double tap, on the note's page and on an image.
+  const pinchTo = (k: number): void => {
+    if (k <= 1.001) {
+      st.pinch = null;
+      st.zoom = FIT_PAGE;
+      zoomStepper.set(FIT_PAGE);
+    } else {
+      st.pinch = k;
+      zoomStepper.set(`${k.toFixed(1)}×` as Zoom);
+    }
+  };
+  attachPinch({
+    scroller: stage,
+    surface: () => (st.mode === "note" ? ctx.pageEl : null),
+    scale: () => (st.pinch ?? st.fitScale),
+    setScale: (k) => {
+      pinchTo(k);
+      void ctx.paint.showPage(st.pageIndex);
+    },
+  });
+  attachPinch({
+    scroller: files.el,
+    surface: () => (st.mode === "image" ? files.img : null),
+    scale: () => ctx.nav.imageScale(),
+    setScale: (k) => {
+      pinchTo(k);
+      ctx.nav.sizeImage();
+    },
+  });
+
   buttons.ocrToggle.addEventListener("click", () => {
     ocr.toggle();
     // Never squeeze the page from both sides.
-    if (ocr.isOpen()) panels.relieveDoubleSqueeze();
+    if (ocr.isOpen()) {
+      panels.soloOnPhone("ocr");
+      panels.relieveDoubleSqueeze();
+    }
   });
   buttons.layersToggle.addEventListener("click", () => {
     st.layersPanelOpen = !st.layersPanelOpen;
     panels.refreshLayersUi();
-    if (st.layersPanelOpen) panels.relieveDoubleSqueeze();
+    if (st.layersPanelOpen) {
+      panels.soloOnPhone("layers");
+      panels.relieveDoubleSqueeze();
+    }
     // The panel takes stage width; the stack is already up, so this is a CSS resize.
     void ctx.paint.showPage(st.pageIndex);
   });

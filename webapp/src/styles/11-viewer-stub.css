@@ -33,6 +33,8 @@
 .viewer__back {
   display: inline-flex;
   align-items: center;
+  /* Centred, as `.btn` (styles/06-reader.css). */
+  justify-content: center;
   gap: 7px;
   /* Compact viewer-toolbar control. */
   height: var(--control-h-sm);

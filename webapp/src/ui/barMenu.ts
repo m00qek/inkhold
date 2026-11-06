@@ -6,9 +6,11 @@
 // - a `<select>` becomes its options, the chosen one ticked (Sort);
 // - a group of `aria-pressed` buttons becomes those buttons, the pressed one
 //   ticked (Grid / List);
-// - a button that opens a menu of its own brings that menu's rows in, so
-//   there is never a menu inside a menu: rows registered for it with
-//   `setMenuRows`, else the rows of its in-page menu (`.menu__pop`);
+// - a button that opens a menu of its own brings that menu's rows in: rows
+//   registered for it with `setMenuRows`, else the rows of its in-page menu
+//   (`.menu__pop`). A short menu joins this one; a long one (more than
+//   {@link SUBMENU_AT} items, a viewer's Download) is one row that opens its
+//   rows in the same sheet, a row back at their top;
 // - any other button is a row with its icon and its name.
 //
 // A row only forwards to its control (a click, or a `change` on a select), so
@@ -21,6 +23,8 @@ import { clearPopover, getPortalRoot, openPopover, placePop, type OpenPopover } 
 export type BarRow =
   | { kind: "section"; title: string }
   | { kind: "sep" }
+  /** A long menu of its own, opened in place of this one. */
+  | { kind: "sub"; label: string; icon?: string; rows: BarRow[] }
   | {
       kind: "item";
       label: string;
@@ -36,6 +40,17 @@ export type BarRow =
       toggle?: boolean;
       onSelect(): void;
     };
+
+/** A menu of more items than this is a row of its own, not joined in. */
+export const SUBMENU_AT = 4;
+
+/** A menu button's rows, joined in when short, behind one row when long. */
+function menuOf(button: HTMLElement, rows: BarRow[]): BarRow[] {
+  if (rows.filter((r) => r.kind === "item").length > SUBMENU_AT) {
+    return [{ kind: "sub", label: nameOf(button), icon: iconOf(button), rows }];
+  }
+  return rows[0]?.kind === "section" ? rows : [{ kind: "section", title: nameOf(button) }, ...rows];
+}
 
 const provided = new WeakMap<HTMLElement, () => BarRow[]>();
 
@@ -118,10 +133,13 @@ function rowsOfControl(c: HTMLElement): BarRow[] {
   if (button) {
     if (!shown(button)) return [];
     const own = provided.get(button);
-    if (own) return own();
+    if (own) {
+      const rows = own();
+      return rows.filter((r) => r.kind === "item").length > SUBMENU_AT ? menuOf(button, rows) : rows;
+    }
     if (button.getAttribute("aria-haspopup")) {
       const rows = menuRowsOf(button);
-      if (rows.length > 0) return rows[0]?.kind === "section" ? rows : [{ kind: "section", title: nameOf(button) }, ...rows];
+      if (rows.length > 0) return menuOf(button, rows);
     }
     // A tool that can't act here (greyed on a bar, to keep its place) has no
     // place in a menu.
@@ -166,13 +184,87 @@ export function rowsOf(controls: Element[]): BarRow[] {
   return groups.filter((g) => g.length > 0).flatMap((g, i) => (i === 0 ? g : [{ kind: "sep" } as BarRow, ...g]));
 }
 
+/**
+ * One row per action: a bar can offer one twice (Version history on the bar
+ * and in a bin file's own menu), which folded together reads as clutter. The
+ * first stays; a section or divider left with nothing under it goes too.
+ *
+ * A name alone is not an action: "PDF document" under "This page — current
+ * view" and under "Original view" are two files. So a row repeats only one
+ * of the same name in the same section, or one outside any section (the
+ * file's own action, which a section's copy of it adds nothing to).
+ */
+export function onceEach(rows: BarRow[]): BarRow[] {
+  const plain = new Set<string>();
+  const inSection = new Set<string>();
+  let section: string | null = null;
+  const kept = rows.filter((r) => {
+    if (r.kind === "section") section = r.title;
+    if (r.kind === "sep") section = null;
+    if (r.kind !== "item" || r.checked !== undefined) return true;
+    const key = `${section ?? ""}\u0000${r.label}`;
+    if (plain.has(r.label) || inSection.has(key)) return false;
+    if (section === null) plain.add(r.label);
+    inSection.add(key);
+    return true;
+  });
+  // A heading with no rows under it, then dividers doubled up or at an end.
+  const headed = kept.filter((r, i) => r.kind !== "section" || (kept[i + 1] !== undefined && kept[i + 1]!.kind !== "sep" && kept[i + 1]!.kind !== "section"));
+  return headed.filter((r, i, all) => r.kind !== "sep" || (i > 0 && i < all.length - 1 && all[i + 1]!.kind !== "sep"));
+}
+
 let closeOpen: () => void = () => {};
 
 /** Opens `rows` as a menu under `trigger` (a sheet along the bottom on a phone). */
 export function openBarMenu(trigger: HTMLElement, rows: BarRow[]): void {
   closeOpen();
-  const items: HTMLButtonElement[] = [];
-  const children = rows.map((r) => {
+  let items: HTMLButtonElement[] = [];
+  const box = el("div", { class: "menu__pop menu__pop--float is-open", role: "menu" });
+
+  const glyphOf = (icon: string): string =>
+    `<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${icon}</svg>`;
+
+  /** A row that moves within the sheet: into a long menu, or back out of it. */
+  function stepRow(label: string, icon: string | undefined, into: boolean, go: () => void): HTMLButtonElement {
+    const b = el("button", {
+      class: "menu__item menu__item--lead" + (into ? "" : " menu__item--back"),
+      type: "button",
+      role: "menuitem",
+      ...(into ? { "aria-haspopup": "menu" } : {}),
+    }) as HTMLButtonElement;
+    b.append(el("span", { class: "menu__item-mark", html: into ? (icon ? glyphOf(icon) : "") : svg(ICONS.chevronLeft, 1.8) }));
+    b.append(el("span", { text: label }));
+    if (into) b.append(el("span", { class: "menu__item-check", html: svg(ICONS.chevronRight, 1.8) }));
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      go();
+    });
+    return b;
+  }
+
+  /** Fill the sheet with `list`; inside a long menu, a row back to `parent` first. */
+  function fill(list: BarRow[], parent?: { label: string; rows: BarRow[] }): void {
+    items = [];
+    const nodes: HTMLElement[] = [];
+    if (parent) {
+      const back = stepRow(parent.label, undefined, false, () => fill(parent.rows));
+      items.push(back);
+      nodes.push(back, el("div", { class: "menu__sep", "aria-hidden": "true" }));
+    }
+    for (const r of list) {
+      if (r.kind === "sub") {
+        const b = stepRow(r.label, r.icon, true, () => fill(r.rows, { label: r.label, rows: list }));
+        items.push(b);
+        nodes.push(b);
+        continue;
+      }
+      nodes.push(rowEl(r));
+    }
+    box.replaceChildren(...nodes);
+    items.find((i) => !i.disabled)?.focus();
+  }
+
+  function rowEl(r: Exclude<BarRow, { kind: "sub" }>): HTMLElement {
     if (r.kind === "sep") return el("div", { class: "menu__sep", "aria-hidden": "true" });
     if (r.kind === "section") return el("div", { class: "menu__section", role: "presentation", text: r.title });
     const choice = r.checked !== undefined;
@@ -185,8 +277,7 @@ export function openBarMenu(trigger: HTMLElement, rows: BarRow[]): void {
     }) as HTMLButtonElement;
     if (r.icon || choice) {
       // A choice without an icon keeps the column, so its words line up.
-      const glyph = r.icon ? `<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${r.icon}</svg>` : "";
-      b.append(el("span", { class: "menu__item-mark", html: glyph }));
+      b.append(el("span", { class: "menu__item-mark", html: r.icon ? glyphOf(r.icon) : "" }));
     }
     b.append(el("span", { text: r.label }));
     if (r.ext) b.append(el("kbd", { text: r.ext }));
@@ -199,8 +290,8 @@ export function openBarMenu(trigger: HTMLElement, rows: BarRow[]): void {
     });
     items.push(b);
     return b;
-  });
-  const box = el("div", { class: "menu__pop menu__pop--float is-open", role: "menu" }, ...children);
+  }
+
   const self: OpenPopover = {
     trigger,
     contains: (t) => box.contains(t) || trigger.contains(t),
@@ -227,6 +318,7 @@ export function openBarMenu(trigger: HTMLElement, rows: BarRow[]): void {
     usable[to]?.focus();
   });
   getPortalRoot().append(box);
+  fill(onceEach(rows));
   placePop(trigger, box);
   openPopover(self);
   trigger.setAttribute("aria-expanded", "true");

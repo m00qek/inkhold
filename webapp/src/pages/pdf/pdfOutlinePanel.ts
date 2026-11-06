@@ -21,7 +21,7 @@ export interface PdfOutlinePanel {
   clear(): void;
 }
 
-export function createPdfOutlinePanel(opts: { onPick(page: number): void }): PdfOutlinePanel {
+export function createPdfOutlinePanel(opts: { onPick(page: number): void; onClose?: () => void }): PdfOutlinePanel {
   const list = el("div", { class: "pdf-outline" });
   const panel = createSidePanel({
     id: "pdf-outline-panel",
@@ -29,6 +29,7 @@ export function createPdfOutlinePanel(opts: { onPick(page: number): void }): Pdf
     icon: svg(VIEWER_IC.outline, 1.7),
     label: "Outline",
     hookPrefix: "outline",
+    onClose: opts.onClose,
   });
   panel.body.append(list);
 

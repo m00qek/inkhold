@@ -69,6 +69,7 @@ export interface PdfThumbStripOptions {
     dst: { width: number; height: number },
   ): Promise<HTMLCanvasElement | null>;
   onPick(index: number): void;
+  onClose?: () => void;
 }
 
 export interface PdfThumbStrip {
@@ -110,6 +111,7 @@ export function createPdfThumbStrip(opts: PdfThumbStripOptions): PdfThumbStrip {
     stripHook: "pdf-filmstrip",
     inkWord: "annotated",
     onPick: (i) => opts.onPick(i),
+    onClose: opts.onClose,
     aspect: (i) => thumbAspects.get(i) ?? firstAspect,
     loading: () => true,
     mount: (row) => {

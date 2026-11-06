@@ -57,6 +57,12 @@
   color: var(--ink-faint);
 }
 
+/* Only where the panel is a sheet over the page (styles/23-phone.css); docked
+   beside the page, its toggle on the bar closes it. */
+.side-panel__close {
+  display: none;
+}
+
 /* Structural only; the content carries its own look. */
 .side-panel__body {
   min-width: 0;

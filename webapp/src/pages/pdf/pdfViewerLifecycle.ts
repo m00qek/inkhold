@@ -133,6 +133,7 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
     // The subtitle fills in: folder path, then size, then page count.
     header.setSubtitle(originSubtitle(origin, summary.fileType?.toUpperCase() || "PDF"));
     st.zoom = FIT_PAGE;
+    st.pinch = null;
     // The stepper keeps its own label, so reset the readout too.
     zoomStepper.set(FIT_PAGE);
     st.pageIndex = Math.max(0, page);

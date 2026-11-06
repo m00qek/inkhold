@@ -121,6 +121,8 @@ export function createReaderLifecycle(ctx: ReaderCtx): Reader {
       ctx.root.setAttribute("aria-hidden", "false");
       st.open = true;
       document.addEventListener("keydown", ctx.nav.onKey);
+      // A pinch belongs to the file it was made on.
+      st.pinch = null;
 
       if (kind === "note") {
         // Clamped once; a deep link past the end lands on the last page.

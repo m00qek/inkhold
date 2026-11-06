@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from "vitest";
-import { barRows, setMenuRows, type BarRow } from "../../src/ui/barMenu";
+import { barRows, onceEach, setMenuRows, SUBMENU_AT, type BarRow } from "../../src/ui/barMenu";
 
 /** A bar like the library's: sort, view, a divider, then actions. */
 function bar(): { root: HTMLElement; select: HTMLSelectElement; list: HTMLButtonElement; upload: HTMLButtonElement } {
@@ -62,5 +62,39 @@ describe("a bar folded into ⋯", () => {
     const rows = barRows(root);
     expect(shape(rows)).toEqual(["[Whole notebook]", "Supernote"]);
     expect((rows[1] as Extract<BarRow, { kind: "item" }>).ext).toBe(".note");
+  });
+
+  it("lists an action once: a repeat goes, and a section or divider it leaves empty with it", () => {
+    const item = (label: string): BarRow => ({ kind: "item", label, onSelect: () => {} });
+    const rows: BarRow[] = [item("Version history"), item("Download"), { kind: "sep" }, { kind: "section", title: "Actions" }, item("Version history"), { kind: "sep" }, item("Restore")];
+    expect(shape(onceEach(rows))).toEqual(["Version history", "Download", "—", "Restore"]);
+  });
+
+  it("keeps rows that share a name in different sections: two views, two files", () => {
+    const item = (label: string): BarRow => ({ kind: "item", label, onSelect: () => {} });
+    const rows: BarRow[] = [
+      { kind: "section", title: "This page — current view" },
+      item("PDF document"),
+      { kind: "sep" },
+      { kind: "section", title: "This page — original view" },
+      item("PDF document"),
+    ];
+    expect(shape(onceEach(rows))).toEqual(["[This page — current view]", "PDF document", "—", "[This page — original view]", "PDF document"]);
+  });
+
+  it("brings a short menu's rows in, and puts a long one behind one row", () => {
+    const root = document.createElement("div");
+    const short = document.createElement("button");
+    short.textContent = "List options";
+    const long = document.createElement("button");
+    long.textContent = "Download";
+    root.append(short, long);
+    const many = (n: number): BarRow[] => Array.from({ length: n }, (_, i) => ({ kind: "item", label: `Row ${i}`, onSelect: () => {} }));
+    setMenuRows(short, () => many(2));
+    setMenuRows(long, () => many(SUBMENU_AT + 1));
+    const rows = barRows(root);
+    expect(shape(rows.filter((r) => r.kind !== "sub"))).toEqual(["Row 0", "Row 1"]);
+    const sub = rows.find((r) => r.kind === "sub");
+    expect(sub && sub.kind === "sub" ? [sub.label, sub.rows.length] : null).toEqual(["Download", SUBMENU_AT + 1]);
   });
 });

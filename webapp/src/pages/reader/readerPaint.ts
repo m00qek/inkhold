@@ -4,6 +4,7 @@ import type { Hash, Id, NoteMeta, PageRef } from "../../core/types";
 import { defaultPlaceholder, renderPage } from "../../render/lazy";
 import { dispatchApiFailure } from "../../api/client";
 import { FIT_PAGE } from "../viewer/viewerControls";
+import { isPhone } from "../../ui/breakpoints";
 import { tokenPx } from "../../ui/sidePanel";
 import type { PageLayer } from "../../core/types";
 import type { ReaderCtx } from "./readerContext";
@@ -99,27 +100,34 @@ export function createReaderPaint(ctx: ReaderCtx): ReaderPaint {
       ctx.pageCanvas.hidden = false;
     }
 
-    // Size the page: fit the stage height (or a zoom step), clamp to width.
+    // Size the page: fit the stage's content box (or a zoom step), clamp to
+    // width. Its padding, not a constant: on a phone an open panel is a sheet the
+    // stage pads itself clear of, so Fit lands the page above it.
     const rect = ctx.stage.getBoundingClientRect();
+    const cs = getComputedStyle(ctx.stage);
+    const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) || 0;
+    const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom) || 0;
     const aspect = page.width / page.height;
-    let h = Math.min(Math.max(rect.height - 56, 120), 1000);
-    // Note mode only, so `zoom` is a note-ladder value.
-    if (st.zoom !== FIT_PAGE && st.zoom in ZOOM_SCALE) h = 640 * ZOOM_SCALE[st.zoom as keyof typeof ZOOM_SCALE];
-    let w = h * aspect;
-    // Side panels take their widths from the layout tokens.
+    // Docked side panels take their widths from the layout tokens; a phone's
+    // are sheets below the page and take none.
+    const beside = !isPhone();
     const gap = tokenPx("--panel-gap", 22);
-    const ocrW = ctx.ocr.isOpen() ? tokenPx("--panel-w", 268) + gap : 0;
-    const layersW = ctx.panels.layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
-    const pagesW = st.pageIndexOpen ? tokenPx("--panel-w-narrow", 180) + gap : 0;
-    const maxW = Math.max(rect.width - 56 - ocrW - layersW - pagesW, 80);
-    // Fit keeps the whole page in view. A zoom step is a size, and may be
-    // wider than the stage, which then scrolls sideways: clamping it too
-    // threw every step away wherever Fit already filled the width (a phone,
-    // a tablet held upright), so handwriting could never be enlarged there.
-    if (st.zoom === FIT_PAGE && w > maxW) {
-      w = maxW;
-      h = w / aspect;
-    }
+    const ocrW = beside && ctx.ocr.isOpen() ? tokenPx("--panel-w", 268) + gap : 0;
+    const layersW = beside && ctx.panels.layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
+    const pagesW = beside && st.pageIndexOpen ? tokenPx("--panel-w-narrow", 180) + gap : 0;
+    const maxW = Math.max(rect.width - padX - ocrW - layersW - pagesW, 80);
+    // Fit keeps the whole page in view. A zoom step is a size, and a pinch a
+    // factor of Fit; either may be wider than the stage, which then scrolls
+    // sideways: clamping them too threw every step away wherever Fit already
+    // filled the width (a phone, a tablet held upright), so handwriting could
+    // never be enlarged there.
+    const fitH = Math.min(Math.min(Math.max(rect.height - padY, 120), 1000), maxW / aspect);
+    let h = fitH;
+    // Note mode only, so `zoom` is a note-ladder value.
+    if (st.pinch !== null) h = fitH * st.pinch;
+    else if (st.zoom !== FIT_PAGE && st.zoom in ZOOM_SCALE) h = 640 * ZOOM_SCALE[st.zoom as keyof typeof ZOOM_SCALE];
+    const w = h * aspect;
+    st.fitScale = h / fitH;
     ctx.pageEl.style.width = `${Math.round(w)}px`;
     ctx.pageEl.style.height = `${Math.round(h)}px`;
     ctx.pageWrap.style.height = `${Math.round(h)}px`;

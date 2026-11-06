@@ -24,6 +24,11 @@ export interface SidePanelOptions {
   label: string;
   wide?: boolean;
   hookPrefix?: string;
+  /**
+   * Shut the panel the way its toggle does. Given, the head carries a ×, shown
+   * where the panel is a sheet over the page (a phone), its toggle behind ⋯.
+   */
+  onClose?: () => void;
 }
 
 export interface SidePanel {
@@ -36,6 +41,30 @@ export type SidePanelStateKind = "loading" | "empty" | "error";
 
 export function sidePanelState(kind: SidePanelStateKind, message: string): HTMLElement {
   return el("p", { class: `side-panel__state side-panel__state--${kind}`, text: message });
+}
+
+function closeButton(label: string, onClose: () => void): HTMLElement {
+  const btn = el("button", {
+    type: "button",
+    class: "btn side-panel__close",
+    "aria-label": `Close ${label.toLowerCase()}`,
+    html: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none"/></svg>',
+  });
+  btn.addEventListener("click", onClose);
+  return btn;
+}
+
+/**
+ * An `onClose` that shuts a panel through its `toggle`, so every rule the toggle
+ * keeps (pressed state, relayout, saved intent) still runs. Focus then goes to
+ * the toggle, or to the bar's ⋯ where the toggle is folded away.
+ */
+export function closeWith(toggle: HTMLElement): () => void {
+  return () => {
+    toggle.click();
+    const more = toggle.closest(".toolbar")?.querySelector<HTMLElement>(".toolbar__more");
+    (toggle.offsetParent !== null ? toggle : more)?.focus();
+  };
 }
 
 export function createSidePanel(opts: SidePanelOptions): SidePanel {
@@ -57,6 +86,7 @@ export function createSidePanel(opts: SidePanelOptions): SidePanel {
       { class: `side-panel__head${hook("__head")}` },
       el("span", { class: `side-panel__head-ic${hook("__head-ic")}`, "aria-hidden": "true", html: opts.icon }),
       el("span", { text: opts.label }),
+      ...(opts.onClose ? [closeButton(opts.label, opts.onClose)] : []),
     ),
     body,
   );

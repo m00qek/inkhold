@@ -243,7 +243,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
     view: [
       { kind: "custom", key: "zoom", el: zoomStepper.el, focus: zoomStepper.focus, fold: true },
       { kind: "custom", key: "font-size", el: fontStepper.el, focus: fontStepper.focus },
-      { kind: "custom", key: "find", el: findToggle, focus: [findToggle], fold: true },
+      { kind: "custom", key: "find", el: findToggle, focus: [findToggle], top: true },
     ],
     file: [
       { kind: "custom", key: "versions", el: versionsBtn, focus: [versionsBtn] },

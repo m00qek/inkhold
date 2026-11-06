@@ -155,6 +155,9 @@
 .backbtn {
   display: inline-flex;
   align-items: center;
+  /* Centred: an icon-only button held to a finger's width (44px on a touch
+     screen) would otherwise keep its spare room all on one side. */
+  justify-content: center;
   gap: 7px;
   /* Compact viewer-toolbar control. */
   height: var(--control-h-sm);
@@ -182,6 +185,9 @@
 .btn {
   display: inline-flex;
   align-items: center;
+  /* Centred: an icon-only button held to a finger's width (44px on a touch
+     screen) would otherwise keep its spare room all on one side. */
+  justify-content: center;
   gap: 7px;
   /* The app's shared button: compact height and system chrome. */
   height: var(--control-h-sm);
@@ -389,3 +395,12 @@
   inset: 0;
 }
 
+
+/* Every viewer's page area: a finger scrolls it, but a pinch and a double tap
+   are the viewer's own (`ui/pinchZoom.ts`), not the browser's page zoom. */
+.stage,
+.filestage,
+.pdf-wrap,
+.spd-stage {
+  touch-action: pan-x pan-y;
+}

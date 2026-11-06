@@ -11,6 +11,8 @@ export interface PdfViewerState {
   pageIndex: number;
   pageCount: number;
   zoom: Zoom;
+  /** A pinch's size as a factor of Fit page; set, it stands in for `zoom`. */
+  pinch: number | null;
   fromBin: boolean;
   /** What the file-zone actions act on; cleared by `release()`. */
   meta: NoteMeta | null;

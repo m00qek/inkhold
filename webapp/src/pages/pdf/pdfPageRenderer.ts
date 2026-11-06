@@ -67,6 +67,7 @@ export interface PdfPageRendererState {
   pageIndex(): number;
   pageCount(): number;
   zoom(): Zoom;
+  pinch(): number | null;
   meta(): NoteMeta | null;
   fromBin(): boolean;
   markId(): Id | null;
@@ -108,6 +109,8 @@ export interface PdfPageRenderer {
   /** The canvas's box in CSS pixels: the one page-to-screen conversion. */
   cssCanvasSize(): { width: number; height: number };
   pageSizePt(): { width: number; height: number } | null;
+  /** The page's size now, as a factor of Fit page (what a pinch starts from). */
+  relativeScale(): number;
   reset(): void;
 }
 
@@ -145,7 +148,19 @@ export function createPdfPageRenderer(opts: PdfPageRendererOptions): PdfPageRend
   }
 
   function fitScale(pageWidthPt: number, pageHeightPt: number): number {
-    return fitScaleIn(pageWidthPt, pageHeightPt, availableBox(), state.zoom() === FIT_WIDTH);
+    return fitScaleIn(pageWidthPt, pageHeightPt, availableBox(), state.pinch() === null && state.zoom() === FIT_WIDTH);
+  }
+
+  /** Points to CSS px now: a pinch is a factor of Fit page, a rung a multiple of its fit. */
+  function cssScale(pageWidthPt: number, pageHeightPt: number): number {
+    return fitScale(pageWidthPt, pageHeightPt) * (state.pinch() ?? ZOOM_SCALE[state.zoom()]);
+  }
+
+  function relativeScale(): number {
+    const size = pageSizePtNow;
+    if (!size) return 1;
+    const page = fitScaleIn(size.width, size.height, availableBox(), false);
+    return page > 0 ? cssScale(size.width, size.height) / page : 1;
   }
 
   /** Raster DPR, capped at 2 to limit wasm heap use. */
@@ -159,7 +174,7 @@ export function createPdfPageRenderer(opts: PdfPageRendererOptions): PdfPageRend
   }
 
   function scaleFor(pageWidthPt: number, pageHeightPt: number): number {
-    const wanted = fitScale(pageWidthPt, pageHeightPt) * ZOOM_SCALE[state.zoom()] * rasterDpr();
+    const wanted = cssScale(pageWidthPt, pageHeightPt) * rasterDpr();
     return clampRasterScale(pageWidthPt, pageHeightPt, wanted);
   }
 
@@ -360,6 +375,7 @@ export function createPdfPageRenderer(opts: PdfPageRendererOptions): PdfPageRend
     stageInner,
     cssCanvasSize,
     pageSizePt: () => pageSizePtNow,
+    relativeScale,
     reset(): void {
       pageSizePtNow = null;
     },

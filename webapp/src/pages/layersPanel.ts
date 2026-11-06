@@ -22,6 +22,8 @@ export interface LayersPanelOptions {
   paintThumb: (layer: PanelLayer) => HTMLElement;
   onToggle: (id: number, visible: boolean) => void;
   onOpacity?: (id: number, opacity01: number) => void;
+  /** Shut the panel as its toggle does (`SidePanelOptions.onClose`). */
+  onClose?: () => void;
 }
 
 export interface LayersPanel {
@@ -57,6 +59,7 @@ export function createLayersPanel(opts: LayersPanelOptions): LayersPanel {
     label: "Layers",
     wide: true,
     hookPrefix: p ? `${p}-layers` : undefined,
+    onClose: opts.onClose,
   });
   panel.body.append(list);
 

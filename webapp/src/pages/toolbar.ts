@@ -22,6 +22,8 @@ export interface ToolbarButton {
   pressed?: boolean;
   /** On a phone, moves from the bar into ⋯ (an occasional tool). */
   fold?: boolean;
+  /** On a phone, sits in the top row beside ⋯, not on the bottom bar (Find). */
+  top?: boolean;
   onClick?: (btn: HTMLButtonElement) => void;
 }
 
@@ -34,6 +36,8 @@ export interface ToolbarCustom {
   focus?: HTMLElement[];
   /** On a phone, moves from the bar into ⋯ (an occasional tool). */
   fold?: boolean;
+  /** On a phone, sits in the top row beside ⋯, not on the bottom bar (Find). */
+  top?: boolean;
 }
 
 export type ToolbarControl = ToolbarButton | ToolbarCustom;
@@ -66,11 +70,14 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
   /** The view zone's occasional tools, which a phone keeps behind ⋯. */
   const folded: (HTMLElement | null)[] = [];
   const focusables: HTMLElement[] = [];
+  /** Controls a phone shows in the top row, each with a mark where it lives otherwise. */
+  const topped: HTMLElement[] = [];
 
   function render(control: ToolbarControl): HTMLElement {
     if (control.fold) folded.push(control.kind === "custom" ? control.el : null);
     if (control.kind === "custom") {
       if (control.fold) control.el.dataset["fold"] = "";
+      if (control.top) topped.push(control.el);
       controls.set(control.key, control.el);
       for (const f of control.focus ?? []) focusables.push(f);
       return control.el;
@@ -94,6 +101,7 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
       btn.dataset["fold"] = "";
       folded[folded.length - 1] = btn;
     }
+    if (control.top) topped.push(btn);
     controls.set(control.key, btn);
     focusables.push(btn);
     return btn;
@@ -119,7 +127,8 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
     for (const f of lead.focus ?? []) focusables.push(f);
   }
   root.append(el("span", { class: "toolbar__spacer" }));
-  root.append(zone("toolbar__group", spec.viewLabel, spec.view));
+  const viewZone = zone("toolbar__group", spec.viewLabel, spec.view);
+  root.append(viewZone);
   // Decorative CSS divider, never a `|` glyph (it would be read aloud).
   root.append(el("span", { class: "toolbar__sep", "aria-hidden": "true" }));
   const fileZone = zone("toolbar__group toolbar__group--file", spec.fileLabel, spec.file);
@@ -149,15 +158,39 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
       openBarMenu(more, [...rows, ...file]);
     }
   });
+  // The top row's tools on a phone (Find): moved, not copied, so there is
+  // one of each and the order you tab in is the order you see.
+  const top = el("div", { class: "toolbar__top" });
+  const homes = topped.map((c) => {
+    const mark = document.createComment(" a phone shows this in the top row ");
+    c.before(mark);
+    return { c, mark };
+  });
+  root.append(top);
   root.append(more);
   focusables.push(more);
   const phone = window.matchMedia(PHONE_QUERY);
   const fold = () => {
     fileZone.hidden = phone.matches;
     more.hidden = !phone.matches;
+    for (const { c, mark } of homes) {
+      if (phone.matches) top.append(c);
+      else mark.after(c);
+    }
   };
   phone.addEventListener("change", fold);
   fold();
+
+  // On a phone the view zone is the bar along the bottom, over the stage: its
+  // height, measured (it may wrap), is what the stage and a panel's sheet keep
+  // clear of (`--phone-bar-h`, styles/23-phone.css). Only the shown viewer's
+  // bar has a size.
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(() => {
+      const h = viewZone.getBoundingClientRect().height;
+      if (phone.matches && h > 0) document.documentElement.style.setProperty("--phone-bar-h", `${Math.ceil(h)}px`);
+    }).observe(viewZone);
+  }
 
   // ---- roving tabindex ----
   // The bar is one tab stop. The handler stops the event once it acts so a
@@ -167,9 +200,10 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
 
   function usable(): HTMLElement[] {
     // Not inside a hidden zone either (the file zone, folded on a phone).
-    return focusables.filter(
-      (f) => !f.hidden && !f.closest("[hidden]") && !(phone.matches && f.closest("[data-fold]")) && !(f as HTMLButtonElement).disabled,
-    );
+    return focusables
+      .filter((f) => !f.hidden && !f.closest("[hidden]") && !(phone.matches && f.closest("[data-fold]")) && !(f as HTMLButtonElement).disabled)
+      // Document order: a phone moves some (the top row's), and arrows go as the eye does.
+      .sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
   }
 
   function activate(next: HTMLElement): void {

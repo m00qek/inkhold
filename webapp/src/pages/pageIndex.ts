@@ -2,6 +2,7 @@
 // PDF viewer, with the paint as a parameter. Rows leaving the window are unmounted
 // and their canvas zeroed, so a 1,700-page document never holds 1,700 canvases.
 
+import { PHONE_QUERY } from "../ui/breakpoints";
 import { el } from "../ui/dom";
 import { createSidePanel } from "../ui/sidePanel";
 import { VirtualList } from "../ui/virtualList";
@@ -9,6 +10,12 @@ import { svg, VIEWER_IC } from "./viewer/viewerIcons";
 
 /** Fixed row height, px (`--preview-h-filmstrip`); the virtual scroll math depends on it. */
 const ROW_H = 124;
+/**
+ * On a phone the panel is a sheet below the page and the pages run in a row
+ * you swipe along: each one's slot width, px (a portrait thumbnail, its ink
+ * gutter and a gap).
+ */
+const SLOT_W = 96;
 
 export interface PageIndexRow {
   readonly index: number;
@@ -23,6 +30,8 @@ export interface PageIndexOptions {
   /** Extra hook class, since the shared `.filmstrip` classes match every mounted viewer. */
   stripHook?: string;
   onPick(index: number): void;
+  /** Shut the panel as its toggle does (`SidePanelOptions.onClose`). */
+  onClose?: () => void;
   /**
    * Start the row's paint. Must tolerate being superseded: a late paint drops its
    * pixels rather than draw into a canvas now standing for another page.
@@ -66,6 +75,7 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
     icon: svg(VIEWER_IC.pages, 1.7),
     label: "Pages",
     hookPrefix: "pages",
+    onClose: opts.onClose,
   });
   panel.body.append(strip);
 
@@ -144,6 +154,32 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
     row.canvas.height = 0;
   }
 
+  const phone = window.matchMedia(PHONE_QUERY);
+  function build(): void {
+    const row = phone.matches;
+    strip.classList.toggle("filmstrip--row", row);
+    list = new VirtualList({
+      scrollContainer: panel.el,
+      hostContainer: panel.body,
+      contentContainer: strip,
+      totalItems: total,
+      itemHeight: row ? SLOT_W : ROW_H,
+      renderItem: buildRow,
+      recycleItem: (index) => dropRow(index),
+      overscan: 1,
+      axis: row ? "x" : "y",
+    });
+  }
+  // Crossing the phone breakpoint turns the column into a row or back.
+  phone.addEventListener("change", () => {
+    if (!list) return;
+    const n = total;
+    clear();
+    total = n;
+    build();
+    list?.scrollIntoView(current);
+  });
+
   function clear(): void {
     if (list) {
       list.destroy(); // recycles (and so unmounts) every row it holds
@@ -164,16 +200,7 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
       total = Math.max(0, count);
       if (total === 0) return;
       current = Math.min(current, total - 1);
-      list = new VirtualList({
-        scrollContainer: panel.el,
-        hostContainer: panel.body,
-        contentContainer: strip,
-        totalItems: total,
-        itemHeight: ROW_H,
-        renderItem: buildRow,
-        recycleItem: (index) => dropRow(index),
-        overscan: 1,
-      });
+      build();
     },
 
     setCurrent(index: number): void {
@@ -203,8 +230,12 @@ export function createPageIndex(opts: PageIndexOptions): PageIndex {
 
     setOpen(open: boolean): void {
       panel.setOpen(open);
-      // A hidden panel measured 0×0; re-measure on reveal.
-      if (open) list?.refresh();
+      // A hidden panel measured 0×0; re-measure on reveal, and bring the
+      // page being read into view.
+      if (open) {
+        list?.refresh();
+        list?.scrollIntoView(current);
+      }
     },
 
     clear,

@@ -63,6 +63,7 @@
 /* Folded on a phone (`pages/toolbar.ts`): the file zone behind ⋯, and ⋯
    itself everywhere else. Restated because `display` above beats the UA
    `[hidden]` rule. */
+.toolbar__top:empty,
 .toolbar__group[hidden],
 .toolbar__more[hidden] {
   display: none;

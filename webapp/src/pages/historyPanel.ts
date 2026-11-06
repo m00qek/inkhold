@@ -104,6 +104,8 @@ export function createHistoryController(deps: HistoryControllerDeps): HistoryCon
       trigger: anchor,
       contains: (t) => anchor.contains(t) || pop.contains(t),
       close,
+      // As a sheet (a phone) it stays through scrolls; the registry asks.
+      pop,
     };
     let open_ = false;
 

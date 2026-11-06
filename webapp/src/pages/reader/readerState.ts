@@ -15,6 +15,10 @@ export interface ReaderState {
   summaryRecognized: boolean;
   pageIndex: number;
   zoom: Zoom;
+  /** A pinch's size as a factor of Fit; set, it stands in for `zoom`. */
+  pinch: number | null;
+  /** The page's size as last painted, as a factor of Fit (what a pinch starts from). */
+  fitScale: number;
   open: boolean;
   paintToken: number;
   /** Opened from the bin: raw URLs need the bin-scoped route (the live one 404s). */

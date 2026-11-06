@@ -37,6 +37,13 @@
   --hit-target: 2rem;
   /* The smallest thing a finger is asked to hit (WCAG 2.5.5, platform guides). */
   --hit-target-touch: max(44px, 2.75rem);
+  /* A phone's viewer bar along the bottom, measured by pages/toolbar.ts once
+     shown (it may wrap); this is one row, its first-paint guess. */
+  --phone-bar-h: calc(var(--hit-target-touch) + 2 * var(--sp-1) + 1px + env(safe-area-inset-bottom, 0px));
+  /* A viewer's panel as a sheet on that bar: room for the page above it. */
+  --phone-sheet-h: min(40dvh, 21rem);
+  /* The Pages sheet: its head over one row of thumbnails. */
+  --phone-strip-h: 12.5rem;
   /* The smallest a pointer target may be anywhere (WCAG 2.5.8). */
   --hit-target-min: max(24px, 1.5rem);
   --topbar-control-h: var(--control-h);

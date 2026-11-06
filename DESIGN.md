@@ -734,20 +734,36 @@ Touch is its own question, `(pointer: coarse)`, never inferred from width.
   A tab bar holds Library, To-Do, Search and You; its Search opens the box
   across the bar, which stays while it holds a query. The tab bar gives way
   to a viewer's own bar. Cards run two columns. Viewers keep ‹, the title and ⋯ on top and
-  one row of reading controls at the bottom (paging and zoom; text size for
-  text); their occasional tools (`fold` in the toolbar spec: Find,
-  Recognized text, Layers, Pages, Outline) and the file's actions are in
-  ⋯, the tools under "View", ticked while on. Panels open as sheets above
-  the bottom row and start closed on a phone. Every place below another has
+  one row at the bottom: paging, then the panel switches (Recognized text,
+  Layers, Pages; a PDF's Pages, Outline, Annotations), kept in view because
+  a switch's state is worth seeing (text size for text). Zoom is a pinch,
+  and a double tap back to Fit (`ui/pinchZoom.ts`): the page scales by a
+  transform while the fingers move, then the viewer re-renders sharp at
+  that factor of Fit and the point under the fingers stays put. The zoom
+  stepper is the one-finger way (WCAG 2.5.1), in ⋯ with the other
+  occasional tools (`fold` in the toolbar spec: Find, zoom) and the file's
+  actions, the tools under "View", ticked while on. A viewer's panels start
+  closed on a phone and open as ONE sheet sitting on the bottom row, never
+  beside the page: one open at a time, a fixed height (Pages a short strip
+  whose thumbnails run sideways), a × in its head. The stage pads itself
+  clear of the bar (`--phone-bar-h`, measured) and of an open sheet, and
+  Fit measures that padded box, so the page always lands above both. Every place below another has
   ‹ in ☰'s place, one level up (a folder's parent, Lists, the folder a
-  search started from): iPhones have no back button. Menus are sheets
+  search started from): iPhones have no back button. A viewer's Find sits
+  beside ⋯ in the top row (`top` in the toolbar spec: moved there, not
+  copied, so focus order follows what you see). Menus are sheets
   along the bottom (`placePop` sets `data-sheet`). On a touch screen controls are 44px.
 - **A bar with no room folds into ⋯** (`ui/barMenu.ts`): its controls become
   ONE menu, in the bar's order, a divider wherever the bar has one (and
   around each choice). A select becomes its options and a pressed-button
   group its buttons, the current one ticked (`menuitemradio`); a button
   with a menu of its own brings that menu's rows in (`setMenuRows`, else its
-  in-page `.menu__pop`), so there is never a menu inside a menu; any other
+  in-page `.menu__pop`) when short; a long one (more than `SUBMENU_AT`, 4,
+  items: a viewer's Download) is one row with ›, that opens its rows in the
+  same sheet under a ‹ row back, rather than burying the rest of ⋯. An
+  action is listed once (`onceEach`): a row repeats one of the same name in
+  the same section, or one in no section (the file's own action), never
+  merely a namesake (two views' "PDF document" are two files); any other
   button is a row with its icon and name. Rows only forward to the bar's
   control. On a phone: the library bar's tools, To-Do's (New list, the
   list's actions, Download), and each viewer's file zone. ⋯ shows only when
