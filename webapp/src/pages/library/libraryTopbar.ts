@@ -91,6 +91,8 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     if (pendingSearchCaret === null) return;
     const caret = pendingSearchCaret;
     pendingSearchCaret = null;
+    // Still focused: the caret is where the person left it.
+    if (document.activeElement === searchInput) return;
     searchInput.focus();
     // Guard only for DOMs without selection ranges (headless tests).
     try {
@@ -101,6 +103,9 @@ export function createTopbar(deps: TopbarDeps): Topbar {
 
   searchInput.addEventListener("input", () => {
     const next = searchInput.value;
+    // Keystrokes that land before the route's focus comes back move the caret
+    // it will restore: it must be where the last one left it, not the first.
+    if (pendingSearchCaret !== null) pendingSearchCaret = searchInput.selectionStart ?? next.length;
     // A blank query is the folder the shell still holds.
     const target = next.trim() === "" ? folderHref(deps.folderId()) : searchHref(next);
     if (current().name !== "search") {

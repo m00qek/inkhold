@@ -1,7 +1,7 @@
 // The library's route handlers: each place a URL names, and opening notes, versions and trashed files.
 
 import { parseView, viewPath } from "../todo/todoModel";
-import { destinationHref, folderHref, notePageHref, redirect, searchHref, todoHref } from "../../router";
+import { destinationHref, folderHref, notePageHref, redirect, replaceRoute, searchHref, todoHref } from "../../router";
 import { resolveVersionShort } from "../versionShort";
 import type { Api } from "../../api/types";
 import type { Id, NoteMeta, NoteSummary } from "../../core/types";
@@ -95,8 +95,16 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
       }
       enterPlace();
       st.destination = null;
-      // The box agrees with the URL on reload or shared link.
-      if (ctx.topbar.searchInput.value !== q) ctx.topbar.searchInput.value = q;
+      const box = ctx.topbar.searchInput;
+      // Someone typing is ahead of the route the first keystroke started: the
+      // box is the truth, and the URL follows it. Otherwise (a reload, a shared
+      // link) the box takes the URL's query.
+      if (document.activeElement === box && box.value.trim() !== "") {
+        if (box.value !== q) replaceRoute(searchHref(box.value));
+        q = box.value;
+      } else if (box.value !== q) {
+        box.value = q;
+      }
       ctx.modes.applyQuery(q);
       // After the arriving-keystroke navigation's blur; a no-op otherwise.
       ctx.topbar.restoreSearchFocus();

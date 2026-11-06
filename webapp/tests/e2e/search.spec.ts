@@ -55,6 +55,18 @@ const INDEX_TEXT: Record<string, TextRecord> = Object.fromEntries(
 );
 
 test.describe("universal search", () => {
+  test("letters typed quickly land in order, while the first one is still taking the page to search", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/");
+    await railSettled(page);
+    const box = searchBox(page);
+    await box.click();
+    // Key by key, as a person types: `fill` would set the whole value at once.
+    await box.pressSequentially("budget serving");
+    await expect(box).toHaveValue("budget serving");
+    await expect(page).toHaveURL(/q=budget(%20|\+)serving$/);
+  });
+
   test("typing surfaces rows that mark the matched name — and carry no excerpt", async ({ page }) => {
     await signedIn(page);
     await page.goto("/");
