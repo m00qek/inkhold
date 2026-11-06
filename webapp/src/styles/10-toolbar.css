@@ -3,11 +3,19 @@
    `.btn`, `.icon-btn` and `.menu*` stay in their cascade-sensitive files. */
 .toolbar {
   display: flex;
+  /* At a large text size the zones wrap rather than crushing the title. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 14px;
   padding: 12px 20px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
+}
+/* The title gives way first: a small basis, so the bar wraps only when the
+   controls themselves no longer fit, not because a long name would. */
+.toolbar > .reader__title,
+.toolbar > .viewer__title {
+  flex: 1 1 8rem;
 }
 /* Pushes the two zones to the trailing edge. */
 .toolbar__spacer {

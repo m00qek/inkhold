@@ -230,6 +230,11 @@
     0 18px 40px -20px var(--shadow),
     0 2px 6px -4px var(--shadow);
 }
+/* Set by the export menu when hanging from the end would leave the bar. */
+.menu__pop[data-align="start"] {
+  inset-inline-start: 0;
+  inset-inline-end: auto;
+}
 .menu.is-open .menu__pop {
   display: block;
 }

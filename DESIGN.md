@@ -712,6 +712,31 @@ nothing. `tests/e2e/focus.spec.ts` holds that every Tab stop shows focus.
   engine (every iPhone browser) on devlab's inkhold-ci, since WebKit needs
   Debian/Ubuntu libraries.
 
+### 11.9 Phones and tablets
+
+By the room there is (`00-tokens.css`): phone below 700px, tablet to
+1099px, desktop from 1100px.
+
+- **Phone** (`pages/library/libraryPhone.ts`, `styles/23-phone.css`): the
+  rail is a drawer from the bar's ☰ (modal: the rest is inert, focus goes in
+  and back to ☰; Escape, the scrim or a link closes it). The bar keeps ☰, the
+  place's name, a search button (the box opens across the bar and stays
+  while it holds a query) and ⋯ (sort, view, upload, To-Do's tools). A tab
+  bar holds Library, To-Do, Search and You; it gives way to a viewer's own
+  bar. Cards run two columns. Viewers keep Back, the title and the file's
+  actions (icons) on top and their reading controls in a bar at the bottom;
+  their panels open as sheets above it. Menus are sheets along the bottom
+  (`placePop` sets `data-sheet`). On a touch screen controls are 44px.
+- **Tablet:** the rail is a strip of icons; names stay in the accessibility
+  tree and in a tooltip.
+- **Text size:** the rail's width, the account page's label gutter and the
+  viewers' toolbar (which wraps) follow the text size, so 200% clips
+  nothing. On touch screens the root takes Apple's body style
+  (`-apple-system-body`), so iPhones follow the system's Larger Text; on a Mac
+  it would shrink the app, hence touch only.
+- **Tests:** the guard adds a tablet size; `tests/e2e/phone.spec.ts` holds the
+  drawer, the tab bar, search, sheets and the viewer's bottom bar.
+
 ## 12. Where things live
 
 The directories are layers. An import points down the list, never up: a file

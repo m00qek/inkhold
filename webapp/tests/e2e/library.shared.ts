@@ -9,6 +9,8 @@ import { railSettled } from "./helpers/app";
  */
 export async function openCategory(page: Page, name: string): Promise<void> {
   await railSettled(page);
+  // On a phone the rail is a drawer behind ☰.
+  if ((page.viewportSize()?.width ?? 1280) < 700) await page.getByRole("button", { name: "Places" }).click();
   await navItem(page, name).click();
 }
 

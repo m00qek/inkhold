@@ -26,7 +26,8 @@
 /* ---- App grid: rail | main, divided by the red margin rule ---- */
 .app {
   display: grid;
-  grid-template-columns: 232px 1fr;
+  /* 232px at the default text size; grows with it, so names never clip. */
+  grid-template-columns: 14.5rem 1fr;
   height: 100%;
 }
 

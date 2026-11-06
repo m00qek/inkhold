@@ -8,6 +8,7 @@
 // hands it to the parts (`libraryContext.ts` has the rule). The behaviour is
 // in the parts, one concern each.
 
+import { createPhoneShell } from "./libraryPhone";
 import { createPlace } from "../../ui/place";
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
@@ -279,13 +280,23 @@ export function createAppShell(deps: AppDeps): AppShell {
     },
   });
 
-  ctx.root = el(
-    "div",
-    { class: "sn-root" },
-    skipLink(content),
-    el("div", { class: "app" }, ctx.sidebar, el("div", { class: "main" }, el("header", { class: "main__head" }, ctx.topbar.el, backupNotice.el), content)),
-    toastEl,
-  );
+  const header = el("header", { class: "main__head" }, ctx.topbar.el, backupNotice.el);
+  const column = el("div", { class: "main" }, header, content);
+  const app = el("div", { class: "app" }, ctx.sidebar, column);
+  ctx.root = el("div", { class: "sn-root" }, skipLink(content), app, toastEl);
+
+  // On a phone: the rail as a drawer, the bar's buttons, the tab bar.
+  const phone = createPhoneShell({
+    root: ctx.root,
+    app,
+    rail: ctx.sidebar,
+    header,
+    main: content,
+    topbar: ctx.topbar,
+    searchInput: ctx.topbar.searchInput,
+    section: () => (st.destination === TODO_KEY ? "todo" : st.destination === ACCOUNT_KEY ? "you" : "library"),
+  });
+  column.append(phone.tabbar);
 
   // ---- destinations ----
   // The breadcrumbs' current place names every library screen (folders,
@@ -421,6 +432,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     openNoteVersion: routes.openNoteVersion,
     openBinNote: routes.openBinNote,
     destroy(): void {
+      phone.destroy();
       cancelWarmWasm();
       unsubscribe();
       // Otherwise one coalescing window and engine memory leak per sign-in cycle.

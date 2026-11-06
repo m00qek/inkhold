@@ -3,6 +3,24 @@ import type { Page } from "@playwright/test";
 // The screens and sizes the semantic guard (`semantics.spec.ts`) and the
 // pixel comparison (`visual.spec.ts`) both visit.
 
+/** On a phone the rail is a drawer, the search box and the bar's tools open from buttons. */
+async function phoneOpens(page: Page, button: string): Promise<void> {
+  if ((page.viewportSize()?.width ?? 1280) >= 700) return;
+  await page.locator(`.topbar__phone[aria-label="${button}"]`).click();
+}
+async function railLink(page: Page, name: string) {
+  await phoneOpens(page, "Places");
+  await page.locator(".rail").getByText(name, { exact: true }).click();
+}
+async function searchFor(page: Page, q: string) {
+  await phoneOpens(page, "Search");
+  await page.getByRole("searchbox").first().fill(q);
+}
+async function barButton(page: Page, name: string) {
+  await phoneOpens(page, "More");
+  await page.getByRole("button", { name }).click();
+}
+
 export interface Screen {
   name: string;
   /** Its own title; the library's root may say just "Inkhold". */
@@ -50,7 +68,7 @@ export const SCREENS: Screen[] = [
     ownTitle: true,
     open: async (p) => {
       await p.goto("/");
-      await p.locator(".rail").getByText("Files", { exact: true }).click();
+      await railLink(p, "Files");
     },
   },
   {
@@ -58,7 +76,7 @@ export const SCREENS: Screen[] = [
     ownTitle: true,
     open: async (p) => {
       await p.goto("/");
-      await p.getByRole("searchbox").first().fill("budget");
+      await searchFor(p, "budget");
       await settle(p);
       await p.locator(".coverage summary").click();
     },
@@ -82,7 +100,7 @@ export const SCREENS: Screen[] = [
     ownTitle: true,
     open: async (p) => {
       await p.goto("/#/todo");
-      await p.getByRole("button", { name: "New list" }).click();
+      await barButton(p, "New list");
     },
   },
   {
@@ -90,7 +108,7 @@ export const SCREENS: Screen[] = [
     ownTitle: true,
     open: async (p) => {
       await p.goto("/");
-      await p.locator(".rail").getByText("Files", { exact: true }).click();
+      await railLink(p, "Files");
       const card = p.locator(".card", { hasText: "Meeting notes" });
       await card.hover();
       await card.locator(".card__more").click();
@@ -106,4 +124,5 @@ export const VARIANTS = [
   { name: "desktop-light", width: 1280, height: 900, dark: false, minTarget: 24 },
   { name: "desktop-dark", width: 1280, height: 900, dark: true, minTarget: 24 },
   { name: "phone", width: 390, height: 844, dark: false, minTarget: 44 },
+  { name: "tablet", width: 820, height: 1180, dark: false, minTarget: 44 },
 ] as const;

@@ -60,6 +60,8 @@
   --z-toast: 50; /* the shell's toast */
   --z-panel: 55; /* floating panels: transfers, the bin's preview */
   --z-toast-top: 60; /* the bin's undo toast, over its preview */
+  --z-scrim: 70; /* a phone's drawer dims the app beneath it */
+  --z-drawer: 80; /* the places drawer on a phone */
   /* Above all app chrome, for the portaled popover menus and the skip link. */
   --z-popover: 100;
 

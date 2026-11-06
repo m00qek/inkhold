@@ -140,7 +140,7 @@ export function installLibraryRail(ctx: LibraryCtx): void {
   // The rail is the app's navigation landmark: the places, and who you are.
   ctx.sidebar = el(
     "nav",
-    { class: "rail", "aria-label": "Library" },
+    { class: "rail", id: "rail", "aria-label": "Library" },
     el(
       "div",
       { class: "brand" },

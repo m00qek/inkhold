@@ -119,6 +119,8 @@ test.describe("library rail + gallery", () => {
       await expect(trigger).toHaveCount(1);
       await opacityOf(trigger);
 
+      // On a phone the view switch is among the bar's tools, behind ⋯.
+      await page.getByRole("button", { name: "More" }).click();
       await page.getByRole("button", { name: "List view" }).click();
       await page.addStyleTag({ content: `*, *::before, *::after { transition: none !important; }` });
       const listMore = page.locator(".card", { hasText: "Weekly review" }).locator(".card__more");

@@ -34,6 +34,9 @@ export const ICONS = {
   /** A bare check mark, for drawing inside a ring of its own. */
   tick: '<path d="m7 12.5 3.2 3.2L17 9"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  person: '<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.5-3.5 4-5 7-5s5.5 1.5 7 5"/>',
   more: '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>',
   move: '<path d="M4 7h13l-3-3M20 17H7l3 3"/>',
   calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/>',

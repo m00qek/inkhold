@@ -3,6 +3,7 @@
 // "one open at a time" registry with outside-click/Escape/scroll dismissal.
 // Callers own the contents and their roving focus.
 
+import { isPhone } from "./breakpoints";
 import { el } from "./dom";
 
 export const VIEWPORT_MARGIN = 8;
@@ -26,9 +27,18 @@ export function getPortalRoot(): HTMLElement {
 
 /**
  * Position an open, portaled pop below the trigger, right-aligned; flips to
- * left-align or upward when it would leave the viewport.
+ * left-align or upward when it would leave the viewport. On a phone it is a
+ * sheet at the bottom of the screen instead (`data-sheet`, 23-phone.css),
+ * where a thumb reaches it.
  */
 export function placePop(trigger: HTMLElement, pop: HTMLElement): void {
+  if (isPhone()) {
+    pop.dataset["sheet"] = "";
+    pop.style.left = "";
+    pop.style.top = "";
+    return;
+  }
+  delete pop.dataset["sheet"];
   const r = trigger.getBoundingClientRect();
   const vw = window.innerWidth;
   const vh = window.innerHeight;

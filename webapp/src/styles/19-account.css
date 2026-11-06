@@ -15,8 +15,9 @@
 
   --acct-danger: var(--margin-ink);
   /* Spine geometry in one place; wide enough for "Signing in" on one line. */
-  --acct-gutter: 138px;
-  --acct-label-gap: 14px;
+  /* rem: the margin labels grow with the text instead of overrunning it. */
+  --acct-gutter: 8.625rem;
+  --acct-label-gap: 0.875rem;
 }
 
 .acct__body {

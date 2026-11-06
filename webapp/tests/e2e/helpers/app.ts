@@ -287,6 +287,11 @@ export function cardButton(page: Page, name: string | RegExp): Locator {
  * gallery repaint. Use before clicking a category in a test that measures.
  */
 export async function railSettled(page: Page): Promise<void> {
+  // On a phone the rail is in a closed drawer: loaded, not visible.
+  if ((page.viewportSize()?.width ?? 1280) < 700) {
+    await page.locator('[aria-label="Folders"][aria-busy="false"]').waitFor({ state: "attached" });
+    return;
+  }
   await page.getByRole("group", { name: "Folders" }).and(page.locator('[aria-busy="false"]')).waitFor();
 }
 

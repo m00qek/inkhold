@@ -1,0 +1,343 @@
+/* ---- the library on a phone (below 700px; `00-tokens.css`) ----
+   The rail is a drawer opened from the bar's ☰ (`libraryPhone.ts`), the bar
+   keeps a title and three buttons (☰, search, ⋯) whose search box and tools
+   open over it, and a tab bar at the bottom holds Library, To-Do, Search and
+   You. Wider, none of it shows. */
+
+.topbar__phone,
+.tabbar,
+.drawer-scrim {
+  display: none;
+}
+
+/* iPhones: rem follows the root size, and Safari only sizes the root by the
+   system's Larger Text setting when the page asks for Apple's body style
+   (its default is 17px, so text there runs a little larger than 16px
+   desktop). `text-size-adjust` stops Safari inflating text on its own when
+   the phone turns sideways. */
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+/* Touch screens only: on a Mac, Safari's body style is smaller (13px) and
+   would shrink the whole app. */
+@supports (font: -apple-system-body) {
+  @media (pointer: coarse) {
+    html {
+      font: -apple-system-body;
+    }
+  }
+}
+
+@media (max-width: 699px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The rail, as a drawer from the start edge. */
+  .rail {
+    position: fixed;
+    inset-block: 0;
+    inset-inline-start: 0;
+    z-index: var(--z-drawer);
+    inline-size: min(300px, 85vw);
+    padding-block-end: env(safe-area-inset-bottom, 0px);
+    box-shadow: 0 0 30px var(--shadow);
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition:
+      transform 0.2s ease,
+      visibility 0s linear 0.2s;
+  }
+  .sn-root.is-drawer-open .rail {
+    transform: none;
+    visibility: visible;
+    transition: transform 0.2s ease;
+  }
+  .drawer-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-scrim);
+    background: color-mix(in srgb, var(--ink) 40%, transparent);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+  .sn-root.is-drawer-open .drawer-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* The bar: ☰, the place's name, search, ⋯. */
+  .topbar {
+    position: relative;
+    gap: var(--sp-1);
+    padding: var(--sp-1) var(--sp-2);
+  }
+  .topbar__phone {
+    display: grid;
+    place-items: center;
+    flex: none;
+    inline-size: var(--hit-target-touch);
+    block-size: var(--hit-target-touch);
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .topbar__phone svg {
+    inline-size: 22px;
+    block-size: 22px;
+  }
+  .topbar__phone[aria-expanded="true"] {
+    background: var(--hover);
+  }
+  /* Only where you are: the drawer is the way elsewhere. */
+  .crumbs {
+    flex: 1;
+    min-inline-size: 0;
+  }
+  .crumbs > a,
+  .crumbs__sep {
+    display: none;
+  }
+  .crumbs__here {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font: 500 var(--fs-title) / 1.2 var(--font-display);
+    letter-spacing: 0;
+    color: var(--ink);
+  }
+
+  /* Search, across the whole bar while open (or while it holds a query). */
+  .search {
+    display: none;
+  }
+  .sn-root.is-search-open .search {
+    display: flex;
+    position: absolute;
+    inset: var(--sp-1) var(--sp-2);
+    z-index: var(--z-raised);
+  }
+  .sn-root.is-search-open .search input {
+    /* 16px or more: below it iOS zooms the page on focus. */
+    font-size: var(--fs-title);
+  }
+
+  /* The bar's tools, as a panel under ⋯. */
+  .tools {
+    display: none;
+  }
+  .sn-root.is-tools-open .tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-2);
+    position: absolute;
+    inset-block-start: 100%;
+    inset-inline-end: var(--sp-2);
+    z-index: var(--z-menu);
+    max-inline-size: calc(100vw - 2 * var(--sp-2));
+    padding: var(--sp-3);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-card);
+    background: var(--sheet);
+    box-shadow: 0 8px 24px var(--shadow);
+  }
+
+  /* The tab bar, under the content. */
+  .main {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+  .tabbar {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    padding-block-end: env(safe-area-inset-bottom, 0px);
+    border-block-start: 1px solid var(--line);
+    background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
+  }
+  .tabbar__tab {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-block-size: calc(var(--hit-target-touch) + var(--sp-3));
+    border: 0;
+    background: transparent;
+    color: var(--ink-soft);
+    font: 500 var(--fs-eyebrow) var(--font-display);
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .tabbar__mark svg {
+    inline-size: 22px;
+    block-size: 22px;
+  }
+  .tabbar__tab[aria-current="page"],
+  .tabbar__tab[aria-expanded="true"] {
+    color: var(--accent);
+  }
+  /* The gallery: two columns of cards, each card's ⋯ inside its corner. */
+  .gallery:not(.is-list) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: var(--sp-3);
+    padding: var(--sp-4) var(--sp-4) var(--sp-8);
+  }
+  .gallery.is-list {
+    padding: var(--sp-2) var(--sp-3) var(--sp-8);
+  }
+
+  /* Reading: the reader's own bar takes the bottom. */
+  .sn-root.is-reading .tabbar {
+    display: none;
+  }
+
+  /* Every viewer's bar (note, PDF, text, sketch): the top row keeps Back, the
+     title and the file's actions as icons; the reading controls (paging,
+     zoom, find, panels) become a bar at the bottom, where a thumb is. */
+  .reader__bar,
+  .viewer__bar {
+    flex-wrap: nowrap;
+    gap: var(--sp-1);
+    padding: var(--sp-1) var(--sp-2);
+  }
+  .backbtn__label,
+  .viewer__back-label {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .reader__title,
+  .viewer__title {
+    flex: 1;
+    min-inline-size: 0;
+  }
+  .reader__title b,
+  .viewer__title b {
+    display: block;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .reader__bar .toolbar__spacer,
+  .viewer__bar .toolbar__spacer,
+  .reader__bar .toolbar__sep,
+  .viewer__bar .toolbar__sep {
+    display: none;
+  }
+  /* The file's actions: icons only (each keeps its name in aria-label). */
+  .toolbar__group--file {
+    flex: none;
+    gap: 0;
+  }
+  .toolbar__group--file .btn {
+    gap: 0;
+    padding-inline: 0;
+    justify-content: center;
+  }
+  .toolbar__group--file .btn__label {
+    display: none;
+  }
+  .reader__bar > .toolbar__group:not(.toolbar__group--file),
+  .viewer__bar > .toolbar__group:not(.toolbar__group--file) {
+    position: fixed;
+    inset-inline: 0;
+    inset-block-end: 0;
+    z-index: var(--z-menu);
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--sp-1) var(--sp-2);
+    padding: var(--sp-1) var(--sp-2) calc(var(--sp-1) + env(safe-area-inset-bottom, 0px));
+    border-block-start: 1px solid var(--line);
+    background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
+  }
+  /* A viewer's panels (pages, recognized text, layers, outline) open over
+     the page as a sheet above that bar, not docked beside it. */
+  .side-panel,
+  .side-panel--wide,
+  .pages {
+    position: fixed;
+    inset-inline: var(--sp-2);
+    inset-block-end: calc(2 * var(--hit-target-touch) + 3 * var(--sp-2) + env(safe-area-inset-bottom, 0px));
+    z-index: var(--z-menu);
+    inline-size: auto;
+    max-block-size: 55vh;
+    box-shadow: 0 -6px 24px var(--shadow);
+  }
+
+  /* Menus: a sheet along the bottom, full width, rows a finger's height. */
+  .menu__pop--float[data-sheet] {
+    inset-inline: 0;
+    inset-block: auto 0;
+    min-inline-size: 0;
+    max-inline-size: none;
+    max-block-size: 70vh;
+    overflow-y: auto;
+    padding: var(--sp-2) var(--sp-3) calc(var(--sp-4) + env(safe-area-inset-bottom, 0px));
+    border-radius: var(--radius-card) var(--radius-card) 0 0;
+    box-shadow: 0 -6px 30px var(--shadow);
+  }
+  .menu__pop--float[data-sheet] .menu__item {
+    min-block-size: calc(var(--hit-target-touch) + var(--sp-2));
+    font-size: var(--fs-title);
+  }
+
+  /* The page keeps clear of that bar. */
+  .sn-root.is-reading .content {
+    padding-block-end: calc(2 * var(--hit-target-touch) + 3 * var(--sp-2));
+  }
+}
+
+/* ---- a tablet (700–1099px): the rail as a strip of icons ----
+   The names stay in the tree for screen readers, and in a tooltip. */
+@media (min-width: 700px) and (max-width: 1099px) {
+  .app {
+    grid-template-columns: 4.5rem minmax(0, 1fr);
+  }
+  .brand {
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .brand > :not(.brand__mark),
+  .nav__name,
+  .nav__count,
+  .account__who {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .nav {
+    padding-inline: var(--sp-1);
+  }
+  .nav__label,
+  .nav__toggle,
+  .nav__item.is-nested,
+  .nav__item.is-nested::before,
+  .account__chevron,
+  .quota {
+    display: none;
+  }
+  .nav__item {
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .nav__state {
+    position: absolute;
+    inset-block-start: var(--sp-1);
+    inset-inline-end: var(--sp-1);
+  }
+  .account {
+    justify-content: center;
+    padding-inline: 0;
+  }
+}

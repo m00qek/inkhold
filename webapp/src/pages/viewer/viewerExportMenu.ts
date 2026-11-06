@@ -48,6 +48,13 @@ export function createViewerExportMenu(opts: {
     open = next;
     menu.classList.toggle("is-open", next);
     trigger.setAttribute("aria-expanded", String(next));
+    // The pop hangs from the trigger's end; on a bar that has wrapped, the
+    // trigger can start a row and the pop would leave the bar, so hang it
+    // from the start instead.
+    delete pop.dataset["align"];
+    if (!next) return;
+    const bar = menu.closest(".toolbar");
+    if (bar && pop.getBoundingClientRect().left < bar.getBoundingClientRect().left) pop.dataset["align"] = "start";
   }
 
   async function guard(btn: HTMLButtonElement, run: () => Promise<void>): Promise<void> {

@@ -42,8 +42,8 @@ export function createRailView(nav: HTMLElement): RailView {
           // where it goes. A plain click still runs the row's own action.
           const item =
             row.href !== null
-              ? el("a", { class: cls, href: row.href, "aria-current": row.current ? "page" : null }, ...parts)
-              : el("button", { class: cls, type: "button", "aria-current": String(row.current), "data-no-address": "" }, ...parts);
+              ? el("a", { class: cls, href: row.href, title: row.name, "aria-current": row.current ? "page" : null }, ...parts)
+              : el("button", { class: cls, type: "button", title: row.name, "aria-current": String(row.current), "data-no-address": "" }, ...parts);
           item.style.setProperty("--depth", String(row.depth));
           if (row.href !== null) onPlainClick(item, () => row.select());
           else item.addEventListener("click", () => row.select());

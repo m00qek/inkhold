@@ -205,7 +205,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
     type: "button",
     "aria-label": "Move to bin",
     title: "Move to bin",
-    html: svg(VIEWER_IC.trash, 1.8) + "Move to bin",
+    html: svg(VIEWER_IC.trash, 1.8) + '<span class="btn__label">Move to bin</span>',
   });
   moveBin.addEventListener("click", () => {
     if (meta) deps.onMoveToBin?.(meta);

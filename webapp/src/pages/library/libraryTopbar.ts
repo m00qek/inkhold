@@ -39,6 +39,12 @@ export interface Topbar {
   todoListBtn: HTMLButtonElement;
   todoDownloadBtn: HTMLButtonElement;
   todoNewListBtn: HTMLButtonElement;
+  /** Phone only (`libraryPhone.ts`): opens the places drawer. */
+  menuBtn: HTMLButtonElement;
+  /** Phone only: opens the search box across the bar. */
+  searchToggle: HTMLButtonElement;
+  /** Phone only: opens the bar's tools (sort, view, upload, To-Do's). */
+  moreBtn: HTMLButtonElement;
   setView(view: View): void;
   /** Restores the caret the arriving keystroke's navigation took from the box. */
   restoreSearchFocus(): void;
@@ -192,19 +198,29 @@ export function createTopbar(deps: TopbarDeps): Topbar {
   });
   uploadBtn.addEventListener("click", () => filePicker.click());
 
+  // On a phone the bar keeps a title and three buttons; the rest opens from them.
+  const phoneButton = (cls: string, label: string, icon: IconName, controls: string) =>
+    el("button", { class: `topbar__phone ${cls}`, type: "button", "aria-label": label, "aria-controls": controls, "aria-expanded": "false", html: svg(ICONS[icon], 1.7) }) as HTMLButtonElement;
+  const menuBtn = phoneButton("topbar__menu", "Places", "menu", "rail");
+  const searchToggle = phoneButton("topbar__search-toggle", "Search", "search", "search-box");
+  const moreBtn = phoneButton("topbar__more", "More", "more", "tools");
+
   const topbar = el(
     "div",
     { class: "topbar" },
+    menuBtn,
     crumbs,
+    searchToggle,
     el(
       "div",
-      { class: "search", role: "search" },
+      { class: "search", id: "search-box", role: "search" },
       el("span", { class: "search__glyph-wrap", html: `<svg class="search__glyph" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">${ICONS.search}</svg>` }),
       searchInput,
       // `aria-hidden`: the placeholder already says it.
       el("span", { class: "search__ocr", "aria-hidden": "true", text: "OCR" }),
     ),
-    el("div", { class: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, todoStatus, todoListBtn, todoDownloadBtn, todoNewListBtn, lockAdminBtn),
+    moreBtn,
+    el("div", { class: "tools", id: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, todoStatus, todoListBtn, todoDownloadBtn, todoNewListBtn, lockAdminBtn),
     filePicker,
   );
 
@@ -222,6 +238,9 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     todoListBtn,
     todoDownloadBtn,
     todoNewListBtn,
+    menuBtn,
+    searchToggle,
+    moreBtn,
     setView(view) {
       gridBtn.setAttribute("aria-pressed", String(view === "grid"));
       listBtn.setAttribute("aria-pressed", String(view === "list"));
