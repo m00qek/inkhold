@@ -20,10 +20,12 @@ import { createLiveChannel } from "./sync/live";
 import type { Api } from "./api/types";
 import type { NoteRenderer } from "./render/types";
 import type { LiveChannel } from "./sync/types";
+import { forgetListings, registerServiceWorker } from "./pwa/register";
 
 // Re-apply the pinned theme (index.html already did, pre-paint) before the
 // shell exists: render cache keys include the theme.
 applyStoredTheme();
+registerServiceWorker();
 
 const app = document.getElementById("app");
 if (!app) throw new Error("missing #app mount point");
@@ -79,6 +81,7 @@ let disposePage: (() => void) | null = null;
 function onSignOut(): void {
   const finish = () => {
     session.clear();
+    forgetListings();
     go("/login");
   };
   auth.logout().then(finish, finish);
@@ -90,6 +93,7 @@ function onSignOut(): void {
  */
 function onSessionExpired(): void {
   session.clear();
+  forgetListings();
   go("/login");
 }
 

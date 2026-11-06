@@ -74,6 +74,20 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
     ctx.rail.clearPending();
   }
 
+  /**
+   * Browsing works offline (the listings are kept on the device, `sw/sw.js`);
+   * opening a file, a version or To-Do needs the server. Say so instead of
+   * showing a viewer that can never fill, and stay where the person was.
+   */
+  function offline(): boolean {
+    if (navigator.onLine) return false;
+    ctx.toast("You're offline. Opening files and To-Do needs a connection.");
+    // Back to the folder or search on screen; never to To-Do, which would
+    // refuse again.
+    redirect(st.query ? searchHref(st.query) : folderHref(st.folderId));
+    return true;
+  }
+
   return {
     currentFolderPath,
 
@@ -146,6 +160,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
     },
 
     showTodo(view: string): void {
+      if (offline()) return;
       enterPlace();
       // Same as the account arm: repaint over a mounted bin while `destination` is null.
       if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
@@ -175,6 +190,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
     },
 
     async openNote(id: Id, page = 0, q = ""): Promise<void> {
+      if (offline()) return;
       const mine = ++st.routeToken;
       ctx.historyScope.clear();
       try {
@@ -211,6 +227,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
     },
 
     async openNoteVersion(id: Id, short: string, page = 0): Promise<void> {
+      if (offline()) return;
       const mine = ++st.routeToken;
       // Resolved against the panel's list; a non-session failure degrades to the live note.
       let history: Awaited<ReturnType<Api["noteHistory"]>>;
@@ -235,6 +252,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
     },
 
     async openBinNote(id: Id, page = 0): Promise<void> {
+      if (offline()) return;
       const mine = ++st.routeToken;
       // A bin open is never a version preview.
       ctx.historyScope.clear();

@@ -7,3 +7,6 @@ dist/
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# The production build the PWA e2e serves (playwright.pwa.config.ts)
+/dist-e2e/

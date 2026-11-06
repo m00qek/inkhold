@@ -748,6 +748,40 @@ Touch is its own question, `(pointer: coarse)`, never inferred from width.
   (1180px, desktop layout under a finger), both with touch; `tests/e2e/phone.spec.ts` holds the
   drawer, the tab bar, search, sheets and the viewer's bottom bar.
 
+### 11.10 Installing and offline
+
+The app installs as a PWA: `public/manifest.webmanifest` (name, `standalone`,
+the desk colour, icons from `icons/build.sh`) and a service worker,
+`sw/sw.js`, which `vite.config.ts` writes into each build with that build's
+file list and a version hashed from the files and the worker's own code.
+Production builds only; dev never registers one.
+
+- **What the device keeps.** The app's own files (cache-first), and the
+  listings a person browses with: `/api/user/me`, the folder tree, the bin,
+  storage use (network-first, the stored copy only when the network fails).
+  That is names and counts, never a file: pages, PDFs, images, transcripts
+  and to-dos always come from the server. The wasm decoders are not kept
+  either; only reading needs them.
+- **Forgetting.** Signing out, or the server refusing the session (401/403
+  on any listing), deletes the stored listings. `server-info` is not kept,
+  since the sign-in page reads it.
+- **Offline.** The app opens and browses what this device has seen. Opening a
+  file, a version or To-Do says it needs a connection and stays put
+  (`libraryRoutes.ts`, `offline()`), instead of a viewer that never fills.
+- **Updates.** A new build installs beside the old one and waits; the page
+  offers "A new version of Inkhold is ready" with Reload, and only then does
+  the new one take over (`src/pwa/register.ts`). It reloads once the new
+  worker is `activated`, not on `controllerchange`: a reload while it is
+  still activating can stall. An installed app looks for updates when it
+  comes back to the foreground.
+- **Server.** `sw.js` and the manifest are `no-cache` like every unhashed
+  file (`backend/http/static.zig`); the manifest is served as
+  `application/manifest+json`.
+- **Tests.** `tests/e2e/pwa.spec.ts`, run with
+  `npx playwright test -c playwright.pwa.config.ts` against a production
+  build: the manifest, offline browsing, what is and is not kept, sign-out
+  and a refused session, offline opening, and the update offer.
+
 ## 12. Where things live
 
 The directories are layers. An import points down the list, never up: a file

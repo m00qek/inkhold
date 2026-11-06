@@ -83,8 +83,9 @@ pub fn serve(ctx: *Context, req: *Request) !bool {
     defer if (variant_file) |*vf| vf.close(ctx.io);
 
     // Hashed `/assets/*` are immutable. Everything else (`index.html`, the
-    // wasm modules, icons) is `no-cache`: its URL never changes, so the
-    // browser must ask each time. The ETag is what makes asking cheap: a
+    // wasm modules, icons, `sw.js`, the manifest) is `no-cache`: its URL never
+    // changes, so the browser must ask each time. For `sw.js` that is how a
+    // new version is noticed at all. The ETag is what makes asking cheap: a
     // match is a 304 with no body, where without one every visit re-sent the
     // 1.5 MB PDF renderer. Both headers key off the base path.
     var etag_buf: [80]u8 = undefined;
@@ -238,6 +239,9 @@ fn contentType(path: []const u8) []const u8 {
     if (eq(ext, ".css")) return "text/css; charset=utf-8";
     if (eq(ext, ".wasm")) return "application/wasm";
     if (eq(ext, ".json") or eq(ext, ".map")) return "application/json";
+    // The installable app's manifest; browsers accept it as JSON too, but
+    // this is its registered type.
+    if (eq(ext, ".webmanifest")) return "application/manifest+json";
     if (eq(ext, ".svg")) return "image/svg+xml";
     if (eq(ext, ".png")) return "image/png";
     if (eq(ext, ".jpg") or eq(ext, ".jpeg")) return "image/jpeg";
@@ -300,6 +304,8 @@ test "contentType by extension" {
     try eq("application/wasm", contentType("note-decode.wasm"));
     try eq("application/json", contentType("assets/index-abc.js.map"));
     try eq("image/svg+xml", contentType("logo.svg"));
+    try eq("application/manifest+json", contentType("manifest.webmanifest"));
+    try eq("text/javascript", contentType("sw.js"));
     try eq("application/octet-stream", contentType("noext"));
     try eq("application/octet-stream", contentType("dir.v1/noext"));
 }

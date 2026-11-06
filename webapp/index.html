@@ -11,6 +11,11 @@
          transparency. Both are static files, so neither is in the bundle. -->
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- Installing: the manifest names the app and its icons; the bar takes
+         the desk colour of each theme. -->
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#e9e6dc" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0c0c0e" media="(prefers-color-scheme: dark)" />
     <!-- Restore the pinned theme BEFORE first paint. The entry module is
          deferred, so it typically runs after the browser has already painted the
          body background — restoring there is a visible flash of the wrong theme.
