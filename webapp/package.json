@@ -6,6 +6,7 @@
   "description": "Web app shell (auth + file browser) for Inkhold. Static SPA, zero runtime dependencies.",
   "scripts": {
     "dev": "vite",
+    "demo": "VITE_DEMO=1 vite",
     "predev": "npm run build:wasm",
     "build:wasm": "cd .. && zig build wasm-note-decode && cp zig-out/bin/note-decode.wasm webapp/public/note-decode.wasm && zig build wasm-sqlite-core && cp zig-out/bin/sqlite-core.wasm webapp/public/sqlite-core.wasm && zig build wasm-pdf-decode && cp zig-out/bin/pdf-decode.wasm webapp/public/pdf-decode.wasm",
     "prebuild": "npm run build:wasm",

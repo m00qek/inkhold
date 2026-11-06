@@ -32,7 +32,15 @@ const root = app;
 // --- dependency graph: the one place fakes swap for the real stack ---
 // Dev and e2e default to fakes (no backend or wasm needed). `?real`/`?fake`
 // override, before or after the `#`, and stick in localStorage.
+/**
+ * `VITE_DEMO=1 npm run dev`: test data and a signed-in test person, nothing
+ * else needed, for looking at the app. Never set by e2e, which answers
+ * sign-in with its own mocks.
+ */
+const demo = import.meta.env.DEV && import.meta.env.VITE_DEMO === "1";
+
 function useFakes(): boolean {
+  if (demo) return true;
   const search = new URLSearchParams(location.search);
   const hashQuery = new URLSearchParams(location.hash.split("?")[1] ?? "");
   const has = (k: string): boolean => search.has(k) || hashQuery.has(k);
@@ -48,6 +56,7 @@ function useFakes(): boolean {
 }
 
 const fakes = useFakes();
+const auth = demo ? (await import("./api/fakeAuth")).createFakeAuth() : authApi;
 // Fakes are dynamically imported so Vite keeps them out of the production
 // chunk; hence the top-level await before `onRoute` registers.
 const dataApi: Api = fakes ? (await import("./api/fake")).createFakeApi() : createHttpApi();
@@ -72,7 +81,7 @@ function onSignOut(): void {
     session.clear();
     go("/login");
   };
-  authApi.logout().then(finish, finish);
+  auth.logout().then(finish, finish);
 }
 
 /**
@@ -110,7 +119,7 @@ function teardownShell(): void {
  * null when it has navigated away. */
 async function ensureProfile(): Promise<Me | null> {
   if (profile) return profile;
-  const me = await authApi.me();
+  const me = await auth.me();
   if (!me) {
     go("/login");
     return null;
