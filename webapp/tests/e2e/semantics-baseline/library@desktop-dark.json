@@ -1,0 +1,18 @@
+{
+ "axe/color-contrast": 9,
+ "axe/landmark-main-is-top-level": 1,
+ "axe/landmark-no-duplicate-main": 1,
+ "axe/landmark-unique": 1,
+ "axe/page-has-heading-one": 1,
+ "banner-landmark": 1,
+ "broken-reference": 1,
+ "collection-not-list": 8,
+ "icon-not-hidden": 24,
+ "live-region-too-big": 6,
+ "nav-in-aside": 1,
+ "navigates-by-button": 18,
+ "one-h1": 1,
+ "one-main": 1,
+ "search-landmark": 1,
+ "skip-link": 1
+}
