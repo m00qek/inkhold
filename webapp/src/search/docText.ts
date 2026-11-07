@@ -40,12 +40,21 @@ export interface DocumentText {
  * as "No matches".
  */
 export class DocumentTextUnavailable extends Error {
-  override readonly name = "DocumentTextUnavailable";
+  override readonly name: string = "DocumentTextUnavailable";
   readonly md5: string;
   constructor(md5: string) {
     super(`no text record for ${md5}`);
     this.md5 = md5;
   }
+}
+
+/**
+ * The 404 of a document the manifest says the server has not derived yet (a
+ * new upload, a fresh sync): its text is on the way, not missing. Told apart
+ * from the 404 itself by the manifest, so the route still leaks nothing.
+ */
+export class DocumentTextPending extends DocumentTextUnavailable {
+  override readonly name = "DocumentTextPending";
 }
 
 /** `indexVersion` null means "not known", never version 0. */

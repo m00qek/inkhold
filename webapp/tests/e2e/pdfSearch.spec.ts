@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { signedIn, freezeMotion } from "./helpers/app";
 import { mockDocText, pdfTextRecord, type TextRecord } from "./helpers/docText";
+import { mockSearchIndex } from "./helpers/searchIndex";
 import { fakeFileHash } from "../../src/api/fake";
 
 // The index decides which pages matched; MuPDF locates the words. The raw PDF and the
@@ -139,8 +140,9 @@ test.describe("find in PDF", () => {
     await expect(region).toBeHidden();
   });
 
-  // A 404 means "could not look" (unreachable or underived), never "not in here".
-  test("a document with no text record says it could not search, not that there is nothing", async ({ page }) => {
+  // A 404 is never "not in here". For a file the viewer could open, it means the
+  // text isn't extracted yet, unless the manifest says it was: then it's a failure.
+  test("a fresh PDF whose text isn't extracted yet says it's still being indexed", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
     await mockDocText(page, {});
@@ -148,6 +150,26 @@ test.describe("find in PDF", () => {
     await freezeMotion(page);
 
     await expect(viewer(page)).toBeVisible();
+    await counts(page, "This file is still being indexed — matches will appear on their own.");
+    await expect(marks(page)).toHaveCount(0);
+  });
+
+  test("a PDF whose extracted text can't be fetched says it could not search, not that there is nothing", async ({ page }) => {
+    await signedIn(page);
+    const index = await mockSearchIndex(page, {
+      rows: [{ md5: MANUAL_MD5, fileId: Number(MANUAL), tier: "other", updatedAt: 1_700_000_000, indexVersion: 15, derivation: "derived" }],
+      documents: {},
+    });
+    await servePdf(page);
+    await mockDocText(page, {});
+    await page.goto(`/#/note/${MANUAL}`);
+    await freezeMotion(page);
+    await expect(viewer(page)).toBeVisible();
+    // The manifest has to be in before the find, or the 404 reads as "not yet".
+    await expect.poll(() => index.manifestHits()).toBeGreaterThan(0);
+    await page.getByRole("button", { name: "Find in this file" }).first().click();
+    await page.getByRole("textbox", { name: "Find in this file" }).fill("marmalade");
+
     // Asserted positively; a negative would pass against an empty counter.
     await counts(page, "Couldn't search this file. Keep typing to retry.");
     await expect(marks(page)).toHaveCount(0);

@@ -52,3 +52,21 @@ export function contentBox(e: HTMLElement): { w: number; h: number } {
   const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
   return { w: rect.width <= 0 ? 0 : rect.width - padX, h: rect.height - padY };
 }
+
+/**
+ * Scroll `scroller` so `target` is in its visible box: centred when it was
+ * off-screen, left alone when it is already in view. Moves only `scroller`,
+ * never the page around it (`scrollIntoView` would).
+ */
+export function revealIn(target: Element, scroller: HTMLElement): void {
+  const t = target.getBoundingClientRect();
+  const s = scroller.getBoundingClientRect();
+  const cs = getComputedStyle(scroller);
+  const top = s.top + (parseFloat(cs.paddingTop) || 0);
+  const bottom = s.bottom - (parseFloat(cs.paddingBottom) || 0);
+  const left = s.left + (parseFloat(cs.paddingLeft) || 0);
+  const right = s.right - (parseFloat(cs.paddingRight) || 0);
+  if (t.top >= top && t.bottom <= bottom && t.left >= left && t.right <= right) return;
+  scroller.scrollTop += t.top + t.height / 2 - (top + bottom) / 2;
+  scroller.scrollLeft += t.left + t.width / 2 - (left + right) / 2;
+}

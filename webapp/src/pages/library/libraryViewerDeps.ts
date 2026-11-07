@@ -17,7 +17,10 @@ export function createLibraryViewerDeps(ctx: LibraryCtx): ViewerDeps {
     // `text/<md5>`, built once and shared by every viewer. `text/<md5>` is
     // `immutable`, so `index_version` from the manifest rides the query string to
     // bust the cache on re-derivation; read fresh per call.
-    docSearch: createDocSearch({ indexVersion: (md5) => ctx.searchService.indexVersion(md5) }),
+    docSearch: createDocSearch({
+      indexVersion: (md5) => ctx.searchService.indexVersion(md5),
+      derivation: (md5) => ctx.searchService.derivation(md5),
+    }),
     renderer: ctx.renderer,
     cache: ctx.cache,
     getTheme: currentTheme,

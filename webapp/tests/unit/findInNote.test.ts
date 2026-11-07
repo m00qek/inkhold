@@ -165,12 +165,12 @@ describe("find in note", () => {
 
     const mid = last(t.states)!;
     expect(mid.kind).toBe("counting");
-    expect(mid).toMatchObject({ kind: "counting", onThisPage: 2, recognisedPages: 2 });
+    expect(mid).toMatchObject({ kind: "counting", onThisPage: 2, scope: 2 });
     expect(t.states.some((s) => s.kind === "settled")).toBe(false);
 
     land({ query: "attent", md5: MD5, segments: [match(0, 2), match(1, 3)], usedFuzzy: false, expansions: [] });
     await flush();
-    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 5, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 5, fuzzy: false, partial: null });
   });
 
   it("cannot step until the counts have landed", async () => {
@@ -194,7 +194,7 @@ describe("find in note", () => {
     await flush();
     await flush();
 
-    expect(last(t.states)).toEqual({ kind: "settled", at: 2, total: 5, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 2, total: 5, fuzzy: false, partial: null });
     expect(t.view.showPage).not.toHaveBeenCalled();
   });
 
@@ -207,7 +207,7 @@ describe("find in note", () => {
     await flush();
     await flush();
 
-    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: false, partial: null });
     expect(t.view.showPage).toHaveBeenCalledWith(1);
   });
 
@@ -224,12 +224,12 @@ describe("find in note", () => {
     t.find.setPage(1);
 
     t.find.step(1);
-    expect(last(t.states)).toEqual({ kind: "settled", at: 1, total: 2, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 1, total: 2, fuzzy: false, partial: null });
     expect(t.view.showPage).toHaveBeenLastCalledWith(3);
     t.find.setPage(3);
 
     t.find.step(1);
-    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: false, partial: null });
     expect(t.view.showPage).toHaveBeenLastCalledWith(1);
   });
 
@@ -249,7 +249,7 @@ describe("find in note", () => {
 
     t.find.searchSimilar();
     await flush();
-    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: true });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: true, partial: null });
     expect(last(t.ovals)!.words.map((w) => w.text)).toEqual(["attention", "attentive"]);
     expect(last(t.ovals)!.words).toHaveLength(2);
     expect(t.search).toHaveBeenCalledTimes(1);
@@ -266,7 +266,7 @@ describe("find in note", () => {
     await flush();
 
     t.find.step(1);
-    expect(last(t.states)).toEqual({ kind: "settled", at: 1, total: 2, fuzzy: true });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 1, total: 2, fuzzy: true, partial: null });
   });
 
   it("steps across page boundaries and turns the page as it goes", async () => {
@@ -278,17 +278,17 @@ describe("find in note", () => {
     await flush();
 
     t.find.step(1);
-    expect(last(t.states)).toEqual({ kind: "settled", at: 1, total: 5, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 1, total: 5, fuzzy: false, partial: null });
     expect(t.view.showPage).not.toHaveBeenCalled();
 
     t.find.step(1);
-    expect(last(t.states)).toEqual({ kind: "settled", at: 2, total: 5, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 2, total: 5, fuzzy: false, partial: null });
     expect(t.view.showPage).toHaveBeenCalledWith(1);
 
     t.find.step(-1);
     t.find.step(-1);
     t.find.step(-1);
-    expect(last(t.states)).toEqual({ kind: "settled", at: 4, total: 5, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 4, total: 5, fuzzy: false, partial: null });
   });
 
   it('says "Not recognised on the device", never "No matches", for an unrecognised note', async () => {
@@ -313,7 +313,7 @@ describe("find in note", () => {
     await flush();
     await flush();
 
-    expect(last(t.states)).toEqual({ kind: "empty" });
+    expect(last(t.states)).toEqual({ kind: "empty", partial: null });
     expect(t.search).toHaveBeenCalledTimes(1);
   });
 
@@ -353,7 +353,7 @@ describe("find in note", () => {
     answers[0]!({ query: "", md5: MD5, segments: [match(1, 99)], usedFuzzy: false, expansions: [] });
     await flush();
 
-    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 1, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 1, fuzzy: false, partial: null });
   });
 
   it("routes an expired session to the sink instead of rendering as an error", async () => {
@@ -425,7 +425,7 @@ describe("find in note", () => {
     await flush();
 
     expect(t.search).toHaveBeenCalledWith(version, "attent", expect.anything());
-    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 4, fuzzy: false });
+    expect(last(t.states)).toEqual({ kind: "settled", at: 0, total: 4, fuzzy: false, partial: null });
   });
 
   it("re-runs against the new md5 when the preview changes under the same note id", async () => {
@@ -460,6 +460,6 @@ describe("find in note", () => {
     miss.find.setQuery("zzzznope");
     await flush();
     await flush();
-    expect(last(miss.states)).toEqual({ kind: "empty" });
+    expect(last(miss.states)).toEqual({ kind: "empty", partial: null });
   });
 });

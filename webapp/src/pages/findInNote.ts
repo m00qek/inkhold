@@ -1,50 +1,26 @@
-// Find-in-note controller, with the DOM injected as a {@link FindView}. Counts
-// come from the browser's FTS5 index over `text/<md5>` (fetched on first find);
-// ovals need `getPageText`, only for the page on screen.
+// Find in a note: the shared find session (`viewer/findSession.ts`) with a
+// note's surface. Counts come from the browser's FTS5 index over `text/<md5>`
+// (fetched on first find); ovals need `getPageText`, only for the page on
+// screen, and before the count lands they are a substring guess.
 
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import type { Api } from "../api/types";
 import type { Hash, Id, PageRef, WordBox } from "../core/types";
-import type { DocSearch, DocSearchResult } from "../search/docSearch";
+import type { DocSearch } from "../search/docSearch";
+import { createFindSession, type FindState } from "./viewer/findSession";
 // Shared tokenizer, so ovals and counts agree on what a word is.
 import { fold, words as wordTerms } from "../search/fold";
 
-/** One matching page; `pageIndex` because a `.note` segment ordinal is a page. */
-interface FindPage {
-  readonly pageIndex: number;
-  readonly matches: number;
-  readonly terms: readonly string[];
-}
-
-function toPages(result: DocSearchResult): FindPage[] {
-  return result.segments.map((s) => ({ pageIndex: s.segment, matches: s.matches, terms: s.terms }));
-}
-
-/**
- * `unrecognised` is not `empty` (nothing was searched), `counting` carries no
- * total (a total that revises itself loses trust), and `error` never renders as
- * an empty result.
- */
-export type FindState =
-  | { kind: "idle" }
-  | { kind: "unrecognised" }
-  /** Phase 1. `recognisedPages` is null while the page list is still the skeleton. */
-  | { kind: "counting"; onThisPage: number; recognisedPages: number | null }
-  /** Phase 2: `at` is 0-based over the exact `total`; `fuzzy` qualifies the whole count. */
-  | { kind: "settled"; at: number; total: number; fuzzy: boolean }
-  /**
-   * Exact found nothing but a typo-tolerant search would; offered opt-in. A deep
-   * link from a global fuzzy hit carries the resolved term and never reaches here.
-   */
-  | { kind: "fuzzyPrompt" }
-  | { kind: "empty" }
-  | { kind: "error" };
+/** The shared session's states (`viewer/findSession.ts`). */
+export type { FindState } from "./viewer/findSession";
 
 export interface FindView {
   setOpen(open: boolean): void;
   setState(state: FindState): void;
   /** Ovals for the page on screen; `current` is -1 when the current match is elsewhere. */
   setPageMatches(words: WordBox[], current: number): void;
+  /** Scroll the current match's oval into view, if it's off-screen (a zoomed page). */
+  revealCurrent?(): void;
   setPageCounts(counts: ReadonlyMap<number, number>): void;
   showPage(index: number): void;
   /** False until the counts land: stepping an unknown set would step the wrong set. */
@@ -108,73 +84,14 @@ export function matchWords(
 
 export function createFindController(deps: FindDeps): FindController {
   const { api, view, failures } = deps;
-  const debounceMs = deps.debounceMs ?? 220;
 
-  let open = false;
   let noteId: Id | null = null;
-  let noteMd5: string | null = null;
   let pages: readonly PageRef[] = [];
-  let pageIndex = 0;
-
-  let active: string | null = null;
-  let query = "";
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  /** Bumped on every intent change; a response paints only if its token is current. */
-  let token = 0;
-
-  let counts: FindPage[] = [];
-  let landedCounts = false;
-  let fuzzy = false;
-  /** A fuzzy fallback held until the user opts in. */
-  let heldFuzzy: FindPage[] | null = null;
-  let optedIn = false;
-  let runAbort: AbortController | null = null;
-  /** 0-based index of the current match over the whole note; -1 for none. */
-  let at = -1;
-
+  /** False while the page list is the reader's skeleton (it invents `textHash: null`). */
+  let recognitionKnown = true;
   const wordCache = new Map<Hash, WordBox[]>();
 
-  let recognitionKnown = true;
-
   const recognisedPages = (): number => pages.filter((p) => p.textHash !== null).length;
-  const recognisedPagesOrNull = (): number | null => (recognitionKnown ? recognisedPages() : null);
-  const total = (): number => counts.reduce((sum, p) => sum + p.matches, 0);
-
-  function locate(index: number): { pageIndex: number; within: number } | null {
-    if (index < 0) return null;
-    let seen = 0;
-    for (const page of counts) {
-      if (index < seen + page.matches) return { pageIndex: page.pageIndex, within: index - seen };
-      seen += page.matches;
-    }
-    return null;
-  }
-
-  /** Null until the counts land (phase-1 mode); `[]` afterwards means nothing to circle. */
-  function termsOn(page: number): readonly string[] | null {
-    if (!landedCounts) return null;
-    return counts.find((p) => p.pageIndex === page)?.terms ?? [];
-  }
-
-  function firstOnPage(page: number): number {
-    let seen = 0;
-    for (const p of counts) {
-      if (p.pageIndex === page) return seen;
-      seen += p.matches;
-    }
-    return -1;
-  }
-
-  function countsMap(): Map<number, number> {
-    return new Map(counts.map((p) => [p.pageIndex, p.matches]));
-  }
-
-  function clearPainted(): void {
-    view.setPageMatches([], -1);
-    view.setPageCounts(new Map());
-    view.setStepEnabled(false);
-  }
 
   /** Cached by `textHash`; a null `textHash` costs no request. */
   async function wordsFor(id: Id, page: PageRef): Promise<WordBox[]> {
@@ -192,267 +109,69 @@ export function createFindController(deps: FindDeps): FindController {
     }
   }
 
-  async function paintPage(): Promise<void> {
-    const id = noteId;
-    const page = pages[pageIndex];
-    if (!open || id === null || !page || query === "") {
-      view.setPageMatches([], -1);
-      return;
-    }
-    const mine = token;
-    const words = await wordsFor(id, page);
-    if (mine !== token || !open || noteId !== id || pages[pageIndex] !== page) return;
-
-    const matched = matchWords(words, query, termsOn(pageIndex));
-    let current = -1;
-    if (matched.length > 0) {
-      if (!landedCounts) current = 0;
-      else {
-        const where = locate(at);
-        if (where && where.pageIndex === pageIndex) current = Math.min(where.within, matched.length - 1);
-      }
-    }
-    view.setPageMatches(matched, current);
-    // Before the answer lands, the counter reports only this page.
-    if (!landedCounts) {
-      view.setState({ kind: "counting", onThisPage: matched.length, recognisedPages: recognisedPagesOrNull() });
-    }
-  }
-
-  /**
-   * Where find lands when matches appear: keep the highlighted match if this
-   * page has one, otherwise go to the note's first match.
-   */
-  function landOnFirst(): void {
-    const here = firstOnPage(pageIndex);
-    at = here >= 0 ? here : 0;
-  }
-
-  function applyResult(id: Id, result: DocSearchResult, mine: number): void {
-    if (mine !== token) return; // a later keystroke superseded us
-    if (!open || noteId !== id) return;
-
-    // Manual fuzzy is opt-in: hold a fuzzy answer behind "search similar". One
-    // that found nothing is a real absence.
-    if (result.usedFuzzy && !optedIn) {
-      landedCounts = true;
-      counts = [];
-      fuzzy = true;
-      at = -1;
-      view.setPageCounts(new Map());
-      view.setStepEnabled(false);
-      const held = toPages(result);
-      if (held.length > 0) {
-        heldFuzzy = held;
-        view.setState({ kind: "fuzzyPrompt" });
-      } else {
-        heldFuzzy = null;
-        fuzzy = false;
-        view.setState({ kind: "empty" });
-      }
-      void paintPage();
-      return;
-    }
-
-    landedCounts = true;
-    counts = toPages(result);
-    fuzzy = result.usedFuzzy;
-    view.setPageCounts(countsMap());
-
-    const n = total();
-    if (n > 0) landOnFirst();
-    else at = -1;
-
-    if (n === 0) {
-      view.setStepEnabled(false);
-      view.setState({ kind: "empty" });
-      void paintPage();
-      return;
-    }
-    view.setStepEnabled(n > 1);
-    view.setState({ kind: "settled", at, total: n, fuzzy });
-
-    const where = locate(at);
-    if (where && where.pageIndex !== pageIndex) view.showPage(where.pageIndex);
-    else void paintPage();
-  }
-
-  /**
-   * Phase 2. The abort covers only the `text/<md5>` fetch; the index build is
-   * the same work the next keystroke needs, and stale answers drop by token.
-   */
-  async function runSearch(id: Id, md5: string, q: string, mine: number): Promise<void> {
-    const ac = new AbortController();
-    runAbort = ac;
-    try {
-      const result = await deps.docs.search(md5, q, ac.signal);
-      applyResult(id, result, mine);
-    } catch (e) {
-      if (mine !== token) return;
-      // A 404 (document not derived yet) is a failure, not an empty result.
-      if (dispatchApiFailure(failures, e)) return;
-      view.setState({ kind: "error" });
-    }
-  }
-
-  function searchSimilar(): void {
-    if (heldFuzzy === null || !open) return;
-    optedIn = true;
-    counts = heldFuzzy;
-    heldFuzzy = null;
-    fuzzy = true;
-    landedCounts = true;
-    view.setPageCounts(countsMap());
-
-    const n = total();
-    if (n === 0) {
-      at = -1;
-      view.setStepEnabled(false);
-      view.setState({ kind: "empty" });
-      void paintPage();
-      return;
-    }
-    landOnFirst();
-    view.setStepEnabled(n > 1);
-    view.setState({ kind: "settled", at, total: n, fuzzy: true });
-    const where = locate(at);
-    if (where && where.pageIndex !== pageIndex) view.showPage(where.pageIndex);
-    else void paintPage();
-  }
-
-  function cancelPending(): void {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      timer = undefined;
-    }
-    runAbort?.abort();
-    runAbort = null;
-    token++;
-  }
-
-  function runQuery(raw: string): void {
-    const q = raw.trim();
-    query = q;
-    cancelPending();
-    counts = [];
-    landedCounts = false;
-    fuzzy = false;
-    heldFuzzy = null;
-    optedIn = false;
-    at = -1;
-
-    // `textHash` gates the feature at no cost, but only once the page list is
-    // real: the skeleton invents `textHash: null` for every page.
-    if (recognitionKnown && noteId !== null && pages.length > 0 && recognisedPages() === 0) {
-      clearPainted();
-      view.setState({ kind: "unrecognised" });
-      return;
-    }
-    if (q === "") {
-      clearPainted();
-      view.setState({ kind: "idle" });
-      return;
-    }
-
-    view.setPageCounts(new Map());
-    view.setStepEnabled(false);
-    view.setState({ kind: "counting", onThisPage: 0, recognisedPages: recognisedPagesOrNull() });
-    void paintPage();
-
-    // Phase 2, still debounced: the first find fetches and builds the index.
-    const id = noteId;
-    const md5 = noteMd5;
-    if (id === null || md5 === null) return;
-    const mine = token;
-    timer = setTimeout(() => {
-      timer = undefined;
-      void runSearch(id, md5, q, mine);
-    }, debounceMs);
-  }
-
-  function openBar(): void {
-      if (!open) {
-        open = true;
-        view.setOpen(true);
-      }
-      // Ctrl+F on an open bar re-focuses.
-      view.focusField();
-      // Fetches nothing; re-run so an unrecognised note says so before any keystroke.
-      active = null;
-      runQuery(query);
-  }
-
-  function closeBar(): void {
-      if (!open) return;
-      open = false;
-      cancelPending();
-      view.setOpen(false);
-      clearPainted();
-  }
+  const session = createFindSession({
+    docs: deps.docs,
+    failures,
+    debounceMs: deps.debounceMs,
+    // Find is immediate: the page on screen is circled before the count lands.
+    provisional: true,
+    // `textHash` gates the feature at no cost, once the page list is real.
+    gate: (): FindState | null =>
+      recognitionKnown && noteId !== null && pages.length > 0 && recognisedPages() === 0 ? { kind: "unrecognised" } : null,
+    scope: () => (recognitionKnown ? recognisedPages() : null),
+    surface: {
+      setOpen: (open) => view.setOpen(open),
+      setState: (state) => view.setState(state),
+      setStepEnabled: (enabled) => view.setStepEnabled(enabled),
+      focusField: () => view.focusField(),
+      setHits: (hits) => view.setPageCounts(new Map(hits.map((h) => [h.segment, h.matches]))),
+      showSegment: (index) => view.showPage(index),
+      clearMarks: () => view.setPageMatches([], -1),
+      async paint(index, ask) {
+        const id = noteId;
+        const page = pages[index];
+        if (id === null || !page) {
+          view.setPageMatches([], -1);
+          return 0;
+        }
+        const words = await wordsFor(id, page);
+        if (ask.stale() || noteId !== id || pages[index] !== page) return null;
+        const matched = matchWords(words, ask.query, ask.terms);
+        const current = matched.length > 0 && ask.current >= 0 ? Math.min(ask.current, matched.length - 1) : -1;
+        view.setPageMatches(matched, current);
+        if (ask.reveal && current >= 0) view.revealCurrent?.();
+        return matched.length;
+      },
+    },
+  });
 
   return {
-    isOpen: () => open,
-    open: openBar,
-    close: closeBar,
-    // Not `this.close()`: callers destructure the controller.
-    toggle: () => (open ? closeBar() : openBar()),
+    isOpen: session.isOpen,
+    open: () => session.open(),
+    close: session.close,
+    toggle: session.toggle,
 
-    setNote(id: Id | null, md5: string | null, next: readonly PageRef[], known = true): void {
+    setNote(id, md5, next, known = true) {
       const changed = id !== noteId;
       noteId = id;
-      noteMd5 = md5;
       pages = next;
       recognitionKnown = known;
-      if (changed) pageIndex = 0;
       // A metadata refetch brings new hashes, so the cache is stale either way.
       wordCache.clear();
-      if (open) runQuery(query);
+      session.setDocument(md5, changed ? 0 : undefined);
     },
 
-    setPage(index: number): void {
-      pageIndex = index;
-      if (open) void paintPage();
-    },
+    setPage: session.setPage,
+    setQuery: session.setQuery,
+    step: session.step,
+    searchSimilar: session.searchSimilar,
 
-    setQuery(raw: string): void {
-      const q = raw.trim();
-      if (q === active) return; // same question; leave the answer in progress alone
-      active = q;
-      runQuery(raw);
-    },
-
-    step(dir: 1 | -1): void {
-      const n = total();
-      if (!landedCounts || n === 0) return; // nothing to step through, or not knowably so yet
-      at = (at + dir + n) % n;
-      view.setState({ kind: "settled", at, total: n, fuzzy });
-      const where = locate(at);
-      if (!where) return;
-      if (where.pageIndex !== pageIndex) view.showPage(where.pageIndex);
-      else void paintPage();
-    },
-
-    searchSimilar,
-
-    reset(): void {
-      open = false;
+    reset() {
       noteId = null;
-      noteMd5 = null;
       pages = [];
-      pageIndex = 0;
-      active = null;
-      query = "";
-      counts = [];
-      landedCounts = false;
-      fuzzy = false;
-      heldFuzzy = null;
-      optedIn = false;
-      at = -1;
-      cancelPending();
+      recognitionKnown = true;
       wordCache.clear();
-      view.setOpen(false);
-      clearPainted();
-      view.setState({ kind: "idle" });
+      session.reset();
     },
   };
 }

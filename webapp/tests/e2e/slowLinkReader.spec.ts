@@ -294,7 +294,7 @@ test.describe("the reader's note stage, mid-fetch", () => {
       window.location.hash = "#/note/n-lay?q=zebra";
     });
     await expect(page.locator(".findbar")).toBeVisible();
-    await expect(page.locator(".findbar__count")).toHaveText("searching…");
+    await expect(page.locator(".findbar__count")).toHaveText("Searching…");
 
     expect(await counter.everShowed("Not recognised")).toBe(false);
     expect(await counter.everShowed("No matches")).toBe(false);

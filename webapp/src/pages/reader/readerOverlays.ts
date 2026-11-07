@@ -3,7 +3,7 @@
 import { el } from "../../ui/dom";
 import type { WordBox } from "../../core/types";
 import { dispatchApiFailure } from "../../api/client";
-import { type FindState } from "../findInNote";
+import { findCountIsNone, findCountText, type FindState } from "../viewer/findSession";
 import { OVAL_VIEWBOX, ovalsFor } from "../findOvals";
 import { binNotePageHref, notePageHref } from "../../router";
 import type { ReaderCtx } from "./readerContext";
@@ -20,38 +20,10 @@ export interface ReaderOverlays {
 
 export function createReaderOverlays(ctx: ReaderCtx): ReaderOverlays {
   const { st } = ctx;
-  /**
-   * `unrecognised` must not say "No matches" (no search happened over ink the
-   * device never recognised), and `counting` shows no total until it is final.
-   */
-  function countText(state: FindState): string {
-    switch (state.kind) {
-      case "idle":
-        return "";
-      case "unrecognised":
-        return "Not recognised on the device";
-      case "counting": {
-        const n = state.recognisedPages;
-        const here = state.onThisPage > 0 ? `${state.onThisPage} on this page · ` : "";
-        // null: the page list is still the skeleton, so the count is unknown.
-        if (n === null) return `${here}searching…`;
-        return `${here}searching ${n} ${n === 1 ? "page" : "pages"}…`;
-      }
-      case "settled":
-        return `${state.at + 1} of ${state.total}`;
-      case "fuzzyPrompt":
-        return "No matches";
-      case "empty":
-        return "No matches";
-      case "error":
-        return "Couldn't search this note. Keep typing to retry.";
-    }
-  }
-
-  /** The dimmer treatment: every state that is not a live count of matches. */
-  function countIsNone(state: FindState): boolean {
-    return state.kind !== "settled" && state.kind !== "idle";
-  }
+  /** The shared wording (`viewer/findSession.ts`). */
+  const countText = (state: FindState): string =>
+    findCountText(state, "note", "There's no recognised text in this note to search.");
+  const countIsNone = findCountIsNone;
 
   /**
    * Ovals are per-page only: their rects need `getPageText`, one request per

@@ -52,7 +52,7 @@ test.describe(".txt content search", () => {
     await expect(bar.locator("input")).toHaveValue("zephyrine");
     await expect(viewer(page).locator(".txt__sheet")).toContainText("Shopping list");
 
-    await counts(page, "2 matches in 2 paragraphs");
+    await counts(page, "1 of 2");
 
     const marks = viewer(page).locator(".txt__sheet mark");
     await expect(marks).toHaveCount(2);
@@ -89,7 +89,7 @@ test.describe(".txt content search", () => {
     await findBtn.click();
     await expect(viewer(page).locator(".txtbar")).toBeVisible();
     await viewer(page).locator(".txtbar input").fill("zephyrine");
-    await counts(page, "2 matches in 2 paragraphs");
+    await counts(page, "1 of 2");
     await expect(viewer(page).locator(".txt__sheet mark")).toHaveCount(2);
 
     await viewer(page).locator(".txtbar input").press("Escape");
@@ -110,11 +110,11 @@ test.describe(".txt content search", () => {
 
     await viewer(page).getByRole("button", { name: "Find in this file" }).click();
     await viewer(page).locator(".txtbar input").fill("zephyrine");
-    await counts(page, "2 matches in 2 paragraphs");
+    await counts(page, "1 of 2");
     expect(text.count(README_MD5)).toBe(1);
 
     await viewer(page).locator(".txtbar input").fill("lentils");
-    await counts(page, "1 match in 1 paragraph");
+    await counts(page, "1 of 1");
     expect(text.count(README_MD5)).toBe(1);
   });
 
@@ -135,7 +135,7 @@ test.describe(".txt content search", () => {
     await expect(viewer(page).locator(".txt__sheet mark")).toHaveCount(0);
 
     await viewer(page).locator(".txtbar__ask").click();
-    await counts(page, "2 matches in 2 paragraphs");
+    await counts(page, "1 of 2");
     await expect(viewer(page).locator(".txt__sheet mark")).toHaveCount(2);
     await expect(viewer(page).locator(".txtbar__ask")).toBeHidden();
   });

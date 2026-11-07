@@ -140,6 +140,9 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
-.txt__match.is-current mark {
+/* The current match itself: ringed, so it stands out from the paragraph's
+   other matches as find steps match by match. */
+.txt__sheet mark.is-current {
   background: color-mix(in srgb, var(--accent) 42%, transparent);
+  box-shadow: 0 0 0 2px var(--accent);
 }

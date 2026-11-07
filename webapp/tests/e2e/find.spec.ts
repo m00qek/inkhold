@@ -198,7 +198,7 @@ test.describe("find in note", () => {
       expect(text).not.toMatch(/\d+ of \d+/);
     }
     expect(history.slice(0, firstCount).some((t) => /on this page/.test(t))).toBe(true);
-    expect(history.slice(0, firstCount).some((t) => /searching 14 pages/.test(t))).toBe(true);
+    expect(history.slice(0, firstCount).some((t) => /[Ss]earching 14 pages/.test(t))).toBe(true);
 
     // NO FLOOR EVER APPEARED. The absence is asserted rather than assumed: a
     // "N of M+" reaching the counter again would mean somebody had reintroduced a
@@ -410,5 +410,31 @@ test.describe("find in note", () => {
     const relBefore = (before.x - pageBefore.x) / pageBefore.width;
     const relAfter = (after.x - pageAfter.x) / pageAfter.width;
     expect(Math.abs(relAfter - relBefore)).toBeLessThan(0.02);
+  });
+
+  // Regression: on a zoomed page, Next landed on a match off-screen and left it there.
+  test("stepping on a zoomed page scrolls the current match into view", async ({ page }) => {
+    await openNote(page);
+    for (let i = 0; i < 4; i++) await page.getByRole("button", { name: "Zoom in" }).click();
+    const stage = page.locator(".stage");
+    await expect.poll(() => stage.evaluate((s) => s.scrollHeight > s.clientHeight + 200)).toBe(true);
+    await findToggle(page).click();
+    await findField(page).fill("budget");
+    await settles(page, /1 of \d+/);
+
+    const inView = () =>
+      page.evaluate(() => {
+        const oval = document.querySelector(".page .findbox.is-current");
+        const s = document.querySelector(".stage")!.getBoundingClientRect();
+        if (!oval) return false;
+        const o = oval.getBoundingClientRect();
+        return o.left >= s.left && o.right <= s.right && o.top >= s.top && o.bottom <= s.bottom;
+      });
+    // Scroll away, then step: the stage follows find to the match.
+    for (const step of [1, 1, -1]) {
+      await stage.evaluate((s) => s.scrollTo(s.scrollWidth, s.scrollHeight));
+      await findField(page).press(step === 1 ? "Enter" : "Shift+Enter");
+      await expect.poll(inView).toBe(true);
+    }
   });
 });

@@ -9,6 +9,7 @@ import {
 } from "../../src/search/docSearch";
 import { fold } from "../../src/search/fold";
 import {
+  DocumentTextPending,
   DocumentTextUnavailable,
   parseDocumentText,
   type DocumentText,
@@ -291,6 +292,33 @@ describe("in-document search, on the real engine", () => {
   it("raises rather than answering empty for a document with no text record", async () => {
     const { search } = docs({ [NOTE_MD5]: NOTE_LINES });
     await expect(search.search("f".repeat(32), "reuniao")).rejects.toBeInstanceOf(DocumentTextUnavailable);
+  });
+
+  // The manifest tells the two 404s apart, so the route itself still leaks nothing.
+  it("calls a 404 pending while the manifest says the server has not derived it yet", async () => {
+    const { transport } = transportFor({});
+    const derivation = (md5: string) => (md5 === NOTE_MD5 ? ("pending" as const) : ("derived" as const));
+    const search = createDocSearch({ transport, load: loadCore, derivation });
+    await expect(search.search(NOTE_MD5, "reuniao")).rejects.toBeInstanceOf(DocumentTextPending);
+    // Derived and still a 404: a real failure.
+    const other = search.search("f".repeat(32), "reuniao");
+    await expect(other).rejects.toBeInstanceOf(DocumentTextUnavailable);
+    await expect(other).rejects.not.toBeInstanceOf(DocumentTextPending);
+  });
+
+  it("calls a 404 pending for a document the manifest doesn't list yet (a fresh upload)", async () => {
+    const { transport } = transportFor({});
+    const search = createDocSearch({ transport, load: loadCore, derivation: () => null });
+    await expect(search.search(NOTE_MD5, "reuniao")).rejects.toBeInstanceOf(DocumentTextPending);
+  });
+
+  it("reports a record with no text at all, and the document's own extent", async () => {
+    const empty = '{"md5":"' + NOTE_MD5 + '","v":15,"n":7200}';
+    const { search } = docs({ [NOTE_MD5]: empty });
+    const res = await search.search(NOTE_MD5, "reuniao");
+    expect(res.textless).toBe(true);
+    expect(res.extent).toBe(7200);
+    expect((await docs().search.search(NOTE_MD5, "reuniao")).textless).toBe(false);
   });
 
   it("leaves nothing half-built when a load fails mid-session", async () => {

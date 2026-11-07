@@ -1,19 +1,13 @@
-// Find in a `.txt`: the whole file is loaded, so find is text/DOM work. The
-// index names matching paragraphs with byte ranges, which are mapped into the
-// loaded string. Steps between matching paragraphs rather than pages.
+// Find in a `.txt`: the shared find session (`viewer/findSession.ts`) with a
+// text file's surface. The whole file is loaded, so the "page" is a paragraph:
+// the index names matching paragraphs with byte ranges, mapped into the loaded
+// string and marked; stepping moves match by match, scrolling to each.
 
-import { dispatchApiFailure } from "../../api/client";
-import { VIEWER_DEBOUNCE_MS } from "../viewer/viewerChrome";
 import { createFindBar } from "../viewer/findBar";
+import { VIEWER_DEBOUNCE_MS } from "../viewer/viewerChrome";
+import { createFindSession, findCountIsNone, findCountText } from "../viewer/findSession";
 import type { ViewerDeps } from "../viewer/viewer";
-import {
-  buildFindContent,
-  resolveFindSegments,
-  totalMatches,
-  txtCountText,
-  TXT_SEARCHING,
-  type FindSegment,
-} from "./txtFind";
+import { buildFindContent, resolveFindSegments } from "./txtFind";
 
 export interface TxtFindDeps {
   docSearch: ViewerDeps["docSearch"];
@@ -33,301 +27,149 @@ export interface TxtFindController {
   isOpen(): boolean;
   /** The query the URL should carry. */
   query(): string;
-  /** The current paragraph ordinal, or 0 with nothing current. */
+  /** The paragraph ordinal of the current match, or 0 with nothing current. */
   currentSegment(): number;
   open(): void;
   close(): void;
   setOpen(open: boolean): void;
   reset(): void;
-  /** A `?q=` deep link: the query runs once the text lands, landing on `target`. */
+  /** A `?q=` deep link: the query runs once the text lands, landing on paragraph `target`. */
   prime(query: string, target: number): void;
-  /** The text is in the DOM; run a primed query. */
+  /** The text is in the DOM: find can search it. */
   onTextShown(): void;
 }
 
+/** What the counter says for a file with no text in it. */
+export const TXT_TEXTLESS = "This file is empty.";
+
 export function createTxtFind(deps: TxtFindDeps): TxtFindController {
-  let findOpen = false;
-  /** The trimmed query pending, in flight, or painted; makes input idempotent. */
-  let findActive: string | null = null;
-  let findQuery = "";
-  /** Bumped on every intent change; stale responses are dropped. */
-  let findToken = 0;
-  let findTimer: ReturnType<typeof setTimeout> | undefined;
-  let findSegs: FindSegment[] = [];
-  /** Aligned 1:1 with `findSegs`. */
-  let findParas: HTMLElement[] = [];
-  /** Index into `findSegs`/`findParas`; -1 = none. */
-  let findAt = -1;
-  /** The first find on a file pays the `text/<md5>` fetch and an index build. */
-  let findSearching = false;
-  /**
-   * A fuzzy result held until the user opts in. A deep link from a global fuzzy
-   * hit carries the resolved term and runs exact, so it never reaches this.
-   */
-  let heldFuzzySegs: FindSegment[] | null = null;
-  let findOptedIn = false;
-  let findAbort: AbortController | null = null;
-  /** Paragraph ordinal a `?q=` deep link targets, consumed when results land. */
-  let pendingTarget: number | null = null;
+  // Own block, not `.findbar`: both viewers are mounted and the reader's tests
+  // query `.findbar` globally.
+  const bar = createFindBar({ block: "txtbar", label: "Find in this file" });
 
-  // ---- find bar ----
-  // Steps between matching paragraphs rather than pages. Own block, not
-  // `.findbar`: both viewers are mounted and the reader's tests query `.findbar`
-  // globally.
-  const { el: findBar, input: findInput, count: findCount, ask: findAsk, prev: findPrev, next: findNext, close: findClose } =
-    createFindBar({ block: "txtbar", label: "Find in this file" });
+  /** Each marked paragraph, by its ordinal. */
+  let paras = new Map<number, HTMLElement>();
 
-  // ---- find ----
-
-  function paintFindCount(): void {
-    findCount.textContent =
-      findQuery === ""
-        ? ""
-        : findSearching
-          ? TXT_SEARCHING
-          : txtCountText(totalMatches(findSegs), findSegs.length);
-    const canStep = findSegs.length > 1;
-    findPrev.disabled = !canStep;
-    findNext.disabled = !canStep;
+  function plainText(): void {
+    const pre = deps.textPre();
+    const text = deps.loadedText();
+    paras = new Map();
+    // Keeps the same `<pre>`, so the font size persists.
+    if (pre && text !== null) pre.replaceChildren(document.createTextNode(text));
   }
 
-  /** Keeps the same `<pre>` so the font size persists. */
-  function clearFindMarks(): void {
-    findSegs = [];
-    findParas = [];
-    findAt = -1;
-    findSearching = false;
-    findAsk.hidden = true;
-    const textPre = deps.textPre();
-    const loadedText = deps.loadedText();
-    if (textPre && loadedText !== null) textPre.replaceChildren(document.createTextNode(loadedText));
-  }
-
-  /** Scrolls only on a landing or a step. */
-  function focusCurrent(scroll = true): void {
-    for (const [i, p] of findParas.entries()) p.classList.toggle("is-current", i === findAt);
-    const cur = findParas[findAt];
-    // `scrollIntoView` is absent under the test DOM.
-    if (cur && scroll) cur.scrollIntoView?.({ block: "center", inline: "nearest" });
-  }
-
-  /**
-   * On a landing, settle on the deep link's target if it matched, else the first
-   * match, and scroll there; otherwise keep the current paragraph and do not
-   * scroll (so revealing a held fuzzy answer keeps the reader's place).
-   */
-  function renderFind(landing: boolean): void {
-    const textPre = deps.textPre();
-    const loadedText = deps.loadedText();
-    if (!textPre || loadedText === null) return;
-    const built = buildFindContent(loadedText, findSegs);
-    textPre.replaceChildren(...built.nodes);
-    findParas = built.paras;
-    if (landing) {
-      let at = findSegs.length > 0 ? 0 : -1;
-      if (pendingTarget !== null) {
-        const idx = findSegs.findIndex((s) => s.segment === pendingTarget);
-        if (idx >= 0) at = idx;
-      }
-      findAt = at;
-      pendingTarget = null;
-    } else if (findAt >= findSegs.length) {
-      findAt = findSegs.length - 1;
+  function clearCurrent(): void {
+    for (const p of paras.values()) {
+      p.classList.remove("is-current");
+      for (const m of p.querySelectorAll("mark.is-current")) m.classList.remove("is-current");
     }
-    focusCurrent(landing);
-    paintFindCount();
-    // The URL follows where find actually landed.
+  }
+
+  const session = createFindSession({
+    docs: deps.docSearch,
+    failures: { onSessionExpired: deps.onSessionExpired },
+    debounceMs: VIEWER_DEBOUNCE_MS,
+    // A paragraph without a byte range cannot be placed: marking from byte 0 would be wrong.
+    placeable: (hit) => hit.offset !== null && hit.length !== null,
+    surface: {
+      setOpen(open) {
+        bar.el.hidden = !open;
+        deps.root().classList.toggle("is-finding", open);
+        deps.toggle.setAttribute("aria-pressed", String(open));
+      },
+      setState(state) {
+        bar.count.textContent = findCountText(state, "file", TXT_TEXTLESS);
+        bar.count.classList.toggle("is-none", findCountIsNone(state));
+        bar.ask.hidden = state.kind !== "fuzzyPrompt";
+        // The URL follows the query and where find landed.
+        deps.syncUrl();
+      },
+      setStepEnabled(enabled) {
+        bar.prev.disabled = !enabled;
+        bar.next.disabled = !enabled;
+      },
+      focusField() {
+        bar.input.focus();
+        bar.input.select();
+      },
+      setHits(hits) {
+        const pre = deps.textPre();
+        const text = deps.loadedText();
+        if (hits.length === 0 || !pre || text === null) {
+          plainText();
+          return;
+        }
+        const located = hits.map((h) => ({ segment: h.segment, offset: h.offset!, length: h.length!, matches: h.matches, terms: h.terms }));
+        const segs = resolveFindSegments(text, located);
+        const built = buildFindContent(text, segs);
+        pre.replaceChildren(...built.nodes);
+        paras = new Map(segs.map((s, i) => [s.segment, built.paras[i]!]));
+      },
+      // One screen of text: the "page turn" is just the current paragraph.
+      showSegment: (segment) => session.setPage(segment),
+      clearMarks: clearCurrent,
+      async paint(segment, ask) {
+        clearCurrent();
+        const para = paras.get(segment);
+        if (!para || ask.terms === null) return 0;
+        const marks = para.querySelectorAll("mark");
+        para.classList.add("is-current");
+        const mark = ask.current >= 0 && marks.length > 0 ? marks[Math.min(ask.current, marks.length - 1)] : undefined;
+        mark?.classList.add("is-current");
+        // `scrollIntoView` is absent under the test DOM.
+        if (ask.reveal) (mark ?? para).scrollIntoView?.({ block: "center", inline: "nearest" });
+        deps.syncUrl();
+        return marks.length;
+      },
+    },
+  });
+
+  function close(): void {
+    if (!session.isOpen()) return;
+    session.close();
+    bar.input.value = "";
+    session.setQuery("");
     deps.syncUrl();
   }
 
-  /** Reveal the held fuzzy matches; nothing is re-queried. */
-  function searchSimilar(): void {
-    if (heldFuzzySegs === null || deps.loadedText() === null) return;
-    findOptedIn = true;
-    findSegs = heldFuzzySegs;
-    heldFuzzySegs = null;
-    findSearching = false;
-    findAsk.hidden = true;
-    findAt = -1;
-    renderFind(true);
-  }
-
-  /**
-   * One call, one complete answer. The abort covers only the fetch; the index
-   * build and query are the work the next keystroke needs anyway.
-   */
-  async function runFind(query: string, mine: number): Promise<void> {
-    const fileHash = deps.fileHash();
-    if (deps.loadedText() === null || !fileHash) return;
-    // Also set here because a `?q=` deep link calls this directly, bypassing `setFindQuery`.
-    findSearching = true;
-    paintFindCount();
-    const ac = new AbortController();
-    findAbort = ac;
-    try {
-      const result = await deps.docSearch.search(fileHash, query, ac.signal);
-      const loadedText = deps.loadedText();
-      if (mine !== findToken || loadedText === null) return;
-      // A segment without a byte range cannot be placed, so it is dropped.
-      const located = result.segments.flatMap((s) =>
-        s.offset === null || s.length === null
-          ? []
-          : [{ segment: s.segment, offset: s.offset, length: s.length, matches: s.matches, terms: s.terms }],
-      );
-      // A fuzzy fallback that found something is held for the opt-in; the
-      // fallback itself only ran because exact found 0.
-      if (result.usedFuzzy && !findOptedIn) {
-        const segs = resolveFindSegments(loadedText, located);
-        clearFindMarks();
-        findCount.textContent = "No matches";
-        heldFuzzySegs = segs.length > 0 ? segs : null;
-        findAsk.hidden = segs.length === 0;
-        return;
-      }
-      findSearching = false;
-      findSegs = resolveFindSegments(loadedText, located);
-      renderFind(true);
-    } catch (e) {
-      if (mine !== findToken) return;
-      if (dispatchApiFailure({ onSessionExpired: deps.onSessionExpired }, e)) return;
-      // Anything else (e.g. text not derived yet) leaves the text unmarked; the
-      // next keystroke retries.
-      clearFindMarks();
-      paintFindCount();
-    }
-  }
-
-  function setFindQuery(raw: string): void {
-    const q = raw.trim();
-    if (q === findActive) return;
-    findActive = q;
-    findQuery = q;
-    findToken++;
-    findAbort?.abort();
-    findAbort = null;
-    findSearching = q !== "";
-    heldFuzzySegs = null;
-    findOptedIn = false;
-    findAsk.hidden = true;
-    if (findTimer !== undefined) {
-      clearTimeout(findTimer);
-      findTimer = undefined;
-    }
-    if (q === "") {
-      clearFindMarks();
-      paintFindCount();
-      deps.syncUrl();
-      return;
-    }
-    // The waiting state starts at the keystroke, so the old count is never shown.
-    paintFindCount();
-    const mine = findToken;
-    findTimer = setTimeout(() => {
-      findTimer = undefined;
-      void runFind(q, mine);
-    }, VIEWER_DEBOUNCE_MS);
-  }
-
-  /** Wraps unconditionally: the answer is complete when it lands. */
-  function stepFind(dir: 1 | -1): void {
-    const n = findSegs.length;
-    if (n === 0) return;
-    findAt = (findAt + dir + n) % n;
-    focusCurrent();
-    deps.syncUrl();
-  }
-
-  function resetFind(): void {
-    if (findTimer !== undefined) {
-      clearTimeout(findTimer);
-      findTimer = undefined;
-    }
-    findAbort?.abort();
-    findAbort = null;
-    findToken++;
-    findActive = null;
-    findQuery = "";
-    findAt = -1;
-    findSegs = [];
-    findParas = [];
-    findSearching = false;
-    heldFuzzySegs = null;
-    findOptedIn = false;
-    findAsk.hidden = true;
-    pendingTarget = null;
-    findInput.value = "";
-    setFindOpen(false);
-    paintFindCount();
-  }
-
-  function setFindOpen(open: boolean): void {
-    findOpen = open;
-    findBar.hidden = !open;
-    deps.root().classList.toggle("is-finding", open);
-    deps.toggle.setAttribute("aria-pressed", String(open));
-  }
-
-  function openFind(): void {
-    setFindOpen(true);
-    findInput.focus();
-    findInput.select();
-  }
-
-  function closeFind(): void {
-    if (!findOpen) return;
-    setFindOpen(false);
-    if (findTimer !== undefined) {
-      clearTimeout(findTimer);
-      findTimer = undefined;
-    }
-    findAbort?.abort();
-    findAbort = null;
-    findToken++;
-    findActive = null;
-    findQuery = "";
-    findSearching = false;
-    heldFuzzySegs = null;
-    findOptedIn = false;
-    findInput.value = "";
-    clearFindMarks();
-    paintFindCount();
-    deps.syncUrl();
-  }
-
-  deps.toggle.addEventListener("click", () => (findOpen ? closeFind() : openFind()));
-  findClose.addEventListener("click", () => closeFind());
-  findAsk.addEventListener("click", () => searchSimilar());
-  findInput.addEventListener("input", () => {
-    setFindQuery(findInput.value);
+  deps.toggle.addEventListener("click", () => (session.isOpen() ? close() : session.open()));
+  bar.close.addEventListener("click", close);
+  bar.ask.addEventListener("click", () => session.searchSimilar());
+  bar.input.addEventListener("input", () => {
+    session.setQuery(bar.input.value);
     deps.queueUrlSync();
   });
-  findInput.addEventListener("keydown", (e) => {
+  bar.input.addEventListener("keydown", (e) => {
     // Handled explicitly: a stray `<form>` submit would reload the hash-routed SPA.
     if (e.key !== "Enter") return;
     e.preventDefault();
-    stepFind(e.shiftKey ? -1 : 1);
+    session.step(e.shiftKey ? -1 : 1);
   });
-  findPrev.addEventListener("click", () => stepFind(-1));
-  findNext.addEventListener("click", () => stepFind(1));
+  bar.prev.addEventListener("click", () => session.step(-1));
+  bar.next.addEventListener("click", () => session.step(1));
 
   return {
-    bar: findBar,
-    isOpen: () => findOpen,
-    query: () => findQuery,
-    currentSegment: () => (findOpen && findAt >= 0 && findSegs[findAt] ? findSegs[findAt]!.segment : 0),
-    open: openFind,
-    close: closeFind,
-    setOpen: setFindOpen,
-    reset: resetFind,
+    bar: bar.el,
+    isOpen: session.isOpen,
+    query: session.query,
+    currentSegment: () => session.currentSegment() ?? 0,
+    open: () => session.open(),
+    close,
+    setOpen: (open) => (open ? session.open({ focus: false }) : close()),
+    reset() {
+      session.reset();
+      paras = new Map();
+      bar.input.value = "";
+    },
     prime(query, target) {
-      findQuery = query;
-      findActive = query;
-      findInput.value = query;
-      pendingTarget = target;
-      setFindOpen(true);
+      bar.input.value = query;
+      // Nothing to search until the text lands; `onTextShown` names the file.
+      session.setDocument(null, target);
+      session.open({ focus: false });
+      session.setQuery(query);
     },
     onTextShown() {
-      if (findOpen && findQuery !== "") void runFind(findQuery, findToken);
+      session.setDocument(deps.fileHash() ?? null);
     },
   };
 }

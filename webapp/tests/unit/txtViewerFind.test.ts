@@ -70,7 +70,7 @@ describe("txt viewer — find", () => {
     expect(paras).toHaveLength(2);
     expect(v.el.querySelectorAll(".txt__sheet mark")).toHaveLength(2);
 
-    expect(q(v, ".txtbar__count")!.textContent).toBe("2 matches in 2 paragraphs");
+    expect(q(v, ".txtbar__count")!.textContent).toBe("1 of 2");
 
     expect(paras[0]!.classList.contains("is-current")).toBe(true);
     expect(paras[1]!.classList.contains("is-current")).toBe(false);
@@ -144,7 +144,7 @@ describe("txt viewer — find", () => {
     v.destroy();
   });
 
-  it("says 'Searching…' with NO number until the answer lands, then the exact count", async () => {
+  it("says 'Searching…' with NO number until the answer lands, then the exact position and count", async () => {
     const { v, f, land } = findViewer(ZEPH, {}, { hold: true });
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 1, FOLDER, "zephyrine");
     f.calls[0]!.d.resolve(BODY);
@@ -155,7 +155,7 @@ describe("txt viewer — find", () => {
 
     land();
     await flush();
-    expect(q(v, ".txtbar__count")!.textContent).toBe("2 matches in 2 paragraphs");
+    expect(q(v, ".txtbar__count")!.textContent).toBe("1 of 2");
     expect(v.el.querySelectorAll(".txt__match")).toHaveLength(2);
     v.destroy();
   });
@@ -172,11 +172,12 @@ describe("txt viewer — find", () => {
     await flush();
     await flush();
     expect(v.el.querySelectorAll(".txt__match")).toHaveLength(1);
-    expect(q(v, ".txtbar__count")!.textContent).toBe("1 match in 1 paragraph");
+    // Neither marked nor counted: stepping must never land on what can't be shown.
+    expect(q(v, ".txtbar__count")!.textContent).toBe("1 of 1");
     v.destroy();
   });
 
-  it("manual fuzzy is OPT-IN: offers 'Search similar', reveals the held result on click", async () => {
+  it("manual fuzzy is OPT-IN: offers 'Try similar spellings', reveals the held result on click", async () => {
     const { v, f, search } = findViewer(ZEPH, {}, { usedFuzzy: true });
     await v.open(synthesizeSummary(meta()), Promise.resolve(meta()), 0, FOLDER, "zephyryne");
     f.calls[0]!.d.resolve(BODY);
@@ -193,7 +194,7 @@ describe("txt viewer — find", () => {
     await flush();
     expect(search.mock.calls.length).toBe(calls);
     expect(v.el.querySelectorAll(".txt__match")).toHaveLength(2);
-    expect(q(v, ".txtbar__count")!.textContent).toBe("2 matches in 2 paragraphs");
+    expect(q(v, ".txtbar__count")!.textContent).toBe("1 of 2");
     expect(ask.hidden).toBe(true);
     v.destroy();
   });

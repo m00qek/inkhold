@@ -544,6 +544,22 @@ one-shot frame plus `retry:`, never a 503.
   too short, opening to the notes search can't fully read and why. The
   tablet's titles and keywords are not indexed; none of the hub's notes had
   any (2026-11-05).
+- **Find in a document** (`pages/viewer/findSession.ts`): one session for
+  every viewer; a note, a PDF and a `.txt` bring only a surface (how a
+  segment's marks are drawn and a segment brought into view: a page, or a
+  paragraph). On the first find the viewer fetches the document's text
+  (`text/<md5>`, unless `textPrefetch` already holds it) and builds a one-
+  document FTS5 index in the browser; the count is the index's, never the
+  marks', and stepping goes match by match ("3 of 12"). It never says "No
+  matches" for a search that didn't happen: a note the device never
+  recognised, text the server has not extracted yet (a 404 the manifest
+  doesn't call `derived`: "still being indexed", asked again every 15 s while
+  the bar is open), a record with no text (a scanned PDF, an empty file), or
+  a failure. A PDF past the server's 5,000-page extraction cap is searched
+  in its first 5,000 pages, and the count says so. A typo-tolerant answer
+  is held behind "Try similar spellings". Only a move (a landing, a step)
+  scrolls the current match into view; a repaint never does. The field is a
+  query: no autocorrect, capitals or spellcheck.
 - **Quoted phrases** (`search/phrase.ts`): `"passé composé"` wants the words
   together, in order. The terms are one set per page, so the index finds the
   candidate pages and the page text decides: library search checks against

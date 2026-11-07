@@ -425,7 +425,7 @@ html {
 
 /* ---- a phone's find bars (note, PDF, text) ----
    Two rows: the field and its ‹ › × across, then what the search found (or
-   why it couldn't) under them, the width of the screen, free to wrap. On one
+   why it couldn't) and its opt-in under them, free to wrap. On one
    row a long status ("Couldn't search this note. Keep typing to retry.")
    would not wrap and squeezed the field out from under the typing. */
 @media (max-width: 699px) {
@@ -438,8 +438,24 @@ html {
     flex: 1 1 0;
     max-width: none;
   }
-  :is(.findbar, .pdfbar, .txtbar) > :is([class*="__count"], [class*="__ask"], [class*="__fuzzy"], [class*="__note"]) {
+  /* A line break after the field's row (it would otherwise share space with
+     a short count), cancelling the extra gap its empty line adds. */
+  :is(.findbar, .pdfbar, .txtbar)::before {
+    content: "";
     order: 1;
+    flex-basis: 100%;
+    margin-block-start: calc(-1 * var(--sp-1));
+  }
+  /* What the search found and its "Try similar spellings" side by side, at
+     reading size: the count is the answer, not a label. */
+  :is(.findbar, .pdfbar, .txtbar) > :is([class*="__count"], [class*="__ask"]) {
+    order: 2;
+    flex: 0 1 auto;
+    font-size: var(--fs-body);
+    white-space: normal;
+  }
+  :is(.findbar, .pdfbar, .txtbar) > :is([class*="__fuzzy"], [class*="__note"]) {
+    order: 3;
     flex-basis: 100%;
     white-space: normal;
   }

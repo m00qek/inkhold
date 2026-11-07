@@ -6,6 +6,7 @@ import { createFindController } from "../findInNote";
 import { createReaderExports } from "./readerExports";
 import { sidePanelState } from "../../ui/sidePanel";
 import type { ReaderCtx } from "./readerContext";
+import { revealIn } from "../../ui/dom";
 
 const OCR_MESSAGE: Record<Exclude<OcrState["kind"], "text">, string> = {
   loading: "Loading recognized text…",
@@ -59,6 +60,10 @@ export function installReaderFeatures(ctx: ReaderCtx): void {
         if (state.kind === "idle" || state.kind === "unrecognised") ctx.findBar.note.hidden = true;
       },
       setPageMatches: ctx.overlays.paintOvals,
+      revealCurrent() {
+        const oval = ctx.pageEl.querySelector(".findbox.is-current");
+        if (oval) revealIn(oval, ctx.stage);
+      },
       // The strip holds the counts, so they survive its rebuilds.
       setPageCounts: (counts) => ctx.pageIndexPanel.setBadges(counts),
       showPage: (index) => ctx.nav.goToPage(index),

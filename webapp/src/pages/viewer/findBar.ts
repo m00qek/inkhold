@@ -1,5 +1,5 @@
 // The find bar every paged viewer mounts above its page: a field, the match
-// count, the "Search similar" opt-in and prev/next/close. Each viewer names its
+// count, the "Try similar spellings" opt-in and prev/next/close. Each viewer names its
 // own block class, so its stylesheet styles it and the e2e locators for one
 // viewer's bar never see another's.
 
@@ -29,14 +29,21 @@ export interface FindBar {
 }
 
 export function createFindBar(o: FindBarOptions): FindBar {
+  // A query, not prose: a phone keyboard must not correct, capitalise or
+  // underline it (iOS would quietly "fix" a name or an oddly recognised word),
+  // and its Enter steps to the next match.
   const input = el("input", {
     type: "text",
     autocomplete: "off",
+    autocapitalize: "none",
+    autocorrect: "off",
+    spellcheck: "false",
+    enterkeyhint: "next",
     placeholder: o.label,
     "aria-label": o.label,
   });
   const count = el("span", { class: `${o.block}__count`, role: "status", "aria-live": "polite" });
-  const ask = el("button", { class: `${o.block}__ask`, type: "button", hidden: true, text: "Search similar" });
+  const ask = el("button", { class: `${o.block}__ask`, type: "button", hidden: true, text: "Try similar spellings" });
   const prev = el("button", {
     class: "icon-btn",
     type: "button",

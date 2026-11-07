@@ -72,25 +72,6 @@ export function resolveFindSegments(text: string, segments: readonly TxtSegmentM
   }));
 }
 
-/**
- * The exact "N", summed from the index's counts rather than the drawn marks:
- * where tokenisation disagrees, the index wins.
- */
-export function totalMatches(segments: readonly { matches: number }[]): number {
-  return segments.reduce((n, s) => n + s.matches, 0);
-}
-
-/** Shown while the first find pays the `text/<md5>` fetch and index build. */
-export const TXT_SEARCHING = "Searching…";
-
-/** Exact count, since the scope is one document. */
-export function txtCountText(total: number, paragraphs: number): string {
-  if (paragraphs <= 0) return "No matches";
-  const m = `${total} ${total === 1 ? "match" : "matches"}`;
-  const p = `${paragraphs} ${paragraphs === 1 ? "paragraph" : "paragraphs"}`;
-  return `${m} in ${p}`;
-}
-
 /** Word runs as `unicode61` splits them: any non-letter/digit is a boundary. */
 const WORD_RE = /[\p{L}\p{N}]+/gu;
 

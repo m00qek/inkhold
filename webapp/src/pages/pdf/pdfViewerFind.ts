@@ -5,6 +5,7 @@
 import type { PdfWord } from "../../render/pdfWire";
 import { createPdfFindController, pdfCountIsNone, pdfCountText, type PdfFindController } from "./pdfFind";
 import type { PdfViewerCtx } from "./pdfViewerContext";
+import { revealIn } from "../../ui/dom";
 
 export function createPdfViewerFind(ctx: PdfViewerCtx): PdfFindController {
   /** Words are in page points and placed by the same transform as the ink; no size yet clears the layer. */
@@ -41,6 +42,10 @@ export function createPdfViewerFind(ctx: PdfViewerCtx): PdfFindController {
         ctx.nav.syncUrl();
       },
       setPageMarks: paintFindMarks,
+      revealCurrent() {
+        const mark = ctx.main.querySelector(".pdf-find-mark.is-current");
+        if (mark) revealIn(mark, ctx.main);
+      },
       setPageCounts: (counts) => ctx.pagesPanel.setBadges(counts),
       showPage: (index) => void ctx.nav.go(index),
       setStepEnabled(enabled) {

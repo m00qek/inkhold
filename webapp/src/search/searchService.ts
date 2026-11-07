@@ -7,6 +7,7 @@ import type { LiveChannel } from "../sync/types";
 import type { CoreLoader } from "./indexEngine";
 import type { IndexSync } from "./indexSync";
 import { createIndexSearch, type LiveDocument } from "./indexSearch";
+import type { Derivation } from "./manifestCodec";
 import { createTextPrefetch, type TextPrefetch } from "./textPrefetch";
 import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
 import { holdsAll, phrasesOf, withExpansions } from "./phrase";
@@ -33,6 +34,8 @@ export interface SearchService extends LocalSearch {
   syncNow(): Promise<void>;
   /** Forwarded for in-document search's `text/<md5>?v=`. */
   indexVersion(md5: string): number | null;
+  /** Forwarded so in-document search tells "not derived yet" from a failure. */
+  derivation(md5: string): Derivation | null;
   /** Exposed for `available` only. */
   readonly textPrefetch: TextPrefetch;
   attachLive(live: LiveChannel): () => void;
@@ -96,6 +99,7 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     syncNow,
 
     indexVersion: (md5) => local.indexVersion(md5),
+    derivation: (md5) => local.derivation(md5),
 
     textPrefetch,
 

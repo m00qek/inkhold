@@ -4,13 +4,20 @@
 
 import type { CoreLoader, TermsDocument } from "./indexEngine";
 import { createSearchEngine, type SearchEngine } from "./searchEngine";
-import { httpTextTransport, type DocumentText, type TextTransport } from "./docText";
+import {
+  DocumentTextPending,
+  DocumentTextUnavailable,
+  httpTextTransport,
+  type DocumentText,
+  type TextTransport,
+} from "./docText";
+import type { Derivation } from "./manifestCodec";
 import { words } from "./fold";
 import { holdsAll, phrasesOf, withExpansions } from "./phrase";
 import { openTextStore, type TextStore } from "../cache/textStore";
 import type { Expansion } from "./localSearch";
 
-export { DocumentTextUnavailable } from "./docText";
+export { DocumentTextPending, DocumentTextUnavailable } from "./docText";
 
 /** No cap: a find that dropped segments would step through fewer than its counter claims. */
 const ALL_SEGMENTS = 0xffffffff;
@@ -36,6 +43,10 @@ export interface DocSearchResult {
   /** The exact query matched nothing and the typo ladder answered. */
   readonly usedFuzzy: boolean;
   readonly expansions: readonly Expansion[];
+  /** The record holds no text at all: a scanned PDF, an empty file. Not "no matches". */
+  readonly textless: boolean;
+  /** The document's own size in segments (`n`): a PDF's page count, even past what was derived. */
+  readonly extent: number;
 }
 
 export interface DocSearch {
@@ -59,6 +70,8 @@ export interface DocSearchOptions {
    * re-derives the same md5 into different text.
    */
   indexVersion?: (md5: string) => number | null;
+  /** The manifest's word on a document; a 404 short of `derived` is pending, not a failure. */
+  derivation?: (md5: string) => Derivation | null;
 }
 
 /** What to mark, derived from the same string handed to `idx_query`. */
@@ -131,6 +144,7 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
   const store = opts.store ?? openTextStore();
   const load = opts.load;
   const versionOf = opts.indexVersion ?? ((): number | null => null);
+  const derivationOf = opts.derivation ?? ((): Derivation | null => null);
 
   let index: SearchEngine | null = null;
   /** `md5@version` built into `index`. */
@@ -138,6 +152,8 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
   /** In flight, so a burst of keystrokes on a cold document is one fetch and build. */
   let loading: { key: string; done: Promise<SearchEngine> } | null = null;
   let byOrdinal = new Map<number, DocumentText["segments"][number]>();
+  /** The loaded record's `n`. */
+  let extent = 0;
 
   /**
    * Stored copy first, keyed on `(md5, indexVersion)` so a moved version misses.
@@ -159,6 +175,7 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
   // A throwing rebuild must not leave the old `byOrdinal` beside an empty table.
     loaded = null;
     byOrdinal = new Map();
+    extent = text.segmentCount;
     const doc: TermsDocument = { md5, pages: text.segments.map((s) => ({ p: s.p, t: s.t })) };
     try {
       await engine.build([doc]);
@@ -189,7 +206,15 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
   return {
     async search(md5, query, signal): Promise<DocSearchResult> {
       const version = versionOf(md5);
-      const engine = await ready(md5, `${md5}@${version ?? "?"}`, version, signal);
+      let engine: SearchEngine;
+      try {
+        engine = await ready(md5, `${md5}@${version ?? "?"}`, version, signal);
+      } catch (e) {
+        // Absent from the manifest counts as pending too: an upload is in the
+        // viewer before the next manifest names it.
+        if (e instanceof DocumentTextUnavailable && derivationOf(md5) !== "derived") throw new DocumentTextPending(md5);
+        throw e;
+      }
     // The build is not abortable; a superseded search must just not paint.
       if (signal?.aborted) throw abortError();
       // With the ladder: the corpus is handwriting recognition, so exact
@@ -212,6 +237,8 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
         segments,
         usedFuzzy: answer.expansions.length > 0,
         expansions: answer.expansions,
+        textless: byOrdinal.size === 0,
+        extent,
       };
     },
 
@@ -221,6 +248,7 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
       loaded = null;
       loading = null;
       byOrdinal = new Map();
+      extent = 0;
     },
   };
 }

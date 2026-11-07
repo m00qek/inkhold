@@ -38,7 +38,7 @@ export interface FindBarView {
   note: HTMLElement;
   /** Shown when a settled result is approximate. */
   fuzzy: HTMLElement;
-  /** "Search similar?" prompt. */
+  /** The "Try similar spellings" opt-in. */
   ask: HTMLButtonElement;
   prev: HTMLButtonElement;
   next: HTMLButtonElement;

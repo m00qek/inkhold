@@ -5,8 +5,6 @@ import { fold } from "../../src/search/fold";
 import {
   byteToCharMap,
   resolveFindSegments,
-  totalMatches,
-  txtCountText,
   markParagraph,
   buildFindContent,
 } from "../../src/pages/txt/txtFind";
@@ -51,18 +49,6 @@ describe("resolveFindSegments", () => {
     const [r] = resolveFindSegments(text, segs);
     expect(text.slice(r!.startChar, r!.endChar)).toBe("plain tail.");
     expect(r!.terms.has("plain")).toBe(true);
-  });
-});
-
-describe("totalMatches / txtCountText", () => {
-  it("sums the index's per-paragraph counts — the exact N", () => {
-    expect(totalMatches([{ matches: 1 }, { matches: 2 }, { matches: 1 }])).toBe(4);
-  });
-
-  it('reads "N matches in M paragraphs", singular-aware', () => {
-    expect(txtCountText(4, 2)).toBe("4 matches in 2 paragraphs");
-    expect(txtCountText(1, 1)).toBe("1 match in 1 paragraph");
-    expect(txtCountText(0, 0)).toBe("No matches");
   });
 });
 

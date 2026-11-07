@@ -7,7 +7,7 @@ import { newestPerDocument } from "../cache/termsStore";
 import type { CoreLoader, QueryResult, TermsDocument } from "./indexEngine";
 import { createSearchEngine, type SearchEngine } from "./searchEngine";
 import { createIndexSync, type IndexSync, type SyncOutcome } from "./indexSync";
-import type { ManifestRow } from "./manifestCodec";
+import type { Derivation, ManifestRow } from "./manifestCodec";
 import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
 
 /** No cap: the scan is full anyway, and a capped document would undercount its matches. */
@@ -38,6 +38,8 @@ export interface IndexSearch extends LocalSearch {
    * listing never answers here.
    */
   indexVersion(md5: string): number | null;
+  /** The last synced manifest's `derivation`, or `null` for a document it doesn't list. */
+  derivation(md5: string): Derivation | null;
   /** Free the instance; the next search rebuilds from IndexedDB rows. */
   drop(): void;
 }
@@ -58,6 +60,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   let live: Map<string, LiveDocument> | null = null;
   /** Beside `live` because `live` may be the listing, which has no versions. */
   let versions = new Map<string, number | null>();
+  let derivations = new Map<string, Derivation>();
 
   let index: SearchEngine | null = null;
   let building: Promise<SearchEngine> | null = null;
@@ -114,10 +117,13 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
       const outcome = await sync.sync({ signal });
       const next = new Map<string, ManifestRow>();
       const nextVersions = new Map<string, number | null>();
+      const nextDerivations = new Map<string, Derivation>();
       for (const row of outcome.manifest.rows) {
         next.set(row.md5, row);
         nextVersions.set(row.md5, row.indexVersion);
+        nextDerivations.set(row.md5, row.derivation);
       }
+      derivations = nextDerivations;
       live = next;
       versions = nextVersions;
       if (outcome.received > 0) rows += 1;
@@ -125,6 +131,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     },
 
     indexVersion: (md5) => versions.get(md5) ?? null,
+    derivation: (md5) => derivations.get(md5) ?? null,
 
     drop() {
       index?.close();

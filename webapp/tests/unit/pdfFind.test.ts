@@ -155,7 +155,7 @@ describe("the honesty rule", () => {
       await flush();
       await flush();
 
-      expect(last(b.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: false });
+      expect(last(b.states)).toEqual({ kind: "settled", at: 0, total: 2, fuzzy: false, partial: null });
       expect(pdfCountText(last(b.states)!)).toBe("1 of 2");
       expect(b.states.map((s) => s.kind)).not.toContain("empty");
       expect(b.states.map((s) => pdfCountText(s))).not.toContain("No matches");
@@ -212,7 +212,7 @@ describe("the honesty rule", () => {
     b.find.setQuery("quokka");
     await flush();
     await flush();
-    expect(last(b.states)).toEqual({ kind: "empty" });
+    expect(last(b.states)).toEqual({ kind: "empty", partial: null });
     expect(pdfCountText(last(b.states)!)).toBe("No matches");
   });
 });
@@ -223,7 +223,7 @@ describe("the find controller", () => {
     b.find.setDocument("n-book", MD5);
     b.find.open();
     b.find.setQuery("rutabaga");
-    expect(last(b.states)).toEqual({ kind: "counting" });
+    expect(last(b.states)).toMatchObject({ kind: "counting" });
     expect(pdfCountText({ kind: "counting" })).toBe("Searching…");
     await flush();
     await flush();
@@ -329,7 +329,7 @@ describe("the find controller", () => {
     b.find.setQuery("quokka");
     await flush();
     await flush();
-    expect(last(b.states)).toEqual({ kind: "empty" });
+    expect(last(b.states)).toEqual({ kind: "empty", partial: null });
   });
 
   it("asks the decoder ONCE per page however often find repaints", async () => {
