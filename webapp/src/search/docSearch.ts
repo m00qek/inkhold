@@ -70,7 +70,7 @@ export interface DocSearchOptions {
    * re-derives the same md5 into different text.
    */
   indexVersion?: (md5: string) => number | null;
-  /** The manifest's word on a document; a 404 short of `derived` is pending, not a failure. */
+  /** The manifest's word on a document; a 404 it marks `pending` is on its way, not a failure. */
   derivation?: (md5: string) => Derivation | null;
 }
 
@@ -210,9 +210,10 @@ export function createDocSearch(opts: DocSearchOptions = {}): DocSearch {
       try {
         engine = await ready(md5, `${md5}@${version ?? "?"}`, version, signal);
       } catch (e) {
-        // Absent from the manifest counts as pending too: an upload is in the
-        // viewer before the next manifest names it.
-        if (e instanceof DocumentTextUnavailable && derivationOf(md5) !== "derived") throw new DocumentTextPending(md5);
+        // Only the manifest's own "pending" is a promise: a job still owes this
+        // document its text. Absent from it (a bin or version preview, a file
+        // the list hasn't caught up with) is no promise, and stays a failure.
+        if (e instanceof DocumentTextUnavailable && derivationOf(md5) === "pending") throw new DocumentTextPending(md5);
         throw e;
       }
     // The build is not abortable; a superseded search must just not paint.

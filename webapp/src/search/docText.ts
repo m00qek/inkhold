@@ -49,9 +49,9 @@ export class DocumentTextUnavailable extends Error {
 }
 
 /**
- * The 404 of a document the manifest says the server has not derived yet (a
- * new upload, a fresh sync): its text is on the way, not missing. Told apart
- * from the 404 itself by the manifest, so the route still leaks nothing.
+ * The 404 of a document the manifest marks pending: a server job still owes
+ * it its text (a new upload, a fresh sync), so the text is on the way, not
+ * missing. Told apart by the manifest, so the route itself still leaks nothing.
  */
 export class DocumentTextPending extends DocumentTextUnavailable {
   override readonly name = "DocumentTextPending";

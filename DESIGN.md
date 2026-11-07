@@ -553,8 +553,9 @@ one-shot frame plus `retry:`, never a 503.
   marks', and stepping goes match by match ("3 of 12"). It never says "No
   matches" for a search that didn't happen: a note the device never
   recognised, text the server has not extracted yet (a 404 the manifest
-  doesn't call `derived`: "still being indexed", asked again every 15 s while
-  the bar is open), a record with no text (a scanned PDF, an empty file), or
+  marks `pending`, a job still owing it: "still being indexed", asked again
+  every 15 s while the bar is open; a document the manifest doesn't list, a
+  bin or version preview, is never promised that), a record with no text (a scanned PDF, an empty file), or
   a failure. A PDF past the server's 5,000-page extraction cap is searched
   in its first 5,000 pages, and the count says so. A typo-tolerant answer
   is held behind "Try similar spellings". Only a move (a landing, a step)

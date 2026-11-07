@@ -306,10 +306,14 @@ describe("in-document search, on the real engine", () => {
     await expect(other).rejects.not.toBeInstanceOf(DocumentTextPending);
   });
 
-  it("calls a 404 pending for a document the manifest doesn't list yet (a fresh upload)", async () => {
+  // The manifest lists live files only: a bin or version preview is absent from
+  // it, and promising "still being indexed" there would promise for ever.
+  it("never calls a 404 pending for a document the manifest doesn't list", async () => {
     const { transport } = transportFor({});
     const search = createDocSearch({ transport, load: loadCore, derivation: () => null });
-    await expect(search.search(NOTE_MD5, "reuniao")).rejects.toBeInstanceOf(DocumentTextPending);
+    const p = search.search(NOTE_MD5, "reuniao");
+    await expect(p).rejects.toBeInstanceOf(DocumentTextUnavailable);
+    await expect(p).rejects.not.toBeInstanceOf(DocumentTextPending);
   });
 
   it("reports a record with no text at all, and the document's own extent", async () => {

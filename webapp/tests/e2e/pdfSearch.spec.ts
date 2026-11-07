@@ -140,18 +140,35 @@ test.describe("find in PDF", () => {
     await expect(region).toBeHidden();
   });
 
-  // A 404 is never "not in here". For a file the viewer could open, it means the
-  // text isn't extracted yet, unless the manifest says it was: then it's a failure.
+  // A 404 is never "not in here". "Still being indexed" only when the manifest
+  // says a job still owes the file its text; otherwise it is a failure.
   test("a fresh PDF whose text isn't extracted yet says it's still being indexed", async ({ page }) => {
+    await signedIn(page);
+    const index = await mockSearchIndex(page, {
+      rows: [{ md5: MANUAL_MD5, fileId: Number(MANUAL), tier: "other", updatedAt: 1_700_000_000, indexVersion: null, derivation: "pending" }],
+      documents: {},
+    });
+    await servePdf(page);
+    await mockDocText(page, {});
+    await page.goto(`/#/note/${MANUAL}`);
+    await freezeMotion(page);
+    await expect(viewer(page)).toBeVisible();
+    await expect.poll(() => index.manifestHits()).toBeGreaterThan(0);
+    await page.getByRole("button", { name: "Find in this file" }).first().click();
+    await page.getByRole("textbox", { name: "Find in this file" }).fill("marmalade");
+
+    await counts(page, "This file is still being indexed — matches will appear on their own.");
+    await expect(marks(page)).toHaveCount(0);
+  });
+
+  test("a PDF the search list doesn't name (a bin or version preview) never promises indexing", async ({ page }) => {
     await signedIn(page);
     await servePdf(page);
     await mockDocText(page, {});
     await page.goto(`/#/note/${MANUAL}?q=marmalade`);
     await freezeMotion(page);
-
     await expect(viewer(page)).toBeVisible();
-    await counts(page, "This file is still being indexed — matches will appear on their own.");
-    await expect(marks(page)).toHaveCount(0);
+    await counts(page, "Couldn't search this file. Keep typing to retry.");
   });
 
   test("a PDF whose extracted text can't be fetched says it could not search, not that there is nothing", async ({ page }) => {
