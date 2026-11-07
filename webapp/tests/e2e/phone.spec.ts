@@ -455,6 +455,25 @@ test.describe("on a phone", () => {
     await expect.poll(async () => (await look(ocr))[0]).toBe("rgba(0, 0, 0, 0)");
   });
 
+  // Regression: with a file open the library under it is clipped, not scrolled,
+  // so its widest unbreakable word set the screen's width: from a search, the
+  // .txt arrived wider than the phone, its bar and lines cut at the edge.
+  test("nothing left under an open file widens it past the screen", async ({ page }) => {
+    await signedIn(page);
+    await page.route((url) => url.pathname.startsWith("/file/"), (r) => r.fulfill({ status: 200, contentType: "text/plain; charset=utf-8", body: "a line" }));
+    await page.goto("/#/search?q=budget");
+    await page.goto("/#/note/177?q=line");
+    await expect(page.locator(".viewer--txt .txt__sheet")).toContainText("a line");
+    await page.locator(".content").evaluate((c) => {
+      const s = document.createElement("span");
+      s.style.whiteSpace = "nowrap";
+      s.textContent = "www.gutenberg.org/ebooks/2000/".repeat(8);
+      c.append(s);
+    });
+    await expect.poll(async () => Math.round((await page.locator(".viewer--txt").boundingBox())!.width)).toBe(390);
+    await expect(page.locator(".viewer--txt .viewer__bar").getByRole("button", { name: "More" })).toBeInViewport({ ratio: 1 });
+  });
+
   // Regression: rem follows the iPhone's text size (`-apple-system-body`), so with
   // a smaller one a 1rem field fell under 16px, and iOS zoomed the page on focus,
   // staying zoomed after (a library search, then the .txt it opened).
