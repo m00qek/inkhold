@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createThumbnails, strategyFor } from "../../src/render/thumbnails";
+import { createThumbnails, strategyFor, TEXT_THUMB_BYTES } from "../../src/render/thumbnails";
 import { FACADE_THUMB_TYPES } from "../../src/pages/galleryCards";
 import { fileKind, PREVIEWABLE_IMAGE_TYPES, UPLOAD_ACCEPT } from "../../src/core/fileKind";
 import type { Id, PageRef, Theme } from "../../src/core/types";
@@ -242,6 +242,8 @@ describe("thumbnail facade", () => {
     const blob = await t.thumbs.getThumbnail(fileSrc("txth"), "txt");
     expect(await tagOf(blob)).toBe("text:hel:light");
     expect(t.net.text).toHaveBeenCalledTimes(1);
+    // Only the head: a 2 MB book is a few KB, not the whole file.
+    expect(t.net.text.mock.calls[0]![1]).toBe(TEXT_THUMB_BYTES);
     expect(t.painter.textSnippet).toHaveBeenCalledTimes(1);
     expect(t.painter.glyph).not.toHaveBeenCalled();
   });

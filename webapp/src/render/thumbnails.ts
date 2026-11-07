@@ -97,8 +97,15 @@ export interface ThumbNet {
    * memo) while transport failures and 5xx are only suppressed per session.
    */
   probe(url: string): Promise<Blob | "not-found" | null>;
-  text(url: string): Promise<string | null>;
+  /** The file's first `maxBytes` as text, never the whole file (`textHead`). */
+  text(url: string, maxBytes: number): Promise<string | null>;
 }
+
+/**
+ * A `.txt` card draws nine lines, so it reads only the file's head: a 2 MB book
+ * is 4 KB from the server, not 2 MB.
+ */
+export const TEXT_THUMB_BYTES = 4096;
 
 export interface ThumbnailsDeps {
   /** The negative-thumbnail memo; defaults to the shared persistent one. */
@@ -152,7 +159,9 @@ function glyphKind(fileType: string): string {
  * Cache-key generation, prefixed to every facade key (in memory and persisted).
  * Bump when the pixels a key maps to change meaning.
  */
-const THUMB_CACHE_VERSION = 2;
+// 3: the painter read the page's theme, not the one asked for, and stored
+// wrong-theme `.txt` cards and glyphs; every stored one is drawn again.
+const THUMB_CACHE_VERSION = 3;
 
 export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
   const { getTheme, net, painter, renderNote } = deps;
@@ -324,7 +333,7 @@ export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
         const url = source.fileId ? rawFileUrl(source.fileId, hash, { bin: source.bin }) : null;
         if (!url) return glyph(fileType, theme, bucket);
         return memo(`${hash}:${theme}:b${bucket}`, async () => {
-          const content = await net.text(url);
+          const content = await net.text(url, TEXT_THUMB_BYTES);
           if (content === null) throw new NoThumbnail();
           return painter.textSnippet(content, theme);
         }).catch(() => glyph(fileType, theme, bucket));

@@ -89,20 +89,20 @@ interface Palette {
 }
 
 /** Tile paper from live CSS tokens; fallbacks equal the token values. */
+/**
+ * Each theme's paper, ink, margin and rule: `--sheet`, `--ink`, `--margin` and
+ * `--paper-rule` in `00-tokens.css` (`thumbPalette.test.ts` holds them equal).
+ * Never read from the page: a thumbnail is filed under the theme it was asked
+ * for, and the page can be in the other one (a theme switch mid-paint), which
+ * baked dark cards into the light theme's store for good.
+ */
+export const THUMB_PALETTES: Readonly<Record<Theme, Palette>> = {
+  light: { paper: "#fcfbf7", ink: "#1c1b17", margin: "#bf5248", rule: "rgba(28, 27, 23, 0.11)" },
+  dark: { paper: "#17171a", ink: "#e9e6dd", margin: "#cd6a60", rule: "rgba(233, 230, 221, 0.12)" },
+};
+
 function palette(theme: Theme): Palette {
-  const fallback: Palette =
-    theme === "dark"
-      ? { paper: "#17171a", ink: "#e9e6dd", margin: "#cd6a60", rule: "rgba(233,230,221,0.12)" }
-      : { paper: "#fcfbf7", ink: "#1c1b17", margin: "#bf5248", rule: "rgba(28,27,23,0.11)" };
-  if (typeof document === "undefined") return fallback;
-  const s = getComputedStyle(document.documentElement);
-  const tok = (name: string, fb: string): string => s.getPropertyValue(name).trim() || fb;
-  return {
-    paper: tok("--sheet", fallback.paper),
-    ink: tok("--ink", fallback.ink),
-    margin: tok("--margin", fallback.margin),
-    rule: tok("--paper-rule", fallback.rule),
-  };
+  return THUMB_PALETTES[theme];
 }
 
 /**
@@ -387,6 +387,35 @@ export function createCanvasThumbPainter(): ThumbPainter {
   };
 }
 
+/** At most `max` bytes of a response's body, cancelling the rest. */
+async function readHead(res: Response, max: number): Promise<Uint8Array> {
+  const reader = res.body?.getReader();
+  if (!reader) return new Uint8Array((await res.arrayBuffer()).slice(0, max));
+  const out = new Uint8Array(max);
+  let n = 0;
+  while (n < max) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const take = Math.min(value.length, max - n);
+    out.set(value.subarray(0, take), n);
+    n += take;
+  }
+  void reader.cancel().catch(() => {});
+  return out.subarray(0, n);
+}
+
+/**
+ * The head of a text file as text. When the bytes stop short of the file
+ * (`cut`), the last line is dropped: it may be half a line, and may end inside
+ * a character that would decode as "�".
+ */
+export function textHead(bytes: Uint8Array, cut: boolean): string {
+  const text = new TextDecoder("utf-8").decode(bytes);
+  if (!cut) return text;
+  const lastBreak = text.lastIndexOf("\n");
+  return lastBreak >= 0 ? text.slice(0, lastBreak) : text;
+}
+
 /** `fetch` seam; any non-OK or transport error becomes `null`. */
 
 export function createFetchThumbNet(): ThumbNet {
@@ -410,11 +439,14 @@ export function createFetchThumbNet(): ThumbNet {
         return null;
       }
     },
-    async text(url: string): Promise<string | null> {
+    async text(url: string, maxBytes: number): Promise<string | null> {
       try {
-        const res = await fetch(url, { credentials: "same-origin" });
+        const res = await fetch(url, { credentials: "same-origin", headers: { Range: `bytes=0-${maxBytes - 1}` } });
         if (!res.ok) return null;
-        return await res.text();
+        // 206 is the head; a server that ignores `Range` answers 200 with the
+        // whole file, so read only as far as the head and let the rest go.
+        const bytes = await readHead(res, maxBytes);
+        return textHead(bytes, bytes.length >= maxBytes);
       } catch {
         return null;
       }

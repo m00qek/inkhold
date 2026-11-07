@@ -631,6 +631,11 @@ has no version history of its own; its `.mark` does.
 - **One persistent pixel store**, `sn-thumbs`, shared by the render cache and
   thumbnails under one byte budget. Thumbnails persist as WebP (raw RGBA was
   20–40× larger); reader pages stay in memory.
+- **Drawn thumbnails** (a `.txt`'s first lines, a glyph) are painted in the
+  colours of the theme they are filed under (`THUMB_PALETTES`, the tokens),
+  never the page's: the page can be in the other theme mid-switch. A `.txt`
+  card reads only the file's head, 4 KB by `Range` on `/file/:id` (the same
+  ranged route a PDF reads), never the whole file.
 - Other IndexedDB caches each have their own database, so adding a store never
   needs a version bump another module's open connection would block. All
   degrade to no-ops when storage is unavailable.
