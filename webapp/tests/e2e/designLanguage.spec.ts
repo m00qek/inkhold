@@ -85,6 +85,31 @@ test.describe("on a phone", () => {
     await expect(page.locator(".topbar .crumbs")).toBeVisible();
   });
 
+  // Regression: the bin's preview kept its one desktop row on a phone, which
+  // squeezed the file's name out of sight and pushed Restore off the screen.
+  test("the bin's preview shows the file's name, and keeps Restore and Delete on screen", async ({ page }) => {
+    await signedIn(page);
+    // A file with no viewer of its own (.epub) previews in the bin's overlay.
+    await page.goto("/#/note/143");
+    await page.locator(".reader__bar").getByRole("button", { name: "More" }).click();
+    await page.locator(".menu__pop--float.is-open").getByRole("menuitem", { name: "Move to bin" }).click();
+    await expect(page.locator(".bin-toast")).toContainText("Moved");
+    // In-app navigation: a reload would rebuild the fake Api and lose the trash.
+    await page.locator(".tabbar").getByRole("link", { name: "Library" }).click();
+    await page.getByRole("button", { name: "Places" }).click();
+    await page.locator(".rail").getByRole("link", { name: /Recycle bin/ }).click();
+    await page.locator(".bin__row", { hasText: "Sourdough" }).locator("button.bin__open").click();
+
+    const bar = page.locator(".bin-preview__bar");
+    await expect(bar.locator(".bin-preview__title b")).toHaveText("Sourdough — a field guide");
+    expect((await bar.locator(".bin-preview__title b").boundingBox())!.width).toBeGreaterThan(40);
+    for (const label of [/^Restore /, /^Delete .* permanently$/]) {
+      const b = (await bar.getByRole("button", { name: label }).boundingBox())!;
+      expect(b.x).toBeGreaterThanOrEqual(0);
+      expect(b.x + b.width).toBeLessThanOrEqual(390);
+    }
+  });
+
   // Regression: on a page without the box, the Search tab did nothing at all.
   test("the Search tab opens search from a page that has no search box", async ({ page }) => {
     await signedIn(page);

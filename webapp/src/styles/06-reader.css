@@ -211,6 +211,8 @@
   font-size: var(--fs-eyebrow);
   letter-spacing: 0.04em;
   color: var(--ink-soft);
+  /* A link dressed as a button (Download) reads as a button, not a link. */
+  text-decoration: none;
   transition:
     color 0.14s ease,
     background-color 0.14s ease,

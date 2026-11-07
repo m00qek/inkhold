@@ -1,12 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  fileKind,
-  formatBytes,
-  rawFileUrl,
-  historyFileUrl,
-  canPreviewHistory,
-  PREVIEWABLE_IMAGE_TYPES,
-} from "../../src/core/fileKind";
+import { fileKind, formatBytes, rawFileUrl, historyFileUrl, canPreviewHistory, PREVIEWABLE_IMAGE_TYPES, fileTypeLabel } from "../../src/core/fileKind";
 
 describe("fileKind", () => {
   it("classifies a verified note as a note", () => {
@@ -43,6 +36,20 @@ describe("fileKind", () => {
     for (const t of ["pdf", "spd", "txt", "html", "file", "", "note.png"]) {
       expect(fileKind(t)).toBe("file");
     }
+  });
+});
+
+describe("fileTypeLabel", () => {
+  it("writes a type as its extension, never upper-cased", () => {
+    expect(fileTypeLabel("note")).toBe(".note");
+    expect(fileTypeLabel("PDF")).toBe(".pdf");
+  });
+
+  // The server calls a file with no extension "file"; ".file" would be made up.
+  it("calls a file with no extension just 'file'", () => {
+    expect(fileTypeLabel("file")).toBe("file");
+    expect(fileTypeLabel("")).toBe("file");
+    expect(fileTypeLabel(null)).toBe("file");
   });
 });
 

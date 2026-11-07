@@ -21,13 +21,17 @@ export const PREVIEWABLE_IMAGE_TYPES: readonly string[] = ["png", "jpg", "jpeg",
 const NOTE_STAGE_TYPES: readonly string[] = ["note", "mark"];
 
 /** Classify a server-verified `fileType` (lowercase, no dot). */
+/** What the server calls a file with no extension (`controlplane.zig` `no_extension`). */
+const NO_EXTENSION = "file";
+
 /**
  * A file's type as text says it: its extension (`.note`, `.pdf`), as the
  * account page and the gallery's badges do. Never upper-cased: "Note · NOTE"
- * reads as a folder named twice.
+ * reads as a folder named twice. A file with no extension is just "file",
+ * never a made-up ".file".
  */
 export function fileTypeLabel(fileType: string | null | undefined): string {
-  return fileType ? `.${fileType.toLowerCase()}` : "file";
+  return fileType && fileType.toLowerCase() !== NO_EXTENSION ? `.${fileType.toLowerCase()}` : NO_EXTENSION;
 }
 
 export function fileKind(fileType: string): FileKind {

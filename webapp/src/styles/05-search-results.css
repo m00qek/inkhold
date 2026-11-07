@@ -100,6 +100,10 @@
   font-size: var(--fs-body);
   color: var(--ink-soft);
 }
+/* The empty state's way forward (Download), clear of the sentence above it. */
+.empty .btn {
+  margin-block-start: var(--sp-4);
+}
 
 @keyframes rise {
   from {

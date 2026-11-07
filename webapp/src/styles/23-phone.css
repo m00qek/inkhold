@@ -417,6 +417,44 @@ html {
     box-shadow: none;
   }
 
+  /* The bin's preview, as a viewer's bar: ‹ (a quiet glyph, its word for
+     screen readers), the name and where it was, then the time left across the
+     screen, then Restore and Delete side by side. One desktop row squeezed the
+     name out of sight and pushed Restore off the screen. */
+  .bin-preview__bar {
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    padding: var(--sp-1) var(--sp-2) var(--sp-2);
+  }
+  .bin-preview__bar .backbtn {
+    inline-size: var(--hit-target-touch);
+    padding: 0;
+    justify-content: center;
+    border-color: transparent;
+    background: transparent;
+    color: var(--ink);
+  }
+  .bin-preview__bar .backbtn svg {
+    inline-size: 22px;
+    block-size: 22px;
+  }
+  .bin-preview__title {
+    flex: 1;
+  }
+  .bin-preview__spacer {
+    display: none;
+  }
+  .bin-preview__bar .life {
+    order: 1;
+    flex-basis: 100%;
+    inline-size: auto;
+  }
+  .bin-preview__bar > .btn {
+    order: 2;
+    flex: 1;
+    justify-content: center;
+  }
+
   /* Menus: a sheet along the bottom, full width, rows a finger's height. */
   /* Any menu-like pop, whatever width it has elsewhere (Version history's
      296px): the sheet is the screen's width. */

@@ -488,6 +488,10 @@
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
   color: var(--ink-faint);
+  /* A deep path ends in …, as the name does, never wraps word by word. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .bin-preview__bar .life {
   width: 232px;

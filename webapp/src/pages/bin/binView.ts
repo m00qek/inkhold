@@ -334,7 +334,7 @@ export function createBinView(opts: BinViewOptions): BinView {
       const e = row.entry;
       const src = binFileUrl(e);
       const kind = fileKind(e.fileType);
-      const back = el("button", { class: "backbtn", type: "button" }, el("span", { html: svg('<path d="m15 18-6-6 6-6"/>', 1.8) }), el("span", { text: "Recycle bin" }));
+      const back = el("button", { class: "backbtn", type: "button" }, el("span", { html: svg('<path d="m15 18-6-6 6-6"/>', 1.8) }), el("span", { class: "backbtn__label", text: "Recycle bin" }));
       back.addEventListener("click", closePreview);
 
       const restore = el("button", { class: "btn", type: "button", text: "Restore", "aria-label": `Restore ${e.name}` });
