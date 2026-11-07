@@ -542,22 +542,31 @@ test.describe("universal search", () => {
       await expect(row.locator(".card__title")).toBeVisible();
 
       // The wash is translucent, so compare against the composited background.
-      const { mark, over } = await row.locator(".card__title mark").first().evaluate((el) => {
-        const wash = getComputedStyle(el).backgroundColor;
-        let node: Element | null = el.parentElement;
-        let behind = "rgb(255, 255, 255)";
-        while (node) {
-          const c = getComputedStyle(node).backgroundColor;
-          if (c && c !== "transparent" && !/,\s*0\s*\)$/.test(c)) { behind = c; break; }
-          node = node.parentElement;
+      // Polled: results re-render as the debounced query settles, and a row
+      // read mid-swap is detached, with no computed colours.
+      const legible = async () => {
+        const { mark, over } = await row.locator(".card__title mark").first().evaluate((el) => {
+          const wash = getComputedStyle(el).backgroundColor;
+          let node: Element | null = el.parentElement;
+          let behind = "rgb(255, 255, 255)";
+          while (node) {
+            const c = getComputedStyle(node).backgroundColor;
+            if (c && c !== "transparent" && !/,\s*0\s*\)$/.test(c)) { behind = c; break; }
+            node = node.parentElement;
+          }
+          const nums = (v: string) => (v.match(/[\d.]+/g) ?? []).map(Number);
+          const [wr, wg, wb, wa = 1] = nums(wash);
+          const [br, bg, bb] = nums(behind);
+          const over = [wr * wa + br * (1 - wa), wg * wa + bg * (1 - wa), wb * wa + bb * (1 - wa)];
+          return { mark: getComputedStyle(el).color, over: `rgb(${over.join(", ")})` };
+        });
+        try {
+          return contrastRatio(mark, over);
+        } catch {
+          return 0; // a detached row: no colours yet
         }
-        const nums = (v: string) => (v.match(/[\d.]+/g) ?? []).map(Number);
-        const [wr, wg, wb, wa = 1] = nums(wash);
-        const [br, bg, bb] = nums(behind);
-        const over = [wr * wa + br * (1 - wa), wg * wa + bg * (1 - wa), wb * wa + bb * (1 - wa)];
-        return { mark: getComputedStyle(el).color, over: `rgb(${over.join(", ")})` };
-      });
-      expect(contrastRatio(mark, over)).toBeGreaterThanOrEqual(4.5);
+      };
+      await expect.poll(legible).toBeGreaterThanOrEqual(4.5);
     });
 
     test(`the row's path line stays legible in ${scheme} mode`, async ({ page }) => {

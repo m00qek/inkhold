@@ -157,8 +157,9 @@ async function readImgInkFraction(img: Locator): Promise<number | null> {
 }
 
 /** Whether the lazy engine has swapped an object URL into a gallery `<img>`. */
+/** The tile's real picture is on: not the interim glyph shown while a slow one loads. */
 export async function imgPainted(img: Locator): Promise<boolean> {
-  return img.evaluate((el: HTMLImageElement) => el.src.startsWith("blob:"));
+  return img.evaluate((el: HTMLImageElement) => el.src.startsWith("blob:") && !el.hasAttribute("data-interim"));
 }
 
 /** A real 2x2 PNG, so `naturalWidth > 0` means the preview really decoded. */
@@ -212,7 +213,7 @@ export interface ThumbnailBackendHits {
  */
 export async function mockThumbnailBackend(
   page: Page,
-  opts: { textIds?: string[]; coverless?: string[]; delayMs?: number } = {},
+  opts: { textIds?: string[]; coverless?: string[]; delayMs?: number; hold?: Promise<void> } = {},
 ): Promise<ThumbnailBackendHits> {
   const textIds = new Set(opts.textIds ?? []);
   const coverless = new Set(opts.coverless ?? []);
@@ -230,6 +231,8 @@ export async function mockThumbnailBackend(
       const hash = decodeURIComponent(new URL(route.request().url()).pathname.slice("/thumbnail/".length));
       thumbHits.push(hash);
       if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      // Held until the test lets go: unpainted for as long as it needs, under any load.
+      if (opts.hold) await opts.hold;
       if (coverless.has(hash)) {
         await route.fulfill({ status: 404, body: "" });
         return;

@@ -96,7 +96,11 @@ test.describe("masonry icon gallery", () => {
   });
 
   test("tiles with a served aspect are stable across their image load", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["177"], delayMs: 600 });
+    // Held, not delayed: a fixed delay lapses under a busy machine before the
+    // "unpainted" measurements are taken.
+    let release!: () => void;
+    const hold = new Promise<void>((r) => (release = r));
+    await mockThumbnailBackend(page, { textIds: ["177"], hold });
     await openFiles(page);
 
     // The `.txt` tile is excluded: it paints off an unheld `/file/` fetch.
@@ -105,11 +109,12 @@ test.describe("masonry icon gallery", () => {
     for (const name of names) {
       const tile = card(page, name).locator(".thumb");
       const img = card(page, name).locator("img.thumb__img");
-      expect(await imgPainted(img)).toBe(false);
+      expect(await imgPainted(img), `${name} painted before its thumbnail was served`).toBe(false);
       const b = (await tile.boundingBox())!;
       expect(b.width).toBeGreaterThan(0);
       before.set(name, { w: b.width, h: b.height, x: b.x, y: b.y });
     }
+    release();
 
     for (const name of names) {
       const img = card(page, name).locator("img.thumb__img");
