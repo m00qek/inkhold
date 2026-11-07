@@ -159,7 +159,11 @@ test.describe("reflow-free list rows", () => {
   }
 
   test("a landscape row's lead and text are final before its thumb loads", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["177"], delayMs: 600 });
+    // Held, not delayed: a fixed delay lapses on a busy machine before the
+    // "before the bytes" measurements are taken.
+    let release!: () => void;
+    const hold = new Promise<void>((r) => (release = r));
+    await mockThumbnailBackend(page, { textIds: ["177"], hold });
     await openFilesList(page);
 
     const row = card(page, "Whiteboard — sprint plan");
@@ -172,6 +176,7 @@ test.describe("reflow-free list rows", () => {
     const leadBefore = (await row.locator(".thumb").boundingBox())!;
     const titleBefore = (await row.locator(".card__title").boundingBox())!;
     expect(leadBefore.width).toBeCloseTo(listH * (1872 / 1404), 0);
+    release();
 
     await expect.poll(() => imgPainted(img), { timeout: 8000 }).toBe(true);
     const leadAfter = (await row.locator(".thumb").boundingBox())!;
@@ -182,7 +187,11 @@ test.describe("reflow-free list rows", () => {
   });
 
   test("an extreme panorama reserves its CLAMPED width from first paint", async ({ page }) => {
-    await mockThumbnailBackend(page, { textIds: ["177"], delayMs: 600 });
+    // Held, not delayed: a fixed delay lapses on a busy machine before the
+    // "first paint" measurement is taken.
+    let release!: () => void;
+    const hold = new Promise<void>((r) => (release = r));
+    await mockThumbnailBackend(page, { textIds: ["177"], hold });
     await openFilesList(page);
 
     const row = card(page, "Panorama — coastline");
@@ -194,6 +203,7 @@ test.describe("reflow-free list rows", () => {
     );
     const lead = (await row.locator(".thumb").boundingBox())!;
     expect(lead.width).toBeCloseTo(listH * 2.5, 0);
+    release();
 
     await expect.poll(() => imgPainted(img), { timeout: 8000 }).toBe(true);
     const after = (await row.locator(".thumb").boundingBox())!;
