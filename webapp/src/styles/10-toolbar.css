@@ -78,14 +78,27 @@
   background: var(--line);
 }
 
-/* A control showing its open panel or mode, driven by its own state:
-   `aria-expanded` for menu triggers, `aria-pressed` for toggles. Stronger than
+/* A menu trigger showing its menu is open (`aria-expanded`): stronger than
    `:hover`, so "open" reads as a state. */
-.toolbar .btn[aria-pressed="true"],
 .toolbar .btn[aria-expanded="true"] {
   color: var(--ink);
   border-color: var(--ink-soft);
   background: var(--hover);
+}
+/* A toggle that is ON (`aria-pressed`): filled in ink, the icon in the paper
+   colour, so on and off read apart at a glance and not by a shade of grey.
+   The chosen-option fill of the theme picker. Not the accent: that is the
+   focus ring's colour, and a focused button must never look switched on. */
+.toolbar .btn[aria-pressed="true"] {
+  color: var(--sheet);
+  border-color: var(--ink);
+  background: var(--ink);
+}
+/* Only with a real pointer: a tap leaves touch screens "hovering". */
+@media (hover: hover) {
+  .toolbar .btn[aria-pressed="true"]:hover {
+    background: color-mix(in srgb, var(--ink) 85%, var(--sheet));
+  }
 }
 
 /* The zoom/pager slot: one shape and position in every viewer. */

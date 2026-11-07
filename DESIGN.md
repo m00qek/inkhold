@@ -696,6 +696,11 @@ nothing. `tests/e2e/focus.spec.ts` holds that every Tab stop shows focus.
 - **Targets:** at least 24px with a mouse and 44px on a touch screen
   (`pointer: coarse` grows the control tokens; a zero-specificity rule gives
   anything pressable a minimum).
+- **Toggles** say their state with `aria-pressed`, and show it: ON is filled
+  in ink with the icon in the paper colour, OFF has no fill, so the two never
+  differ by a shade of grey. Never the accent: that is the focus ring, and a
+  focused button must not look switched on. A menu trigger's open state
+  (`aria-expanded`) stays the quieter outline.
 - **Contrast:** 4.5:1 for all text in both themes; the soft and faint greys
   are tuned to it on every surface they sit on.
 - **Styles** (`scripts/lint-styles.mjs` enforces): sizes from tokens; type,

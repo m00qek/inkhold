@@ -426,6 +426,35 @@ test.describe("on a phone", () => {
     expect(tab.y + tab.height).toBeLessThanOrEqual(844 - 34);
   });
 
+  // Regression: ON was a faint grey wash, hard to tell from OFF.
+  // And ON is not the focus ring's colour, so focus never looks like ON.
+  test("a toggle that is on is filled in ink, one that is off is not", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/101");
+    const bar = page.locator(".reader__bar");
+    const pages = bar.getByRole("button", { name: "Pages" });
+    const ocr = bar.getByRole("button", { name: /Recognized text/ });
+    await pages.click();
+    await expect(pages).toHaveAttribute("aria-pressed", "true");
+    await expect(ocr).toHaveAttribute("aria-pressed", "false");
+    // The token values, resolved the same way the buttons' are.
+    const token = (name: string) =>
+      page.evaluate((n) => {
+        const probe = document.createElement("i");
+        probe.style.color = `var(${n})`;
+        document.querySelector(".sn-root")!.append(probe);
+        const c = getComputedStyle(probe).color;
+        probe.remove();
+        return c;
+      }, name);
+    const look = (b: typeof pages) => b.evaluate((e) => [getComputedStyle(e).backgroundColor, getComputedStyle(e).color]);
+    const on = [await token("--ink"), await token("--sheet")];
+    expect(on[0]).not.toBe(await token("--accent"));
+    // Polled: the fill fades in.
+    await expect.poll(() => look(pages)).toEqual(on);
+    await expect.poll(async () => (await look(ocr))[0]).toBe("rgba(0, 0, 0, 0)");
+  });
+
   // Regression: every step was clamped back to the stage's width, so where Fit
   // already filled it (a phone, a tablet upright) zoom did nothing.
   test("zoom enlarges a note past the screen's width, and its start stays reachable", async ({ page }) => {
