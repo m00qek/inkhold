@@ -181,12 +181,15 @@ test.describe("universal search", () => {
     await expect(path).toBeVisible();
     await freezeMotion(page);
 
-    // Computed colour, not class presence.
-    const { path: pathColour, meta } = await path.evaluate((el) => ({
-      path: getComputedStyle(el).color,
-      meta: getComputedStyle(el.parentElement!).color,
-    }));
-    expect(pathColour).not.toBe(meta);
+    // Computed colour, not class presence. Polled: a row read mid re-render is
+    // detached and has no computed colours, so "" would equal "".
+    const differs = () =>
+      path.evaluate((el) => {
+        const own = getComputedStyle(el).color;
+        const parent = getComputedStyle(el.parentElement!).color;
+        return own !== "" && parent !== "" && own !== parent;
+      });
+    await expect.poll(differs).toBe(true);
   });
 
   test("a name-only match says nothing about pages", async ({ page }) => {
