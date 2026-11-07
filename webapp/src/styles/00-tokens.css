@@ -17,8 +17,10 @@
   --fs-eyebrow: 0.6875rem; /* mono uppercase labels, eyebrows */
   --fs-caption: 0.75rem; /* meta, timestamps, hints */
   --fs-body: 0.84375rem; /* reading default */
-  /* A text field on a touch screen: under 16px, iOS zooms the app in on focus. */
-  --fs-field-touch: 1rem;
+  /* A text field on a touch screen: never under 16px, where iOS zooms the page
+     on focus and stays zoomed after you leave. rem follows the person's iOS
+     text size (`-apple-system-body`), which can set 1rem below 16px. */
+  --fs-field-touch: max(16px, 1rem);
   --fs-title: 1rem; /* item / panel titles */
   --fs-heading: 1.375rem; /* section heads */
   --fs-display: 1.875rem; /* the rare big moment */

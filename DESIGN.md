@@ -829,7 +829,10 @@ Touch is its own question, `(pointer: coarse)`, never inferred from width.
   viewers' toolbar (which wraps) follow the text size, so 200% clips
   nothing. On touch screens the root takes Apple's body style
   (`-apple-system-body`), so iPhones follow the system's Larger Text; on a Mac
-  it would shrink the app, hence touch only.
+  it would shrink the app, hence touch only. A smaller system text size can put
+  1rem under 16px, where iOS zooms the page when a field takes focus and stays
+  zoomed after; so every field on a touch screen, sign-in included, is
+  `--fs-field-touch`, `max(16px, 1rem)`: never under 16px, still growing.
 - **Tests:** the guard adds a tablet in portrait (820px) and in landscape
   (1180px, desktop layout under a finger), both with touch; `tests/e2e/phone.spec.ts` holds the
   drawer, the tab bar, search, sheets and the viewer's bottom bar.

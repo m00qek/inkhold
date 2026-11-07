@@ -455,6 +455,31 @@ test.describe("on a phone", () => {
     await expect.poll(async () => (await look(ocr))[0]).toBe("rgba(0, 0, 0, 0)");
   });
 
+  // Regression: rem follows the iPhone's text size (`-apple-system-body`), so with
+  // a smaller one a 1rem field fell under 16px, and iOS zoomed the page on focus,
+  // staying zoomed after (a library search, then the .txt it opened).
+  test("every text field stays at 16px or more, whatever the phone's text size", async ({ page }) => {
+    const small = "html { font-size: 13px !important; }";
+    const size = (l: import("@playwright/test").Locator) => l.evaluate((e) => parseFloat(getComputedStyle(e).fontSize));
+    await page.goto("/#/login");
+    await page.addStyleTag({ content: small });
+    const login = page.locator("input").first();
+    await expect(login).toBeVisible();
+    expect(await size(login)).toBeGreaterThanOrEqual(16);
+
+    await signedIn(page);
+    await page.goto("/");
+    await page.addStyleTag({ content: small });
+    await page.locator(".tabbar").getByRole("button", { name: "Search" }).click();
+    expect(await size(page.getByRole("searchbox", { name: "Search notes" }))).toBeGreaterThanOrEqual(16);
+
+    await page.route((url) => url.pathname.startsWith("/file/"), (r) => r.fulfill({ status: 200, contentType: "text/plain; charset=utf-8", body: "a line" }));
+    await page.goto("/#/note/177");
+    await page.addStyleTag({ content: small });
+    await page.locator(".viewer--txt .viewer__bar").getByRole("button", { name: "Find in this file" }).click();
+    expect(await size(page.getByRole("textbox", { name: "Find in this file" }))).toBeGreaterThanOrEqual(16);
+  });
+
   // Regression: every step was clamped back to the stage's width, so where Fit
   // already filled it (a phone, a tablet upright) zoom did nothing.
   test("zoom enlarges a note past the screen's width, and its start stays reachable", async ({ page }) => {

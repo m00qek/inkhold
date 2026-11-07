@@ -202,7 +202,7 @@ body:has(.sn-root) {
   border-radius: 0;
   background: transparent;
   font-family: var(--font-body);
-  font-size: var(--fs-title); /* >=16px keeps iOS from zooming on focus */
+  font-size: var(--fs-title); /* a touch screen floors it at 16px (`23-phone.css`) */
   color: var(--ink);
   transition: border-color 0.15s ease;
 }

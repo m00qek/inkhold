@@ -133,8 +133,8 @@ html {
     visibility: hidden;
   }
   .sn-root.is-search-open .search input {
-    /* 16px or more: below it iOS zooms the page on focus. */
-    font-size: var(--fs-title);
+    /* 16px or more: below it iOS zooms the page on focus (the token floors it). */
+    font-size: var(--fs-field-touch);
   }
 
   /* The bar's tools: behind ⋯, as one menu (`ui/barMenu.ts`). */
@@ -518,11 +518,12 @@ html {
   }
 }
 
-/* ---- any touch screen: text fields at 16px ----
-   Smaller, and iOS zooms the whole app in when one is focused (and back out,
-   or not), the page jumping under the field. */
+/* ---- any touch screen: text fields at 16px or more ----
+   Smaller, and iOS zooms the whole app in when one is focused, and stays
+   zoomed after you leave it (a search, then the .txt it opens). Every page,
+   the sign-in pages too (they are not in `.sn-root`). */
 @media (pointer: coarse) {
-  .sn-root :is(input, select, textarea) {
+  :is(.sn-root, body) :is(input, select, textarea) {
     font-size: var(--fs-field-touch);
   }
 }
