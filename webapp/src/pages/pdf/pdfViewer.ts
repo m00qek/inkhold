@@ -18,6 +18,7 @@ import { createPdfOutlinePanel } from "./pdfOutlinePanel";
 import { closeWith } from "../../ui/sidePanel";
 import { isPhone } from "../../ui/breakpoints";
 import { attachPinch, isFit, pinchLabel } from "../../ui/pinchZoom";
+import { attachSwipe } from "../../ui/swipePages";
 import { createPdfThumbStrip } from "./pdfThumbStrip";
 import { createPdfPageRenderer, PDF_LAYER_ID, ZOOMS, type Zoom } from "./pdfPageRenderer";
 import { createLinkLayer } from "../linkLayer";
@@ -457,20 +458,18 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   document.addEventListener("keydown", ctx.nav.onKey);
   document.addEventListener("copy", ctx.nav.onCopy);
 
-  // Pinch and double tap on the page.
+  // Pinch and double tap zoom the page; a sideways swipe turns it.
+  attachSwipe({ scroller: main, turn: (dir) => void ctx.nav.go(st.pageIndex + dir) });
   attachPinch({
     scroller: main,
     surface: () => (stage.isConnected ? stage : null),
     scale: () => renderer.relativeScale(),
     setScale: (k) => {
-      if (isFit(k)) {
-        st.pinch = null;
+      st.pinch = isFit(k) ? null : k;
+      if (st.pinch === null) {
         st.zoom = FIT_PAGE;
         zoomStepper.set(FIT_PAGE);
-      } else {
-        st.pinch = k;
-        zoomStepper.show(pinchLabel(k));
-      }
+      } else zoomStepper.show(pinchLabel(k));
       void renderer.paint();
     },
   });

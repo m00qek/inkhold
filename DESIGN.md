@@ -739,7 +739,10 @@ Touch is its own question, `(pointer: coarse)`, never inferred from width.
   a switch's state is worth seeing (text size for text). Zoom is a pinch,
   and a double tap back to Fit (`ui/pinchZoom.ts`): the page scales by a
   transform while the fingers move, then the viewer re-renders sharp at
-  that factor of Fit and the point under the fingers stays put. The zoom
+  that factor of Fit and the point under the fingers stays put. A quick
+  sideways swipe turns the page, left for the next (`ui/swipePages.ts`);
+  a page zoomed past the stage pans first and turns only from the edge it
+  started at, and the pager stays the one-pointer way. The zoom
   stepper is the one-finger way (WCAG 2.5.1), in ⋯ with the other
   occasional tools (`fold` in the toolbar spec: Find, zoom) and the file's
   actions, the tools under "View", ticked while on. A viewer's panels start

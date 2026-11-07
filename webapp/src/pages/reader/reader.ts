@@ -8,6 +8,7 @@
 
 import { isPhone } from "../../ui/breakpoints";
 import { attachPinch, isFit, pinchLabel } from "../../ui/pinchZoom";
+import { attachSwipe } from "../../ui/swipePages";
 import { el } from "../../ui/dom";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -385,6 +386,12 @@ export function createReader(deps: ReaderDeps): Reader {
       pinchTo(k);
       void ctx.paint.showPage(st.pageIndex);
     },
+  });
+  // A sideways swipe turns the note's page.
+  attachSwipe({
+    scroller: stage,
+    enabled: () => st.mode === "note",
+    turn: (dir) => nav.goToPage(st.pageIndex + dir),
   });
   attachPinch({
     scroller: files.el,

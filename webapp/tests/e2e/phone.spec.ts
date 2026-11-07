@@ -318,6 +318,61 @@ test.describe("on a phone", () => {
     await expect.poll(async () => Math.round((await sheet.boundingBox())!.width)).toBe(Math.round(fit));
   });
 
+  // A sideways swipe turns the page, in the note reader and in the PDF viewer.
+  const swipeOn = (stage: import("@playwright/test").Locator, dx: number) =>
+    stage.evaluate((el, dx) => {
+      try {
+        new Touch({ identifier: 0, target: el, clientX: 0, clientY: 0 });
+      } catch {
+        return false; // desktop WebKit won't let a script make one
+      }
+      const r = el.getBoundingClientRect();
+      const y = r.top + r.height / 2;
+      const x0 = r.left + r.width / 2 - dx / 2;
+      const at = (x: number) => [new Touch({ identifier: 4, target: el, clientX: x, clientY: y })];
+      const fire = (type: string, touches: Touch[], changed = touches) =>
+        el.dispatchEvent(new TouchEvent(type, { touches, targetTouches: touches, changedTouches: changed, bubbles: true, cancelable: true }));
+      fire("touchstart", at(x0));
+      for (let i = 1; i <= 4; i++) fire("touchmove", at(x0 + (dx * i) / 4));
+      fire("touchend", [], at(x0 + dx));
+      return true;
+    }, dx);
+
+  test("a swipe to the left turns to the next page, to the right back", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/141");
+    const stage = page.locator(".stage");
+    await expect(stage.locator(".page")).toBeVisible();
+    test.skip(!(await swipeOn(stage, -200)), "this browser won't let a script make touches");
+    await expect(page).toHaveURL(/\/note\/141\/page\/2$/);
+    await swipeOn(stage, 200);
+    await expect(page).toHaveURL(/\/note\/141$/);
+    // A scroll down is not a turn.
+    await stage.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const t = (y: number) => [new Touch({ identifier: 5, target: el, clientX: r.left + 150, clientY: y })];
+      const fire = (type: string, touches: Touch[], changed = touches) =>
+        el.dispatchEvent(new TouchEvent(type, { touches, targetTouches: touches, changedTouches: changed, bubbles: true, cancelable: true }));
+      fire("touchstart", t(r.top + 400));
+      fire("touchmove", t(r.top + 150));
+      fire("touchend", [], t(r.top + 150));
+    });
+    await page.waitForTimeout(300);
+    await expect(page).toHaveURL(/\/note\/141$/);
+  });
+
+  test("a swipe turns a PDF's page", async ({ page }) => {
+    await signedIn(page);
+    await servePdf(page);
+    await page.goto("/#/note/178");
+    const main = page.locator(".viewer--pdf .pdf-wrap");
+    await expect(page.locator(".viewer--pdf .pdf-page")).toBeVisible({ timeout: 20_000 });
+    test.skip(!(await swipeOn(main, -200)), "this browser won't let a script make touches");
+    await expect(page).toHaveURL(/\/note\/178\/page\/2/);
+    await swipeOn(main, 200);
+    await expect(page).toHaveURL(/\/note\/178$/);
+  });
+
   // Regression: every step was clamped back to the stage's width, so where Fit
   // already filled it (a phone, a tablet upright) zoom did nothing.
   test("zoom enlarges a note past the screen's width, and its start stays reachable", async ({ page }) => {
