@@ -427,4 +427,3 @@ export function createRail(deps: RailDeps): RailController {
 }
 
 // The DOM half lives in `railView.ts`.
-export { createRailView } from "./railView";

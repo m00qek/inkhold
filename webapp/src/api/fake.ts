@@ -8,10 +8,12 @@ import { fakeAdminMethods } from "./fakeAdmin";
 import { fakeAccountMethods } from "./fakeAccount";
 import { fakeTodoMethods } from "./fakeTodo";
 
-export { FAKE_UPLOAD_HEADROOM, fakeFileHash, MARKED_PDF_ID, PDF_MARK_ID } from "./fakeFixtures";
+export { FAKE_UPLOAD_HEADROOM, MARKED_PDF_ID, PDF_MARK_ID } from "./fakeFixtures";
+export { fakeFileHash } from "./fakeHash";
 import { createBinFake } from "./binFake";
 import { LAYERED_NOTE_ID, layeredPageLayers, layeredPagePayload, withLayeredPageLayers } from "./layeredFixture";
-import { MARKED_PDF_ID, PDF_MARK_ID, PDF_MARK_SOURCE_PAGE, fakeFileHash, RECOGNIZED_FROM, fakeTextHash, pages, fakeText, fakePageLinks, note, UNSCALED_NOTE_ID, fakeWords, fakeSize, FAKE_UPLOAD_HEADROOM, uploadSteps, UPLOAD_ID_BASE, NOW, versionPageCount, baseVersions, CHILDREN, ALL_NOTES, noteSummary, pathTo, withItemCount } from "./fakeFixtures";
+import { fakeFileHash } from "./fakeHash";
+import { MARKED_PDF_ID, PDF_MARK_ID, PDF_MARK_SOURCE_PAGE, RECOGNIZED_FROM, fakeTextHash, pages, fakeText, fakePageLinks, note, UNSCALED_NOTE_ID, fakeWords, fakeSize, FAKE_UPLOAD_HEADROOM, uploadSteps, UPLOAD_ID_BASE, NOW, versionPageCount, baseVersions, CHILDREN, ALL_NOTES, noteSummary, pathTo, withItemCount } from "./fakeFixtures";
 
 /** Upload ids, per module; the counter only grows. */
 let uploadSeq = 0;

@@ -29,7 +29,7 @@ export type PdfFindState = FindState;
  * Where the server stops extracting a PDF's text (`pdf_text.zig` `max_pages`).
  * Past it a find says which pages it searched.
  */
-export const PDF_TEXT_MAX_PAGES = 5_000;
+const PDF_TEXT_MAX_PAGES = 5_000;
 
 export interface PdfFindView {
   setOpen(open: boolean): void;
@@ -143,7 +143,7 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
         const got = await wordsFor(page);
         if (ask.stale()) return null;
         const matched = matchWords(got, ask.terms);
-        const current = matched.length > 0 && ask.current >= 0 ? Math.min(ask.current, matched.length - 1) : -1;
+        const current = ask.currentOf(matched.length);
         view.setPageMarks(matched, current);
         if (ask.reveal && current >= 0) view.revealCurrent?.();
         return matched.length;

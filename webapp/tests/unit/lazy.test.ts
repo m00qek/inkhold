@@ -26,7 +26,7 @@ function build(observer = fakeObserver(), failures?: ApiFailureSink) {
 }
 
 /** A fake `<img>` target: the engine only checks `tagName`. */
-const imgEl = () => ({ tagName: "IMG", src: "", alt: "" }) as unknown as HTMLImageElement;
+const imgEl = () => ({ tagName: "IMG", src: "", alt: "", toggleAttribute: vi.fn() }) as unknown as HTMLImageElement;
 
 describe("a tile whose produce is slow shows the glyph meanwhile", () => {
   function imgBuild(getThumbnail: () => Promise<Blob>, getGlyph: () => Promise<Blob>) {
@@ -76,10 +76,13 @@ describe("a tile whose produce is slow shows the glyph meanwhile", () => {
     await new Promise((r) => setTimeout(r, PLACEHOLDER_AFTER_MS + 80));
     expect(getGlyph).toHaveBeenCalledWith("pdf");
     expect(el.src).toBe("url:GLYPH");
+    // The stand-in says so, for whoever must tell it from the real picture.
+    expect(el.toggleAttribute).toHaveBeenLastCalledWith("data-interim", true);
 
     land("REAL" as unknown as Blob);
     await flush();
     expect(el.src).toBe("url:REAL");
+    expect(el.toggleAttribute).toHaveBeenLastCalledWith("data-interim", false);
   });
 
   it("never draws the glyph when the produce beats the window", async () => {

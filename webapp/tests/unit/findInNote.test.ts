@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { createFindController, matchWords, type FindState, type FindView } from "../../src/pages/findInNote";
+import { createFindController, matchWords, type FindView } from "../../src/pages/findInNote";
+import type { FindState } from "../../src/pages/viewer/findSession";
 import { ApiError, type ApiFailureSink } from "../../src/api/client";
 import type { Api } from "../../src/api/types";
 import type { PageRef, WordBox } from "../../src/core/types";

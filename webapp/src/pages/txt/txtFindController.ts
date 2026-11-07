@@ -40,7 +40,7 @@ export interface TxtFindController {
 }
 
 /** What the counter says for a file with no text in it. */
-export const TXT_TEXTLESS = "This file is empty.";
+const TXT_TEXTLESS = "This file is empty.";
 
 export function createTxtFind(deps: TxtFindDeps): TxtFindController {
   // Own block, not `.findbar`: both viewers are mounted and the reader's tests
@@ -99,6 +99,7 @@ export function createTxtFind(deps: TxtFindDeps): TxtFindController {
           plainText();
           return;
         }
+        // Every hit has its byte range: `placeable` kept only those.
         const located = hits.map((h) => ({ segment: h.segment, offset: h.offset!, length: h.length!, matches: h.matches, terms: h.terms }));
         const segs = resolveFindSegments(text, located);
         const built = buildFindContent(text, segs);
@@ -114,7 +115,8 @@ export function createTxtFind(deps: TxtFindDeps): TxtFindController {
         if (!para || ask.terms === null) return 0;
         const marks = para.querySelectorAll("mark");
         para.classList.add("is-current");
-        const mark = ask.current >= 0 && marks.length > 0 ? marks[Math.min(ask.current, marks.length - 1)] : undefined;
+        const at = ask.currentOf(marks.length);
+        const mark = at >= 0 ? marks[at] : undefined;
         mark?.classList.add("is-current");
         // `scrollIntoView` is absent under the test DOM.
         if (ask.reveal) (mark ?? para).scrollIntoView?.({ block: "center", inline: "nearest" });

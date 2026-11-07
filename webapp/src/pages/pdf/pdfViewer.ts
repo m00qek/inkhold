@@ -10,14 +10,14 @@ import { el } from "../../ui/dom";
 import type { PageRef } from "../../core/types";
 import { createToolbar } from "../toolbar";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
-import { createPager, createZoomStepper, FIT_PAGE } from "../viewer/viewerControls";
+import { applyPinch, createPager, createZoomStepper, FIT_PAGE } from "../viewer/viewerControls";
 import { createViewerExportMenu } from "../viewer/viewerExportMenu";
 import { createViewerHeader, createViewerBody, createVersionBanner } from "../viewer/viewerChrome";
 import type { VersionSubject, Viewer, ViewerDeps } from "../viewer/viewer";
 import { createPdfOutlinePanel } from "./pdfOutlinePanel";
 import { closeWith } from "../../ui/sidePanel";
 import { isPhone } from "../../ui/breakpoints";
-import { attachPinch, isFit, pinchLabel } from "../../ui/pinchZoom";
+import { attachPinch } from "../../ui/pinchZoom";
 import { attachSwipe } from "../../ui/swipePages";
 import { createPdfThumbStrip } from "./pdfThumbStrip";
 import { createPdfPageRenderer, PDF_LAYER_ID, ZOOMS, type Zoom } from "./pdfPageRenderer";
@@ -465,11 +465,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     surface: () => (stage.isConnected ? stage : null),
     scale: () => renderer.relativeScale(),
     setScale: (k) => {
-      st.pinch = isFit(k) ? null : k;
-      if (st.pinch === null) {
-        st.zoom = FIT_PAGE;
-        zoomStepper.set(FIT_PAGE);
-      } else zoomStepper.show(pinchLabel(k));
+      applyPinch(st, zoomStepper, k);
       void renderer.paint();
     },
   });

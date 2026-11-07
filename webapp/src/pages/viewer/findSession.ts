@@ -46,8 +46,12 @@ export interface PaintAsk {
   readonly query: string;
   /** The index's words for this segment; null before the count lands (a provisional guess, if the surface makes one). */
   readonly terms: readonly string[] | null;
-  /** Which mark on this segment is the current match; -1 for none. */
-  readonly current: number;
+  /**
+   * The current match among the `drawn` marks the surface found, or -1. The
+   * index can count more matches than a surface can draw boxes for; the last
+   * box then stands in for the rest.
+   */
+  currentOf(drawn: number): number;
   /** Find moved to this match (a landing, a step): bring it into view if it's off-screen. A plain repaint never scrolls. */
   readonly reveal: boolean;
   /** True once a later query, page or close has superseded this paint. */
@@ -202,8 +206,8 @@ export function createFindSession(o: FindSessionOptions): FindSession {
     const drawn = await view.paint(here, {
       query,
       terms,
-      current,
       reveal: revealing,
+      currentOf: (drawn) => (drawn > 0 && current >= 0 ? Math.min(current, drawn - 1) : -1),
       stale: () => mine !== token || !open || page !== here,
     });
     if (drawn !== null && revealing) reveal = false;

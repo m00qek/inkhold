@@ -7,7 +7,7 @@
 // concern each: overlays, navigation, panels, painting, features, lifecycle.
 
 import { isPhone } from "../../ui/breakpoints";
-import { attachPinch, isFit, pinchLabel } from "../../ui/pinchZoom";
+import { attachPinch } from "../../ui/pinchZoom";
 import { attachSwipe } from "../../ui/swipePages";
 import { el } from "../../ui/dom";
 import type { Api } from "../../api/types";
@@ -21,7 +21,7 @@ import { createToolbar } from "../toolbar";
 import { createFileStage } from "../fileStage";
 import { createFindBarView, createReaderButtons, createVersionBanner } from "./readerBars";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
-import { createPager, createZoomStepper, FIT_PAGE, FIT_WIDTH } from "../viewer/viewerControls";
+import { applyPinch, createPager, createZoomStepper, FIT_PAGE, FIT_WIDTH } from "../viewer/viewerControls";
 import { createViewerExportMenu } from "../viewer/viewerExportMenu";
 import { originSubtitle, createViewerHeader } from "../viewer/viewerChrome";
 import { createBinViewerActions, type BinRetention } from "../../ui/binViewerActions";
@@ -368,16 +368,7 @@ export function createReader(deps: ReaderDeps): Reader {
   // --- toolbar and find-bar events -----------------------------------------
   const { ocr, find, nav, panels } = ctx;
   // Pinch and double tap, on the note's page and on an image.
-  const pinchTo = (k: number): void => {
-    if (isFit(k)) {
-      st.pinch = null;
-      st.zoom = FIT_PAGE;
-      zoomStepper.set(FIT_PAGE);
-    } else {
-      st.pinch = k;
-      zoomStepper.show(pinchLabel(k));
-    }
-  };
+  const pinchTo = (k: number): void => applyPinch(st, zoomStepper, k);
   attachPinch({
     scroller: stage,
     surface: () => (st.mode === "note" ? ctx.pageEl : null),

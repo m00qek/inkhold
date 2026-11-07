@@ -11,9 +11,6 @@ import { createFindSession, type FindState } from "./viewer/findSession";
 // Shared tokenizer, so ovals and counts agree on what a word is.
 import { fold, words as wordTerms } from "../search/fold";
 
-/** The shared session's states (`viewer/findSession.ts`). */
-export type { FindState } from "./viewer/findSession";
-
 export interface FindView {
   setOpen(open: boolean): void;
   setState(state: FindState): void;
@@ -137,7 +134,7 @@ export function createFindController(deps: FindDeps): FindController {
         const words = await wordsFor(id, page);
         if (ask.stale() || noteId !== id || pages[index] !== page) return null;
         const matched = matchWords(words, ask.query, ask.terms);
-        const current = matched.length > 0 && ask.current >= 0 ? Math.min(ask.current, matched.length - 1) : -1;
+        const current = ask.currentOf(matched.length);
         view.setPageMatches(matched, current);
         if (ask.reveal && current >= 0) view.revealCurrent?.();
         return matched.length;

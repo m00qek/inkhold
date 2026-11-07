@@ -6,8 +6,6 @@ import { LAYERED_NOTE_ID, withLayeredPageLayers } from "./layeredFixture";
 import { canPreviewHistory } from "../core/fileKind";
 import { fakeFileHash, fakeHash } from "./fakeHash";
 
-export { fakeFileHash };
-
 /**
  * The `.mark` annotating PDF `178`, reusing the layered fixture's real SNPG v2
  * payload. Sparse like a real mark: its one page annotates PDF page 2, so a

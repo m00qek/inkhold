@@ -118,7 +118,7 @@ describe("lazy engine thumbnail-facade path (canvas target)", () => {
 // The gallery's <img> path: object URLs over the facade's blob; every mint is revoked.
 describe("lazy engine <img> gallery path", () => {
   /** A fake <img>; `tagName: "IMG"` routes the engine to the object-URL path. */
-  const imgTarget = () => ({ tagName: "IMG", src: "", alt: "" }) as unknown as HTMLImageElement;
+  const imgTarget = () => ({ tagName: "IMG", src: "", alt: "", toggleAttribute: vi.fn() }) as unknown as HTMLImageElement;
 
   function buildImg() {
     const s = stubs();

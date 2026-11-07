@@ -1,6 +1,7 @@
 // The shared viewer steppers: zoom `− [readout] +` and the `‹ 12 / 1700 ›` pager.
 
 import { el } from "../../ui/dom";
+import { isFit, pinchLabel } from "../../ui/pinchZoom";
 import { svg, VIEWER_IC } from "./viewerIcons";
 
 /**
@@ -22,6 +23,25 @@ export interface ZoomStepper<V> {
   set(value: V): void;
   /** A readout off the ladder (a pinch's factor of Fit), until the next `set` or step. */
   show(text: string): void;
+}
+
+/**
+ * A pinch's settled factor of Fit into a paged viewer's zoom state: Fit itself
+ * puts the stepper back on its Fit rung, anything else shows the factor.
+ */
+export function applyPinch<V>(
+  st: { pinch: number | null; zoom: V | typeof FIT_PAGE },
+  stepper: ZoomStepper<V | typeof FIT_PAGE>,
+  k: number,
+): void {
+  if (isFit(k)) {
+    st.pinch = null;
+    st.zoom = FIT_PAGE;
+    stepper.set(FIT_PAGE);
+  } else {
+    st.pinch = k;
+    stepper.show(pinchLabel(k));
+  }
 }
 
 export function createZoomStepper<V>(opts: {

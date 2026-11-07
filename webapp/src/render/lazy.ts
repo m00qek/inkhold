@@ -318,7 +318,7 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
         };
     img.src = next.url;
     // The race's stand-in, until the real picture lands (tests tell them apart).
-    img.toggleAttribute?.("data-interim", isGlyph);
+    img.toggleAttribute("data-interim", isGlyph);
     if (slot.alt !== undefined) img.alt = slot.alt;
     slot.urlHandle?.release(); // the previous paint's URL is now safe to drop
     slot.urlHandle = next;
