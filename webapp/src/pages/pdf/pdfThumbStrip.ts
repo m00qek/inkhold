@@ -105,6 +105,8 @@ export function createPdfThumbStrip(opts: PdfThumbStripOptions): PdfThumbStrip {
   const thumbAspects = new Map<number, number>();
   let firstAspect = 1 / Math.SQRT2; // A4 portrait, if page 0 will not measure
   let thumbsBusy = false;
+  /** A paint was asked for while one ran: run again when it ends, or the ask is lost. */
+  let thumbsAgain = false;
 
   const pagesPanel = createPageIndex({
     id: "pdf-pages-panel",
@@ -267,8 +269,15 @@ export function createPdfThumbStrip(opts: PdfThumbStripOptions): PdfThumbStrip {
    * resolution (~10.5 MB RGBA per layer), so the peak stays one layer.
    */
   async function paintThumbs(): Promise<void> {
-    if (thumbsBusy) return;
+    if (thumbsBusy) {
+      // A reopen queues its rows while the last document's loop is still in an
+      // await; that loop then leaves on the generation check without looking at
+      // the queue, and the rows, already on screen, are never observed again.
+      thumbsAgain = true;
+      return;
+    }
     thumbsBusy = true;
+    thumbsAgain = false;
     try {
       await drainCachedThumbs();
       while (thumbQueue.length > 0) {
@@ -399,6 +408,7 @@ export function createPdfThumbStrip(opts: PdfThumbStripOptions): PdfThumbStrip {
       }
     } finally {
       thumbsBusy = false;
+      if (thumbsAgain && thumbQueue.length > 0) void paintThumbs();
     }
   }
 

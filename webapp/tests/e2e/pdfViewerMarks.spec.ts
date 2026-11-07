@@ -125,6 +125,28 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await expect(canvas).toHaveCSS("visibility", "visible");
   });
 
+  // Regression: leaving while a thumbnail was still being drawn left the reopened
+  // strip as skeletons for good. The old loop, mid-await, turned the new
+  // document's paint away as busy, then left on the generation check without
+  // looking at the queue; the rows were already on screen, so nothing asked again.
+  test("reopening while a thumbnail is still being drawn still paints every thumbnail", async ({ page }) => {
+    test.setTimeout(90_000);
+    await signedIn(page);
+    await servePdf(page);
+    await page.goto("/#/note/178");
+    await freezeMotion(page);
+    const region = page.getByRole("region", { name: "PDF viewer" });
+    await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
+    await region.getByRole("button", { name: "Pages", exact: true }).click();
+    // Leave the moment the first one lands, with the rest still in flight.
+    await expect(region.locator(".filmstrip__thumb:not(.is-loading)").first()).toBeVisible({ timeout: 20_000 });
+    await page.goto("/#/");
+    await page.goto("/#/note/178");
+    await expect(page.locator("#pdf-pages-panel")).toBeVisible();
+    await expect(region.locator(".filmstrip__thumb").first()).toBeVisible({ timeout: 30_000 });
+    await expect(region.locator(".filmstrip__thumb.is-loading")).toHaveCount(0, { timeout: 30_000 });
+  });
+
   test("thumbnails come back from the cache on a REOPEN, still drawable", async ({ page }) => {
     // The cache owns its bitmaps (`renderCache.ts`); a viewer closing one leaves a dead entry
     // that only a later read finds. Reopening forces that read.
@@ -141,6 +163,9 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await expect(region.locator(".filmstrip__thumb:not(.is-loading)").first()).toBeVisible({
       timeout: 20_000,
     });
+    // Every row, not just the first: one still rendering when we leave is
+    // honestly rendered again on the reopen, and `renders` below must be 0.
+    await expect(region.locator(".filmstrip__thumb.is-loading")).toHaveCount(0, { timeout: 20_000 });
 
     // Counters reset per open.
     await page.goto("/#/");
