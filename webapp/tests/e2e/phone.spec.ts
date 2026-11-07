@@ -373,6 +373,38 @@ test.describe("on a phone", () => {
     await expect(page).toHaveURL(/\/note\/178$/);
   });
 
+  // Regression: on a phone the text sat in a small 3:4 card scrolling inside a
+  // wide margin, a third of the screen.
+  test("a .txt fills the screen's width and scrolls to its last line above the bar", async ({ page }) => {
+    await signedIn(page);
+    const body = Array.from({ length: 80 }, (_, i) => `line ${i + 1}: the quick brown fox`).join("\n") + "\nTHE LAST LINE";
+    await page.route(
+      (url) => url.pathname.startsWith("/file/"),
+      (route) => route.fulfill({ status: 200, contentType: "text/plain; charset=utf-8", body }),
+    );
+    await page.goto("/#/note/177");
+    const sheet = page.locator(".viewer--txt .txt__sheet");
+    await expect(sheet).toContainText("THE LAST LINE");
+    const box = (await sheet.boundingBox())!;
+    expect(box.x).toBe(0);
+    expect(Math.round(box.width)).toBe(390);
+    await sheet.evaluate((el) => (el.scrollTop = el.scrollHeight));
+    // The bottom row, where the text-size stepper sits.
+    const bar = (await page.getByRole("button", { name: "Larger text" }).boundingBox())!;
+    const last = await sheet.evaluate((el) => {
+      const r = document.createRange();
+      const t = el.lastChild ?? el;
+      r.selectNodeContents(t);
+      return r.getBoundingClientRect().bottom;
+    });
+    expect(last).toBeLessThanOrEqual(bar.y);
+    // The column-width zoom has nothing to widen: not offered under ⋯.
+    await page.locator(".viewer--txt .viewer__bar").getByRole("button", { name: "More" }).click();
+    const menu = page.locator(".menu__pop--float.is-open");
+    await expect(menu.getByRole("menuitem", { name: "Download" })).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: /Zoom/ })).toHaveCount(0);
+  });
+
   // Regression: every step was clamped back to the stage's width, so where Fit
   // already filled it (a phone, a tablet upright) zoom did nothing.
   test("zoom enlarges a note past the screen's width, and its start stays reachable", async ({ page }) => {

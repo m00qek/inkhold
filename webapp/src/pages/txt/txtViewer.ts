@@ -12,6 +12,7 @@ import { createToolbar } from "../toolbar";
 import { createTxtFind } from "./txtFindController";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
 import { createZoomStepper, FIT_PAGE, FIT_WIDTH } from "../viewer/viewerControls";
+import { PHONE_QUERY } from "../../ui/breakpoints";
 import { VIEWER_DEBOUNCE_MS, backWord, createViewerHeader, createViewerBody, createVersionBanner } from "../viewer/viewerChrome";
 import { createBinViewerActions } from "../../ui/binViewerActions";
 import type { ReaderOrigin, Viewer, ViewerDeps } from "../viewer/viewer";
@@ -180,6 +181,12 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
       return zoomIdx;
     },
   });
+
+  // On a phone the text fills the screen's width: there is no column to widen.
+  const phone = typeof window.matchMedia === "function" ? window.matchMedia(PHONE_QUERY) : null;
+  const syncPhone = (): void => void (zoomStepper.el.hidden = phone?.matches === true);
+  syncPhone();
+  phone?.addEventListener("change", syncPhone);
 
   // Always enabled: plain text is always searchable.
   const findToggle = el("button", {
@@ -456,6 +463,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
       load = null;
       resetFind();
       document.removeEventListener("keydown", onKey);
+      phone?.removeEventListener("change", syncPhone);
     },
   };
 }

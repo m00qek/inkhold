@@ -384,6 +384,24 @@ html {
     padding-block-end: calc(var(--sp-6) + var(--phone-bar-h) + var(--sheet-open));
   }
 
+  /* Text: no paper card in a margin, the file itself fills the screen and
+     the stage is what scrolls, clear of the bottom bar. */
+  .viewer--txt .viewer__main--text {
+    display: block;
+    padding: 0;
+  }
+  .viewer--txt .txt__sheet,
+  .viewer--txt .txt__sheet--wide {
+    aspect-ratio: auto;
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    padding: var(--sp-4) var(--sp-4) calc(var(--sp-8) + var(--phone-bar-h));
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
   /* Menus: a sheet along the bottom, full width, rows a finger's height. */
   /* Any menu-like pop, whatever width it has elsewhere (Version history's
      296px): the sheet is the screen's width. */
