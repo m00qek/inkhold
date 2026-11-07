@@ -46,6 +46,20 @@ describe("the block", () => {
     expect(asked).toBe(1);
   });
 
+  // Regression: the open state was kept from the `toggle` event, which lands a task
+  // after the click; a repaint in between rebuilt the list closed.
+  it("stays open across a repaint that lands right after the click", async () => {
+    const cov = createSearchCoverage({ searchCoverage: async () => [n("1", 22, 0, false)] }, () => {});
+    cov.block(() => null);
+    await settle();
+    const first = cov.block(() => "Diário") as HTMLDetailsElement;
+    first.open = true; // the click; its toggle event has not been delivered yet
+    const again = cov.block(() => "Diário") as HTMLDetailsElement;
+    expect(again.open).toBe(true);
+    again.open = false;
+    expect((cov.block(() => "Diário") as HTMLDetailsElement).open).toBe(false);
+  });
+
   it("no list when everything is searchable", async () => {
     const cov = createSearchCoverage({ searchCoverage: async () => [n("1", 3, 3)] }, () => {});
     cov.block(() => null);

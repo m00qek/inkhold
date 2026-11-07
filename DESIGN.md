@@ -707,6 +707,11 @@ nothing. `tests/e2e/focus.spec.ts` holds that every Tab stop shows focus.
 - **Collections are lists.** Gallery cards are `<li>`s in `ul.cards`, which is
   `display: contents` so each card stays a grid cell (`masonry.ts` looks
   inside).
+- **A repaint keeps your place.** The gallery is rebuilt whenever an answer
+  lands (search results fill in by phases), so the rebuild gives focus back
+  to the same control (`ui/dom.ts` `keepingFocus`: a link by where it leads),
+  and a disclosure the person opened stays open, read from the element, not
+  from its late `toggle` event.
 - **Announcements** are small status regions holding the message only, never
   the buttons beside it. Icons are hidden from screen readers (`svg()` emits
   `aria-hidden`).

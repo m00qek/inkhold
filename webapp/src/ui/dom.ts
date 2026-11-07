@@ -70,3 +70,32 @@ export function revealIn(target: Element, scroller: HTMLElement): void {
   scroller.scrollTop += t.top + t.height / 2 - (top + bottom) / 2;
   scroller.scrollLeft += t.left + t.width / 2 - (left + right) / 2;
 }
+
+/**
+ * Which control an element is, so the same one can be found after its
+ * container is rebuilt: a link by where it leads (its text grows as search
+ * results fill in), anything else by its label and text.
+ */
+function controlIdentity(e: Element): string {
+  const href = e.getAttribute("href");
+  const what = href !== null ? href : `${e.getAttribute("aria-label") ?? ""}|${(e.textContent ?? "").trim()}`;
+  return `${e.tagName}|${e.className}|${what}`;
+}
+
+/**
+ * Rebuild `container` with `rebuild`, and give focus back to the same control
+ * if it was inside: a repaint must not throw a keyboard user out of a list
+ * (a late search answer rebuilds the results under them).
+ */
+export function keepingFocus(container: HTMLElement, rebuild: () => void): void {
+  const had = document.activeElement;
+  const id = had instanceof HTMLElement && had !== container && container.contains(had) ? controlIdentity(had) : null;
+  rebuild();
+  if (id === null || container.contains(document.activeElement)) return;
+  for (const e of container.querySelectorAll<HTMLElement>(had!.tagName)) {
+    if (controlIdentity(e) === id) {
+      e.focus({ preventScroll: true });
+      return;
+    }
+  }
+}

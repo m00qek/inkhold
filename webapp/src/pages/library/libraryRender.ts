@@ -3,7 +3,7 @@
 import { cardList } from "../galleryCards";
 import type { Id } from "../../core/types";
 import { crumbHere, crumbLink, crumbSep } from "../../ui/crumbs";
-import { el } from "../../ui/dom";
+import { el, keepingFocus } from "../../ui/dom";
 import { closePopoverWithin } from "../../ui/popover";
 import { folderHref, go } from "../../router";
 import type { Entry, Folder, NoteSummary } from "../../core/types";
@@ -107,7 +107,12 @@ export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
     return [...folders, ...notes];
   }
 
+  /** A keyboard user's place in the gallery survives the repaint. */
   function renderGallery(opts: RenderOpts = {}): void {
+    keepingFocus(ctx.gallery, () => paintGallery(opts));
+  }
+
+  function paintGallery(opts: RenderOpts): void {
     // A destination owns the surface: ambient repaints (walk settling, sync bumps,
     // late search answers) must not paint over it. Route exits reassign
     // `destination` before repainting, so they pass.

@@ -68,8 +68,13 @@ export function createSearchCoverage(api: Pick<Api, "searchCoverage">, onChange:
   let summary: CoverageSummary | null = null;
   let at = 0;
   let asking = false;
-  /** The list stays open across repaints while the person reads it. */
-  let open = false;
+  /**
+   * The block last handed out. The list stays open across repaints while the
+   * person reads it, read from the element itself: its `toggle` event arrives a
+   * task after the click, and a repaint in between (a late search answer) would
+   * rebuild the list closed under the person who just opened it.
+   */
+  let shown: HTMLDetailsElement | null = null;
 
   function ask(): void {
     if (asking || (summary && Date.now() - at < FRESH_MS)) return;
@@ -115,8 +120,8 @@ export function createSearchCoverage(api: Pick<Api, "searchCoverage">, onChange:
         el("p", { class: "coverage__how", text: "Search reads the text the tablet recognized from your handwriting. Pages it hasn't recognized can only be found by the note's name." }),
         el("ul", { class: "coverage__list" }, ...rows),
       ) as HTMLDetailsElement;
-      box.open = open;
-      box.addEventListener("toggle", () => (open = box.open));
+      box.open = shown?.open ?? false;
+      shown = box;
       return box;
     },
   };
