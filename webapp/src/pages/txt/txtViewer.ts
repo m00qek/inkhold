@@ -5,7 +5,7 @@
 
 import { el } from "../../ui/dom";
 import type { NoteMeta, NoteSummary } from "../../core/types";
-import { formatBytes, rawFileUrl, historyFileUrl } from "../../core/fileKind";
+import { formatBytes, rawFileUrl, historyFileUrl, fileTypeLabel } from "../../core/fileKind";
 import { readLocal, writeLocal } from "../../ui/storage";
 import { bytesBudget } from "../../api/client";
 import { createToolbar } from "../toolbar";
@@ -13,7 +13,7 @@ import { createTxtFind } from "./txtFindController";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
 import { createZoomStepper, FIT_PAGE, FIT_WIDTH } from "../viewer/viewerControls";
 import { PHONE_QUERY } from "../../ui/breakpoints";
-import { VIEWER_DEBOUNCE_MS, backWord, createViewerHeader, createViewerBody, createVersionBanner } from "../viewer/viewerChrome";
+import { backWord, createVersionBanner, createViewerBody, createViewerHeader, originSubtitle, VIEWER_DEBOUNCE_MS } from "../viewer/viewerChrome";
 import { createBinViewerActions } from "../../ui/binViewerActions";
 import type { ReaderOrigin, Viewer, ViewerDeps } from "../viewer/viewer";
 
@@ -377,7 +377,8 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
 
       root.hidden = false;
       header.setName(summary.name);
-      header.setSubtitle(summary.fileType.toUpperCase());
+      // As every viewer: the folder first when not opened from it (`originSubtitle`).
+      header.setSubtitle(originSubtitle(origin, fileTypeLabel(summary.fileType)));
       header.setBackWord(backWord(origin));
       fromBin = origin.kind === "bin";
       previewVersion = origin.kind === "history" ? (origin.version ?? null) : null;
@@ -412,7 +413,7 @@ export function createTxtViewer(deps: ViewerDeps, seam: TxtSeam = defaultTxtSeam
       
       if (ctl.signal.aborted) return;
       meta = next;
-      header.setSubtitle(`${next.fileType.toUpperCase()} · ${formatBytes(next.size)}`);
+      header.setSubtitle(originSubtitle(origin, `${fileTypeLabel(next.fileType)} · ${formatBytes(next.size)}`));
 
       // Null when the entry has no content hash.
       const url = previewing

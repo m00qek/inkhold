@@ -1,6 +1,8 @@
 // Mounting the admin console into the library shell.
 
 import { el } from "../../ui/dom";
+import { libraryTrail } from "../../ui/crumbs";
+import { folderHref, go } from "../../router";
 import { type AdminApi, createAdminConsole } from "./admin";
 import { createAdminView } from "./adminView";
 
@@ -82,7 +84,8 @@ export function createAdminPanel(host: AdminHost): AdminPanel {
     host.segmented.hidden = mine;
     host.lockBtn.hidden = !mine;
     host.setMode(mine);
-    if (mine) host.crumbs.replaceChildren(el("span", { class: "crumbs__here", text: "Admin" }));
+    // "Library / Admin", as the bin and the account page: Library is the way home.
+    if (mine) host.crumbs.replaceChildren(...libraryTrail("Admin", () => go(folderHref(null)), folderHref(null)));
   }
 
   return {

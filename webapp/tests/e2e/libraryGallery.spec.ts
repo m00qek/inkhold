@@ -334,41 +334,30 @@ test.describe("library rail + gallery", () => {
   test.describe("grid tiles without a preview", () => {
     const card = (page: Page, name: string) => page.locator(".card", { hasText: name });
 
-    test("a folder tile matches a note card's box, not a short chip", async ({ page }) => {
+    // Regression: a folder rendered as a short chip. A folder is the device's
+    // folder silhouette, as wide as a note's card at its own 100:82 proportion.
+    test("a folder tile is a full-width folder, not a short chip", async ({ page }) => {
       await signedIn(page);
       await page.goto("/");
       await openCategory(page, "Note");
 
       const folderTile = card(page, "Projects");
       const noteTile = card(page, "Weekly review");
-      await expect(folderTile.locator(".thumb--folder")).toBeVisible();
-      await expect(folderTile.locator(".thumb--folder svg")).toBeVisible();
+      await expect(folderTile.locator(".thumb--folder-shape .cat__shape")).toBeVisible();
 
       await expect
         .poll(async () => {
           const f = await folderTile.locator(".thumb").boundingBox();
-          const n = await noteTile.locator(".thumb").boundingBox();
           const fCard = await folderTile.boundingBox();
           const nCard = await noteTile.boundingBox();
-          const glyph = await folderTile.locator(".thumb--folder svg").boundingBox();
-          if (!f || !n || !fCard || !nCard || !glyph) return null;
+          if (!f || !fCard || !nCard) return null;
           return {
-            sameTileWidth: Math.abs(f.width - n.width) < 1.5,
-            sameTileHeight: Math.abs(f.height - n.height) < 1.5,
             sameCardWidth: Math.abs(fCard.width - nCard.width) < 1.5,
-            keepsAspect: Math.abs(f.width / f.height - 0.75) < 0.02,
-            glyphIsFourtyPercent: Math.abs(glyph.width / f.width - 0.4) < 0.03,
-            centred: Math.abs(glyph.x + glyph.width / 2 - (f.x + f.width / 2)) < 1.5,
+            fillsTheCard: Math.abs(f.width - fCard.width) < 1.5,
+            folderShape: Math.abs(f.width / f.height - 100 / 82) < 0.03,
           };
         })
-        .toEqual({
-          sameTileWidth: true,
-          sameTileHeight: true,
-          sameCardWidth: true,
-          keepsAspect: true,
-          glyphIsFourtyPercent: true,
-          centred: true,
-        });
+        .toEqual({ sameCardWidth: true, fillsTheCard: true, folderShape: true });
     });
 
     test("a preview-less type gets a glyph tile; an image keeps its real preview", async ({ page }) => {

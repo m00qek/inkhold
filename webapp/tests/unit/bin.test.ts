@@ -61,7 +61,7 @@ describe("bin rows", () => {
   it("names the size and type of a file, and the contents of a folder", () => {
     const rows = binRows(FOLDER_DELETE, NOW);
     expect(rows[0]!.detail).toBe("folder · 2 items");
-    expect(rows[1]!.detail).toBe("NOTE · 1000 B");
+    expect(rows[1]!.detail).toBe(".note · 1000 B");
   });
 });
 

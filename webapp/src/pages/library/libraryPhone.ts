@@ -13,7 +13,7 @@
 import { el } from "../../ui/dom";
 import { ICONS, svg, type IconName } from "../../ui/icons";
 import { onPlainClick } from "../../ui/link";
-import { accountHref, folderHref, go, todoHref } from "../../router";
+import { accountHref, folderHref, go, searchHref, todoHref } from "../../router";
 import type { Topbar } from "./libraryTopbar";
 import { PHONE_QUERY } from "../../ui/breakpoints";
 import { barMenuOpenFrom, barRows, openBarMenu } from "../../ui/barMenu";
@@ -74,7 +74,22 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
   });
 
   // ---- search across the bar ----
+  /**
+   * Whether this place shows the search box: a folder, results, To-Do's lists.
+   * A destination page (your account, the bin, the admin console) does not, so
+   * search mode there would hide the title and show nothing in its place.
+   */
+  const boxHere = (): boolean =>
+    !(d.root.classList.contains("is-destination") && !d.root.classList.contains("is-todo-browse"));
+  /** The Search tab, tapped where there is no box: open it once search is on screen. */
+  let openOnArrival = false;
+
   function openSearch(): void {
+    if (!boxHere()) {
+      openOnArrival = true;
+      go(searchHref(d.searchInput.value.trim()));
+      return;
+    }
     d.root.classList.add("is-search-open");
     tabSearch.setAttribute("aria-expanded", "true");
     d.searchInput.focus();
@@ -159,9 +174,14 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
       if (a.dataset["tab"] === here) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     }
-    if (d.searchInput.value.trim() !== "") {
-      d.root.classList.add("is-search-open");
-      tabSearch.setAttribute("aria-expanded", "true");
+    // A query kept for Back holds the box open, where there is one; a place
+    // without it keeps its title.
+    const open = boxHere() && (openOnArrival || d.searchInput.value.trim() !== "");
+    d.root.classList.toggle("is-search-open", open);
+    tabSearch.setAttribute("aria-expanded", String(open));
+    if (openOnArrival && boxHere()) {
+      openOnArrival = false;
+      d.searchInput.focus();
     }
   }
 

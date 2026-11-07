@@ -293,7 +293,11 @@ export function createRail(deps: RailDeps): RailController {
   }
 
   function rows(): RailRow[] {
-    const { folderId, openPath, destination } = deps.place();
+    const place = deps.place();
+    const { openPath, destination } = place;
+    // Search results span the library: no folder is where you are, though the
+    // one the search started from stays open in the tree.
+    const folderId = place.searching === true ? null : place.folderId;
     const out: RailRow[] = [{ kind: "label", text: "Folders" }];
 
     const open = new Set<Id>();

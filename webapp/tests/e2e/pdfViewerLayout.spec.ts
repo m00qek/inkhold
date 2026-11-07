@@ -97,6 +97,10 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0.002);
     await expect(region.locator(".pdf-pager__count")).toHaveValue("1 / 2");
 
+    // As in the reader: ‹ has focus on open, and the toolbar roves on arrow keys
+    // while it has focus, so focus the stage before paging.
+    await expect(region.getByRole("button", { name: /Library|Files|Search/ }).first()).toBeFocused();
+    await page.locator(".pdf-wrap").click({ position: { x: 5, y: 5 } });
     await page.keyboard.press("ArrowRight");
     await expect(region.locator(".pdf-pager__count")).toHaveValue("2 / 2");
     // The page moved, not just the counter.

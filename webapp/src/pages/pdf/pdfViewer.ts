@@ -326,8 +326,9 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       { kind: "custom", key: "copy-live", el: copy.live, focus: [] },
     ],
     file: [
-      { kind: "custom", key: "download", el: exportMenu.el, focus: [exportMenu.trigger] },
+      // Every viewer's order: history, download, then the bin.
       { kind: "custom", key: "versions", el: versionsOpener.el, focus: [versionsOpener.el] },
+      { kind: "custom", key: "download", el: exportMenu.el, focus: [exportMenu.trigger] },
       { kind: "custom", key: "move-bin", el: moveBin, focus: [moveBin] },
       // Mutually exclusive with Move to bin.
       { kind: "custom", key: "bin-actions", el: binActions.el, focus: [binActions.trigger] },

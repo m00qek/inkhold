@@ -29,7 +29,7 @@ test.describe("non-.note files", () => {
     await expect(page.getByRole("button", { name: "Recognized text" })).toBeHidden();
 
     await expect(page.locator(".reader__title")).toContainText("pricing page");
-    await expect(page.locator(".reader__title")).toContainText("PNG");
+    await expect(page.locator(".reader__title")).toContainText(".png");
   });
 
   test("a pdf opens in the PDF viewer now, not the reader's no-preview state", async ({ page }) => {

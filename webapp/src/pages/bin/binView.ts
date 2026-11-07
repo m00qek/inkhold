@@ -8,7 +8,7 @@ import { learnsAspect, pinAspect, provisionalAspect } from "../../ui/tileAspect"
 import { ICONS, svg } from "../../ui/icons";
 import { createMenu } from "../../ui/menu";
 import { FACADE_THUMB_TYPES } from "../galleryCards";
-import { fileKind, formatBytes, rawFileUrl } from "../../core/fileKind";
+import { fileKind, formatBytes, rawFileUrl, fileTypeLabel } from "../../core/fileKind";
 import { getDims } from "../../cache/dimsMemo";
 import { type Api } from "../../api/types";
 import { type LazyEngine, type LazySlotInput } from "../../render/lazy";
@@ -356,7 +356,7 @@ export function createBinView(opts: BinViewOptions): BinView {
               { class: "empty" },
               el("div", { class: "empty__mark", text: (e.fileType || "file").toUpperCase() }),
               el("h2", { text: "No preview for this file" }),
-              el("p", { text: `${(e.fileType || "file").toUpperCase()} · ${formatBytes(e.size)}. Download it if you need to look inside before deciding.` }),
+              el("p", { text: `${fileTypeLabel(e.fileType)} · ${formatBytes(e.size)}. Download it if you need to look inside before deciding.` }),
               // No Export: a download takes a copy of what is about to go.
               src ? el("a", { class: "btn", href: binFileUrl(e, { download: true }) ?? src, download: e.name, text: "Download" }) : null,
             );

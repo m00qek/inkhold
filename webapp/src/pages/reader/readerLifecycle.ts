@@ -3,7 +3,7 @@
 import { isPhone } from "../../ui/breakpoints";
 import type { NoteMeta, NoteSummary } from "../../core/types";
 import { dispatchApiFailure } from "../../api/client";
-import { fileKind, formatBytes, rawFileUrl, historyFileUrl } from "../../core/fileKind";
+import { fileKind, formatBytes, rawFileUrl, historyFileUrl, fileTypeLabel } from "../../core/fileKind";
 import { FIT_PAGE } from "../viewer/viewerControls";
 import { backWord } from "../viewer/viewerChrome";
 import { relativeTime, absoluteTime } from "../../ui/relativeTime";
@@ -160,7 +160,7 @@ export function createReaderLifecycle(ctx: ReaderCtx): Reader {
         ctx.findBar.input.value = "";
         ctx.filmEngine.reset();
         ctx.pageIndexPanel.clear();
-        ctx.header.setSubtitle(subtitle(origin, `${st.meta.fileType.toUpperCase()} · ${formatBytes(st.meta.size)}`));
+        ctx.header.setSubtitle(subtitle(origin, `${fileTypeLabel(st.meta.fileType)} · ${formatBytes(st.meta.size)}`));
         // Bin and history previews need their own routes (see the note branch).
         ctx.setDownload(
           previewing
@@ -223,7 +223,7 @@ export function createReaderLifecycle(ctx: ReaderCtx): Reader {
         const gainedLayers = (nextPage?.layers?.length ?? 0) > 0 && !paintedPage?.layers?.length;
         if (!alreadyPainted || gainedLayers) void ctx.paint.showPage(st.pageIndex);
       } else {
-        ctx.header.setSubtitle(subtitle(origin, `${st.meta.fileType.toUpperCase()} · ${formatBytes(st.meta.size)}`));
+        ctx.header.setSubtitle(subtitle(origin, `${fileTypeLabel(st.meta.fileType)} · ${formatBytes(st.meta.size)}`));
       }
     },
 

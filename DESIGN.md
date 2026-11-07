@@ -712,6 +712,24 @@ nothing. `tests/e2e/focus.spec.ts` holds that every Tab stop shows focus.
   to the same control (`ui/dom.ts` `keepingFocus`: a link by where it leads),
   and a disclosure the person opened stays open, read from the element, not
   from its late `toggle` event.
+- **One design language** (`tests/e2e/designLanguage.spec.ts`): the same
+  thing looks and sits the same on every screen.
+  - Every folder is the device's folder silhouette (`thumb--folder-shape`), a
+    pinned category with its glyph inside; files are sheets.
+  - A file's type in text is its extension (`core/fileKind.ts`
+    `fileTypeLabel`: `.note`, `.pdf`), never upper-cased; only the big
+    placeholder mark shouts.
+  - A viewer's subtitle is the file's folder when it was opened from elsewhere
+    (`originSubtitle`), then pages for a paged document or type and size.
+  - A viewer's file actions run: history, download, the bin. Every viewer puts
+    focus on ‹ when it opens.
+  - A place in the shell that isn't a folder reads "Library / place" (the bin,
+    your account, the admin console); Search reads "Search" and highlights no
+    rail folder, since results span the library; To-Do, an app, titles itself.
+  - Buttons speak in sentence case everywhere; capitals are for small labels.
+  - On a phone, a top bar's buttons are quiet glyphs (‹ ☰ 🔍 ⋯), framed only
+    in the bottom bar's controls; the Search tab on a page without a search
+    box goes to search, and a query left in the box never blanks a title.
 - **Announcements** are small status regions holding the message only, never
   the buttons beside it. Icons are hidden from screen readers (`svg()` emits
   `aria-hidden`).

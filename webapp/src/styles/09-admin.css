@@ -99,8 +99,6 @@
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
   font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
   cursor: pointer;
   transition: background-color 0.15s ease;
 }
@@ -179,8 +177,6 @@
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
   cursor: pointer;
   transition:
     border-color 0.15s ease,

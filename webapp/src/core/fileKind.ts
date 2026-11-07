@@ -21,6 +21,15 @@ export const PREVIEWABLE_IMAGE_TYPES: readonly string[] = ["png", "jpg", "jpeg",
 const NOTE_STAGE_TYPES: readonly string[] = ["note", "mark"];
 
 /** Classify a server-verified `fileType` (lowercase, no dot). */
+/**
+ * A file's type as text says it: its extension (`.note`, `.pdf`), as the
+ * account page and the gallery's badges do. Never upper-cased: "Note · NOTE"
+ * reads as a folder named twice.
+ */
+export function fileTypeLabel(fileType: string | null | undefined): string {
+  return fileType ? `.${fileType.toLowerCase()}` : "file";
+}
+
 export function fileKind(fileType: string): FileKind {
   if (NOTE_STAGE_TYPES.includes(fileType)) return "note";
   return PREVIEWABLE_IMAGE_TYPES.includes(fileType.toLowerCase()) ? "image" : "file";

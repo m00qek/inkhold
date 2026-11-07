@@ -211,8 +211,6 @@
   color: var(--ink);
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   cursor: pointer;
   white-space: nowrap;
   transition:

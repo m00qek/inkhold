@@ -121,14 +121,14 @@ test.describe("library rail + gallery", () => {
       const card = page.locator(".card--folder", {
         has: page.locator(".card__title", { hasText: new RegExp(`^${label}$`) }),
       });
-      await expect(card.locator(".thumb--category")).toBeVisible();
-      await expect(card.locator(".thumb--category .cat__glyph svg")).toBeVisible();
-      await expect(card.locator(".thumb--folder")).toHaveCount(0);
+      await expect(card.locator(".thumb--folder-shape")).toBeVisible();
+      await expect(card.locator(".thumb--folder-shape .cat__glyph svg")).toBeVisible();
       await expect(card.locator(".card__meta")).toBeVisible();
     }
+    // A folder of the person's own is a folder too: the same shape, bare.
     const archive = page.locator(".card--folder", { hasText: "Archive" });
-    await expect(archive.locator(".thumb--folder")).toBeVisible();
-    await expect(archive.locator(".thumb--category")).toHaveCount(0);
+    await expect(archive.locator(".thumb--folder-shape .cat__shape")).toBeVisible();
+    await expect(archive.locator(".cat__glyph")).toHaveCount(0);
   });
 
   test("a user subfolder renders nested (indented) under its category anchor", async ({ page }) => {

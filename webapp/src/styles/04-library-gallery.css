@@ -265,15 +265,13 @@
   min-width: calc(var(--preview-h-list) * 3 / 4);
   max-width: calc(var(--preview-h-list) * 2.5);
 }
-/* Preview-less tiles (folders, files we can't render) get a centred glyph on
-   the same footprint. Images are not here: they have a real preview. */
-.thumb--folder,
+/* Files we can't render get a centred glyph on a sheet's footprint. Images are
+   not here: they have a real preview. Folders are not sheets: see below. */
 .thumb--file {
   display: grid;
   place-items: center;
   background: color-mix(in srgb, var(--ink) 4%, var(--sheet));
 }
-.thumb--folder svg,
 .thumb--file svg {
   width: 40%;
   height: 40%;
@@ -289,7 +287,6 @@
   height: 100%;
 }
 /* A 40% glyph is oversized at a ~64px list lead; pinned to 20px. */
-.gallery.is-list .thumb--folder svg,
 .gallery.is-list .thumb--file svg {
   width: 20px;
   height: 20px;
@@ -298,25 +295,26 @@
   box-shadow: none;
 }
 
-/* The six pinned category folders (Note, Document, MyStyle, Export, Screenshot,
-   Inbox) render as the device's folder silhouette with the category glyph;
-   no sheet, hairline or shadow, and green ink on hover. */
-.thumb--category {
+/* Every folder renders as the device's folder silhouette: the six pinned
+   categories (Note, Document, MyStyle, Export, Screenshot, Inbox) with their
+   glyph inside, the person's own folders bare. No sheet, hairline or shadow,
+   and green ink on hover. */
+.thumb--folder-shape {
   background: transparent;
   box-shadow: none;
   overflow: visible;
 }
-.thumb--category::after {
+.thumb--folder-shape::after {
   content: none;
 }
-.card:hover .thumb--category {
+.card:hover .thumb--folder-shape {
   box-shadow: none;
 }
 /* Grid: the folder's 100:82 proportion. */
-.gallery:not(.is-list) .thumb--category {
+.gallery:not(.is-list) .thumb--folder-shape {
   aspect-ratio: 100 / 82;
 }
-.thumb--category .cat__shape {
+.thumb--folder-shape .cat__shape {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -324,7 +322,7 @@
   overflow: visible;
   filter: drop-shadow(0 1px 1px color-mix(in srgb, var(--shadow), transparent 55%));
 }
-.thumb--category .cat__shape path {
+.thumb--folder-shape .cat__shape path {
   fill: color-mix(in srgb, var(--sheet), var(--ink) 3%);
   stroke: var(--line);
   stroke-width: 1.4;
@@ -333,7 +331,7 @@
     stroke 0.12s,
     fill 0.12s;
 }
-.thumb--category .cat__glyph {
+.thumb--folder-shape .cat__glyph {
   position: absolute;
   inset-inline-start: 50%;
   top: 58%;
@@ -342,7 +340,7 @@
   color: var(--ink-soft);
   transition: color 0.12s;
 }
-.thumb--category .cat__glyph svg {
+.thumb--folder-shape .cat__glyph svg {
   display: block;
   width: 100%;
   height: auto;
@@ -352,18 +350,18 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.card:hover .thumb--category .cat__shape path,
-.card__open:focus-visible .thumb--category .cat__shape path {
+.card:hover .thumb--folder-shape .cat__shape path,
+.card__open:focus-visible .thumb--folder-shape .cat__shape path {
   stroke: var(--accent);
   fill: color-mix(in srgb, var(--sheet), var(--accent) 6%);
 }
-.card:hover .thumb--category .cat__glyph {
+.card:hover .thumb--folder-shape .cat__glyph {
   color: var(--ink);
 }
-.gallery:not(.is-list) .card--category .card__title {
+.gallery:not(.is-list) .card--folder .card__title {
   text-align: center;
 }
-.gallery:not(.is-list) .card--category .card__meta {
+.gallery:not(.is-list) .card--folder .card__meta {
   justify-content: center;
 }
 /* The row body is three lines (badges, title, meta), stretched to the row's

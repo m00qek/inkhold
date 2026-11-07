@@ -181,8 +181,6 @@
   color: var(--ink-soft);
   font-family: var(--font-mono);
   font-size: var(--fs-eyebrow);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   cursor: pointer;
   transition:
     background 0.12s ease,

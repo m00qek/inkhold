@@ -6,10 +6,10 @@
 import { el } from "../../ui/dom";
 import { bytesBudget } from "../../api/client";
 import type { NoteMeta, NoteSummary } from "../../core/types";
-import { formatBytes, rawFileUrl, historyFileUrl } from "../../core/fileKind";
+import { formatBytes, rawFileUrl, historyFileUrl, fileTypeLabel } from "../../core/fileKind";
 import { createToolbar } from "../toolbar";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
-import { backWord, createViewerHeader, createViewerBody, createVersionBanner } from "../viewer/viewerChrome";
+import { backWord, createVersionBanner, createViewerBody, createViewerHeader, originSubtitle } from "../viewer/viewerChrome";
 import { createBinViewerActions } from "../../ui/binViewerActions";
 import { createLayersPanel, type PanelLayer } from "../layersPanel";
 import { closeWith } from "../../ui/sidePanel";
@@ -358,7 +358,8 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       zoom.reset();
 
       header.setName(summary.name);
-      header.setSubtitle(summary.fileType.toUpperCase());
+      // As every viewer: the folder first when not opened from it (`originSubtitle`).
+      header.setSubtitle(originSubtitle(origin, fileTypeLabel(summary.fileType)));
       header.setBackWord(backWord(origin));
       fromBin = origin.kind === "bin";
       previewVersion = origin.kind === "history" ? (origin.version ?? null) : null;
@@ -394,7 +395,7 @@ export function createSpdViewer(deps: ViewerDeps, opts: SpdViewerOptions = {}): 
       
       if (renderToken !== token) return;
       meta = next;
-      header.setSubtitle(`${next.fileType.toUpperCase()} · ${formatBytes(next.size)}`);
+      header.setSubtitle(originSubtitle(origin, `${fileTypeLabel(next.fileType)} · ${formatBytes(next.size)}`));
 
       void render(next, ctl.signal);
     },

@@ -153,7 +153,7 @@ test.describe("the sort order is remembered", () => {
 
     // Note cards only: folder cards sit ahead and are not sorted.
     const titles = async (): Promise<string[]> =>
-      page.locator(".card__open:not(:has(.thumb--folder)) .card__title").allInnerTexts();
+      page.locator(".card__open:not(:has(.thumb--folder-shape)) .card__title").allInnerTexts();
 
     await sort.selectOption("title");
     const byTitle = await titles();

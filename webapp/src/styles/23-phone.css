@@ -284,6 +284,21 @@ html {
     justify-content: center;
     padding-inline: 0;
   }
+  /* The top row speaks the library bar's language (‹ ☰ ⋯, `.topbar__phone`):
+     quiet glyphs at its size, no frame. The bottom row's controls keep theirs.
+     A pressed toggle (Find, open) still fills (`10-toolbar.css`). */
+  :is(.reader__bar, .viewer__bar) :is(.backbtn, .viewer__back, .toolbar__top .btn, .toolbar__more):not([aria-pressed="true"]) {
+    border-color: transparent;
+    background: transparent;
+    color: var(--ink);
+  }
+  :is(.reader__bar, .viewer__bar) .toolbar__more[aria-expanded="true"] {
+    background: var(--hover);
+  }
+  :is(.reader__bar, .viewer__bar) :is(.backbtn, .viewer__back, .toolbar__top .btn, .toolbar__more) svg {
+    inline-size: 22px;
+    block-size: 22px;
+  }
   .reader__bar > .toolbar__group:not(.toolbar__group--file),
   .viewer__bar > .toolbar__group:not(.toolbar__group--file) {
     position: fixed;

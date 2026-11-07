@@ -2,7 +2,7 @@
 // release it.
 
 import type { Id, NoteMeta, NoteSummary } from "../../core/types";
-import { formatBytes, rawFileUrl } from "../../core/fileKind";
+import { formatBytes, rawFileUrl, fileTypeLabel } from "../../core/fileKind";
 import { FIT_PAGE } from "../viewer/viewerControls";
 import { backWord, originSubtitle } from "../viewer/viewerChrome";
 import type { ReaderOrigin } from "../viewer/viewer";
@@ -131,7 +131,7 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
     header.setName(summary.name);
     header.setBackWord(backWord(origin));
     // The subtitle fills in: folder path, then size, then page count.
-    header.setSubtitle(originSubtitle(origin, summary.fileType?.toUpperCase() || "PDF"));
+    header.setSubtitle(originSubtitle(origin, fileTypeLabel(summary.fileType || "pdf")));
     st.zoom = FIT_PAGE;
     st.pinch = null;
     // The stepper keeps its own label, so reset the readout too.
@@ -139,6 +139,9 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
     st.pageIndex = Math.max(0, page);
     body.showPlaceholder(summary.name, "Opening this PDF…");
     ctx.nav.syncPager();
+    // As every viewer: focus on ‹ (a keyboard's way back out), unless the
+    // route asked for a search, whose field then keeps it.
+    if (query.trim() === "") header.back.focus();
 
     if (!seam.supported()) {
       // MuPDF's error handling needs wasm exception handling.

@@ -2,7 +2,7 @@
 
 import { pinAspect } from "../../ui/tileAspect";
 import { labelPathSegments } from "../rail/railPlaces";
-import { formatBytes } from "../../core/fileKind";
+import { formatBytes, fileTypeLabel } from "../../core/fileKind";
 import { type Bin, type BinEntry, type Restored, type Trashed } from "../../core/binTypes";
 import { type Id } from "../../core/types";
 
@@ -126,7 +126,7 @@ export function binRows(bin: Bin, now: number = Date.now()): BinRow[] {
 
 function detailOf(entry: BinEntry, descendants: number): string {
   if (entry.kind === "folder") return descendants === 0 ? "folder" : `folder · ${plural(descendants, "item")}`;
-  const type = (entry.fileType || "file").toUpperCase();
+  const type = fileTypeLabel(entry.fileType);
   return `${type} · ${formatBytes(entry.size)}`;
 }
 

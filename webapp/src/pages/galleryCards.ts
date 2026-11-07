@@ -98,13 +98,17 @@ function knownAspect(note: NoteSummary): number | null {
   return null;
 }
 
-/** The folder-silhouette tile, reserved for the six pinned categories. */
-function categoryTileHtml(icon: IconName): string {
+/**
+ * Every folder's tile: the device's folder silhouette. A pinned category
+ * carries its glyph inside; a folder of the person's own is the bare shape.
+ * Files are sheets, folders are folders, whatever made them.
+ */
+function folderTileHtml(icon: IconName | null): string {
   return (
     '<svg class="cat__shape" viewBox="0 0 100 82" aria-hidden="true">' +
     '<path d="M10 22 a6 6 0 0 1 6 -6 h22 l7 7 h39 a6 6 0 0 1 6 6 v41 a6 6 0 0 1 -6 6 H16 a6 6 0 0 1 -6 -6 Z"/>' +
     "</svg>" +
-    `<span class="cat__glyph">${svg(ICONS[icon], 1.35)}</span>`
+    (icon ? `<span class="cat__glyph">${svg(ICONS[icon], 1.35)}</span>` : "")
   );
 }
 
@@ -281,10 +285,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     const meta = itemCountLabel(folder);
     const catIcon = ctx.categoryIconFor(folder);
     const pendingCat = ctx.pendingCategoryOf(folder);
-    const tile = catIcon
-      ? el("div", { class: "thumb thumb--category", html: categoryTileHtml(catIcon) })
-      : // A folder has no page to preview, so its tile carries a centred glyph on
-        el("div", { class: "thumb thumb--folder", html: svg(ICONS.folder, 1.4) });
+    const tile = el("div", { class: "thumb thumb--folder-shape", html: folderTileHtml(catIcon) });
     // A stand-in has no folder; routing to its synthetic id would 404.
     const open = openControl(
       pendingCat ? null : folderHref(folder.id),
