@@ -1,7 +1,10 @@
 import { defineConfig, type Plugin } from "vite";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { fakeFileHash } from "./src/api/fakeHash";
+import { DatabaseSync } from "node:sqlite";
 
 /**
  * Writes `sw.js` into the build: `sw/sw.js` with this build's files filled in
@@ -47,13 +50,79 @@ function inkholdServiceWorker(): Plugin {
   };
 }
 
+/**
+ * `npm run demo` only: answer `/file/:id` (a file's raw bytes) for the fake
+ * library's `.txt`, `.spd` and `.pdf` entries with committed fixtures, so
+ * their viewers show real content instead of this page's own HTML, and
+ * `/thumbnail/:hash` for the sketches' cards.
+ */
+function demoFiles(): Plugin {
+  const at = (rel: string) => new URL(rel, import.meta.url);
+  const txt = { path: at("./tests/fixtures/demo/readme.txt"), type: "text/plain; charset=utf-8" };
+  const spd = { path: at("../parsers/spd/tests/fixtures/layers_hidden.spd"), type: "application/octet-stream" };
+  const pdf = { path: at("./wasm/tests/fixtures/two-page.pdf"), type: "application/pdf" };
+  // Ids from `src/api/fakeFixtures.ts`.
+  const files: Record<string, { path: URL; type: string }> = {
+    "142": pdf,
+    "174": spd,
+    "175": spd,
+    "176": spd,
+    "177": txt,
+    "178": pdf,
+  };
+  // A sketch's library card shows the preview the server pulls from the file
+  // (the JPEG in its `config` table), keyed by the file's hash. Only for the
+  // 3:4 Kitchen sketch: cropped to the panorama's or the receipt's extreme
+  // shape, the same picture would be a blank strip.
+  const sketchHashes = new Set([fakeFileHash("174")]);
+  let thumbBytes: Uint8Array | null = null;
+  const sketchThumb = (): Uint8Array => {
+    if (thumbBytes) return thumbBytes;
+    // From a copy: the fixture is a WAL database, and opening it in place
+    // leaves `-shm`/`-wal` files beside the committed one.
+    const dir = mkdtempSync(join(tmpdir(), "inkhold-demo-"));
+    const copy = join(dir, "sketch.spd");
+    copyFileSync(spd.path, copy);
+    try {
+      const db = new DatabaseSync(copy, { readOnly: true });
+      const row = db.prepare("SELECT CAST(value AS BLOB) AS v FROM config WHERE name = 'thumbnail'").get() as { v: Uint8Array };
+      db.close();
+      return (thumbBytes = row.v);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  return {
+    name: "inkhold-demo-files",
+    apply: () => process.env.VITE_DEMO === "1",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const thumb = /^\/thumbnail\/([^/?]+)/.exec(req.url ?? "");
+        if (thumb && sketchHashes.has(decodeURIComponent(thumb[1]!))) {
+          res.setHeader("content-type", "image/jpeg");
+          res.end(sketchThumb());
+          return;
+        }
+        const m = /^\/file\/([^/?]+)/.exec(req.url ?? "");
+        const f = m ? files[decodeURIComponent(m[1]!)] : undefined;
+        if (!f) return next();
+        const download = /[?&]download=1/.test(req.url ?? "");
+        res.setHeader("content-type", download ? "application/octet-stream" : f.type);
+        res.setHeader("x-content-type-options", "nosniff");
+        if (download) res.setHeader("content-disposition", "attachment");
+        res.end(readFileSync(f.path));
+      });
+    },
+  };
+}
+
 // Same-origin static assets with hash routing, so relative paths and no SPA
 // fallback. Dev proxies to the local Zig server (override with VITE_API_TARGET).
 const apiTarget = process.env.VITE_API_TARGET ?? "http://127.0.0.1:8089";
 
 export default defineConfig({
   base: "./",
-  plugins: [inkholdServiceWorker()],
+  plugins: [inkholdServiceWorker(), demoFiles()],
   server: {
     port: 5180,
     proxy: {

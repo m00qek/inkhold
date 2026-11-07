@@ -4,6 +4,9 @@ import type { PdfLink, Entry, FileVersion, Folder, Id, NoteSummary, PageRef, Wor
 import { BIN_SEED_NOTES } from "./binFake";
 import { LAYERED_NOTE_ID, withLayeredPageLayers } from "./layeredFixture";
 import { canPreviewHistory } from "../core/fileKind";
+import { fakeFileHash, fakeHash } from "./fakeHash";
+
+export { fakeFileHash };
 
 /**
  * The `.mark` annotating PDF `178`, reusing the layered fixture's real SNPG v2
@@ -13,21 +16,6 @@ import { canPreviewHistory } from "../core/fileKind";
 export const MARKED_PDF_ID = "178";
 export const PDF_MARK_ID = "179";
 export const PDF_MARK_SOURCE_PAGE = 2;
-
-/** Deterministic pseudo-hash from a seed — stands in for a real content md5. */
-function fakeHash(seed: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(16).padStart(8, "0").repeat(4); // 32 hex chars, md5-shaped
-}
-
-/** The fixture's whole-file `fileHash`, exported so e2e can mock one file's `/thumbnail/{hash}`. */
-export function fakeFileHash(id: Id): string {
-  return fakeHash(`${id}:file`);
-}
 
 /** Notes whose recognition starts after page 1; `getNoteMeta` must rebuild the summary's per-page pattern. */
 export const RECOGNIZED_FROM: Record<string, number> = {};
