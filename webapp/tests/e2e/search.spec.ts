@@ -514,7 +514,13 @@ test.describe("universal search", () => {
 
       const empty = page.locator(".gallery .empty");
       await expect(empty).toContainText("No matches");
-      await expect(empty).toContainText("Only notes recognised on the device are searchable.");
+      // Why, in one of its two forms: the generic sentence until the coverage
+      // numbers arrive, then the coverage block in its place. Which one a test
+      // sees is timing (a busy machine gets the numbers first), not behaviour.
+      const why = page
+        .locator(".gallery .empty", { hasText: "Only notes recognised on the device are searchable." })
+        .or(page.locator(".gallery .coverage__line"));
+      await expect(why.first()).toBeVisible();
       await expect(empty).not.toContainText("of your");
     });
 

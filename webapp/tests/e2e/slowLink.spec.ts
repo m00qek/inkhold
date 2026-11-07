@@ -76,11 +76,18 @@ test.describe("what is painted while a listing is in flight", () => {
       },
       "user/me": { json: ME },
     });
+    await page.clock.install();
     await page.goto("/?real");
     await expect(page.locator("#gallery")).toContainText("Root readme");
 
+    // "Fast" by construction, not by a busy machine's luck: on the page's clock
+    // the listing takes exactly 100 ms, however long the machine takes. A loading
+    // state that waited less than that would show; the 150 ms one never can.
+    await page.clock.pauseAt(Date.now() + 60_000);
     await page.locator(".card__open", { hasText: "Archive" }).click();
+    await page.clock.runFor(100);
     await expect(page.locator("#gallery")).toContainText("Coastline");
+    await page.clock.resume();
 
     expect(await gallery.everShowed("Loading…")).toBe(false);
   });
