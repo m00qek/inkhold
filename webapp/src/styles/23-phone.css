@@ -42,7 +42,7 @@ html {
     inset-inline-start: 0;
     z-index: var(--z-drawer);
     inline-size: min(300px, 85vw);
-    padding-block-end: env(safe-area-inset-bottom, 0px);
+    padding-block: env(safe-area-inset-top, 0px) env(safe-area-inset-bottom, 0px);
     box-shadow: 0 0 30px var(--shadow);
     transform: translateX(-100%);
     visibility: hidden;

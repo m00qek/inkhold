@@ -169,8 +169,8 @@
 /* Bottom right, so it never covers the bottom-centre toast. */
 .transfers {
   position: fixed;
-  inset-inline-end: var(--sp-6);
-  bottom: var(--sp-6);
+  inset-inline-end: calc(var(--sp-6) + env(safe-area-inset-right, 0px));
+  bottom: calc(var(--sp-6) + env(safe-area-inset-bottom, 0px));
   z-index: var(--z-panel);
   width: min(340px, calc(100vw - 2 * var(--sp-4)));
   border: 1px solid var(--line);

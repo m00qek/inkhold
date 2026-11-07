@@ -3,10 +3,19 @@
 .sn-root {
   font-family: var(--font-body);
   color: var(--ink);
-  background: var(--desk);
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
+  /* `viewport-fit=cover` lays the page under the status bar and the rounded
+     corners; keep the app inside the safe area, its background behind them.
+     Bottom bars pad their own bottom (the home indicator), so not here. */
+  padding-block-start: env(safe-area-inset-top, 0px);
+  padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
+  /* The band behind the status bar continues the top bar's colour. */
+  background:
+    linear-gradient(color-mix(in srgb, var(--desk) 55%, var(--sheet)) 0 0) top / 100% env(safe-area-inset-top, 0px)
+      no-repeat,
+    var(--desk);
 }
 
 /* Control font reset, wrapped in `:where()` for zero specificity so component

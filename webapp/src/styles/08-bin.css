@@ -385,7 +385,7 @@
 .bin-toast {
   position: fixed;
   inset-inline-start: 50%;
-  bottom: 26px;
+  bottom: calc(26px + env(safe-area-inset-bottom, 0px));
   transform: translateX(-50%) translateY(20px);
   opacity: 0;
   pointer-events: none;
@@ -449,6 +449,9 @@
 .bin-preview {
   position: fixed;
   inset: 0;
+  /* Fixed over the shell, so it keeps to the safe area itself. */
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
+    env(safe-area-inset-left, 0px);
   z-index: var(--z-panel);
   display: flex;
   flex-direction: column;

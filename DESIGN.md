@@ -744,7 +744,10 @@ Touch is its own question, `(pointer: coarse)`, never inferred from width.
   a page zoomed past the stage pans first and turns only from the edge it
   started at, and the pager stays the one-pointer way. A `.txt` drops its
   paper card: the text fills the screen's width and the column-width zoom
-  is hidden, leaving text size. The zoom
+  is hidden, leaving text size. The page opts into `viewport-fit=cover`:
+  the shell pads itself below the status bar (the band behind it in the top
+  bar's colour) and every bottom bar pads above the home indicator, all by
+  `env(safe-area-inset-*)`. The zoom
   stepper is the one-finger way (WCAG 2.5.1), in ⋯ with the other
   occasional tools (`fold` in the toolbar spec: Find, zoom) and the file's
   actions, the tools under "View", ticked while on. A viewer's panels start

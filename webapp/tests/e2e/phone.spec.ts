@@ -405,6 +405,27 @@ test.describe("on a phone", () => {
     await expect(menu.getByRole("menuitem", { name: /Zoom/ })).toHaveCount(0);
   });
 
+  // An iPhone's status bar and home indicator: with `viewport-fit=cover` the
+  // insets are real, and the bars keep their controls out of both.
+  test("the bars keep clear of the status bar and the home indicator", async ({ page, browserName }) => {
+    test.skip(browserName !== "chromium", "only Chromium can fake the safe-area insets");
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setSafeAreaInsetsOverride" as never, { insets: { top: 47, bottom: 34, left: 0, right: 0 } } as never);
+    await signedIn(page);
+    await page.goto("/#/note/101");
+    await expect(page.locator(".stage .page")).toBeVisible();
+    // Without the opt-in iOS reports no insets at all (Chromium's override applies regardless).
+    await expect(page.locator('meta[name="viewport"]')).toHaveAttribute("content", /viewport-fit=cover/);
+    const back = (await page.locator(".reader__bar").getByRole("button", { name: "Library" }).boundingBox())!;
+    expect(back.y).toBeGreaterThanOrEqual(47);
+    const next = (await page.locator(".reader__bar").getByRole("button", { name: "Next page" }).boundingBox())!;
+    expect(next.y + next.height).toBeLessThanOrEqual(844 - 34);
+    // The library's tab bar too.
+    await page.goto("/#/");
+    const tab = (await page.getByRole("link", { name: "Library" }).last().boundingBox())!;
+    expect(tab.y + tab.height).toBeLessThanOrEqual(844 - 34);
+  });
+
   // Regression: every step was clamped back to the stage's width, so where Fit
   // already filled it (a phone, a tablet upright) zoom did nothing.
   test("zoom enlarges a note past the screen's width, and its start stays reachable", async ({ page }) => {

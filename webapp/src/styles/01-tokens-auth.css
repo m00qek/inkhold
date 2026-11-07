@@ -65,7 +65,8 @@ body {
   min-height: 100dvh;
   display: grid;
   place-items: center;
-  padding: 32px 20px;
+  padding: max(32px, env(safe-area-inset-top, 0px)) max(20px, env(safe-area-inset-right, 0px))
+    max(32px, env(safe-area-inset-bottom, 0px)) max(20px, env(safe-area-inset-left, 0px));
   background: var(--desk);
   color: var(--ink);
   font-family: var(--font-body);
@@ -324,8 +325,8 @@ body:has(.sn-root) {
 /* The floating pre-auth theme toggle. */
 .theme {
   position: fixed;
-  top: 18px;
-  inset-inline-end: 18px;
+  top: calc(18px + env(safe-area-inset-top, 0px));
+  inset-inline-end: calc(18px + env(safe-area-inset-right, 0px));
   width: var(--control-h);
   height: var(--control-h);
   display: grid;
