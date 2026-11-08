@@ -5,9 +5,9 @@ name: Docs
 on:
   push:
     branches: [ "main", "pre-release" ]
-    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/cli.zig", ".github/workflows/docs.yaml" ]
+    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/config.zig", "backend/cli.zig", ".github/workflows/docs.yaml" ]
   pull_request:
-    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/cli.zig", ".github/workflows/docs.yaml" ]
+    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/config.zig", "backend/cli.zig", ".github/workflows/docs.yaml" ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

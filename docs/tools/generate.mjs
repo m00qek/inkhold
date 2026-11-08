@@ -1,7 +1,8 @@
 // Writes the reference pages that must never drift from the code
 // (content/contributor/documentation-rules.md, "Generated, not written"):
 //
-//   manual/configuration.md   from config.example.zon: each setting, its default, its comment
+//   manual/configuration.md   each setting with its real default (backend/config.zig) and its
+//                             comment (config.example.zon); fails when the two disagree on the set
 //   manual/command-line.md    from backend/cli.zig's help text
 //
 // Each page keeps its own front matter; the body below it is replaced.
@@ -27,7 +28,28 @@ function withBody(path, body) {
 const NOTE = (src) =>
   `<!-- Generated from ${src} by docs/tools/generate.mjs. Edit the source, not this page. -->\n`;
 
+/** Each setting's real default, from the struct the server parses (backend/config.zig). */
+function defaults() {
+  const src = readFileSync(join(repo, "backend/config.zig"), "utf8");
+  const structs = {};
+  for (const m of src.matchAll(/pub const (\w+) = struct \{([\s\S]*?)\n\};/g)) {
+    structs[m[1]] = [...m[2].matchAll(/^    (\w+): ([^=\n]+?) = ([^\n]+),$/gm)].map((f) => ({ name: f[1], type: f[2].trim(), value: f[3].trim() }));
+  }
+  const out = {};
+  const walk = (struct, prefix) => {
+    for (const f of structs[struct] ?? []) {
+      if (structs[f.type]) walk(f.type, `${prefix}${f.name}.`);
+      else out[`${prefix}${f.name}`] = f.value;
+    }
+  };
+  walk("Config", "");
+  return out;
+}
+
+const shown = (v) => (v === ".{}" || v === "&.{}" ? "none" : `\`${v.replace(/_/g, "")}\``);
+
 function configuration() {
+  const real = defaults();
   const rows = [];
   let comment = [];
   const prefix = [];
@@ -50,14 +72,17 @@ function configuration() {
     const field = line.match(/^\.(\w+) = (.*),$/);
     if (field) {
       const name = [...prefix, field[1]].join(".");
-      const value = field[2] === ".{}" ? "none" : `\`${field[2]}\``;
-      rows.push(`| \`${name}\` | ${value} | ${comment.join(" ")} |`);
+      if (!(name in real)) throw new Error(`config.example.zon: ${name} is not a setting in backend/config.zig`);
+      rows.push(`| \`${name}\` | ${shown(real[name])} | ${comment.join(" ")} |`);
+      delete real[name];
       comment = [];
     } else if (line === "" || line === ".{" || line === "}") {
       // The file's own introduction is not a setting's.
       if (line === ".{") comment = [];
     }
   }
+  const missing = Object.keys(real);
+  if (missing.length) throw new Error(`config.example.zon lacks ${missing.join(", ")} (backend/config.zig has them)`);
   return `# config.zon settings
 
 Every setting of Inkhold's config file, its default, and what it changes.
@@ -65,7 +90,7 @@ Every setting is optional: one left out takes its default. Copy
 [\`config.example.zon\`](https://github.com/m00qek/inkhold/blob/main/config.example.zon),
 which lists them all, and change what you need.
 
-${NOTE("config.example.zon")}
+${NOTE("config.example.zon and backend/config.zig")}
 | Setting | Default | What it does |
 |---|---|---|
 ${rows.join("\n")}
