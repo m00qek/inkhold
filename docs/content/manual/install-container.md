@@ -18,7 +18,7 @@ Run Inkhold's container image, with its data and settings kept outside it.
    docker run -d --name inkhold -p 8089:8089 \
      -v inkhold:/var/lib/inkhold \
      -v /mnt/nas/inkhold-backup:/backup \
-     ghcr.io/m00qek/inkhold-beta:latest
+     ghcr.io/m00qek/inkhold:latest
    ```
 
    The `/backup` line is optional: it turns on [nightly backups](@/manual/back-up.md)
@@ -50,7 +50,7 @@ on HTTPS or set another first-account email, mount your own over it:
 docker run -d --name inkhold -p 8089:8089 \
   -v inkhold:/var/lib/inkhold \
   -v ./my-config.zon:/etc/inkhold/config.zon:ro \
-  ghcr.io/m00qek/inkhold-beta:latest
+  ghcr.io/m00qek/inkhold:latest
 ```
 
 Every setting is listed in [config.zon settings](@/manual/configuration.md).

@@ -21,7 +21,7 @@ Mount the backup folder at `/backup`, and that is all:
 docker run -d --name inkhold -p 8089:8089 \
   -v inkhold:/var/lib/inkhold \
   -v /mnt/nas/inkhold-backup:/backup \
-  ghcr.io/m00qek/inkhold-beta:latest
+  ghcr.io/m00qek/inkhold:latest
 ```
 
 The container then backs up every night at 03:00 UTC, keeps 7 snapshots, and

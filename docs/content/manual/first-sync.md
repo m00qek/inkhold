@@ -26,7 +26,7 @@ On the computer that will keep your notes, run:
 ```sh
 docker volume create inkhold
 docker run -d --name inkhold -p 8089:8089 -v inkhold:/var/lib/inkhold \
-  ghcr.io/m00qek/inkhold-beta:latest
+  ghcr.io/m00qek/inkhold:latest
 docker logs inkhold
 ```
 

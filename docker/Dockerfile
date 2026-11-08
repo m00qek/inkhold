@@ -30,7 +30,7 @@ FROM scratch
 
 ARG TARGETPLATFORM
 ARG VERSION=dev
-ARG SOURCE=https://github.com/m00qek/inkhold-beta
+ARG SOURCE=https://github.com/m00qek/inkhold
 
 # `image.source` is the one that does more than describe: GHCR reads it to LINK
 # the package to its repository, which is what makes the package page show the

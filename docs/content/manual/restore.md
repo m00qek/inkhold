@@ -34,7 +34,7 @@ With the server's container stopped, onto a new volume:
 ```sh
 docker run --rm -v inkhold-new:/var/lib/inkhold \
   -v /mnt/nas/inkhold-backup:/backup \
-  ghcr.io/m00qek/inkhold-beta:latest restore /backup
+  ghcr.io/m00qek/inkhold:latest restore /backup
 ```
 
 Then start the server with `inkhold-new` as its volume.

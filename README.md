@@ -18,25 +18,25 @@ search your handwriting, recover deleted notes and export to PDF.
 
 ```sh
 docker run -d --name inkhold -p 8089:8089 -v inkhold:/var/lib/inkhold \
-  ghcr.io/m00qek/inkhold-beta:latest
+  ghcr.io/m00qek/inkhold:latest
 docker logs inkhold    # the first admin password
 ```
 
 Open `http://<this machine's address>:8089`, sign in as `admin@home.lan`, then
-[point your Supernote at it](https://m00qek.github.io/inkhold-beta/manual/point-supernote/).
+[point your Supernote at it](https://m00qek.github.io/inkhold/manual/point-supernote/).
 
 ## Documentation
 
-All of it is at **<https://m00qek.github.io/inkhold-beta/>**:
+All of it is at **<https://m00qek.github.io/inkhold/>**:
 
-- **[Your first sync](https://m00qek.github.io/inkhold-beta/manual/first-sync/)**: install Inkhold,
+- **[Your first sync](https://m00qek.github.io/inkhold/manual/first-sync/)**: install Inkhold,
   sign in, point the tablet at it, and see your notes in the browser.
-- **[The manual](https://m00qek.github.io/inkhold-beta/manual/)**: install, back up, upgrade,
+- **[The manual](https://m00qek.github.io/inkhold/manual/)**: install, back up, upgrade,
   and everyday use on the tablet and in the browser.
-- **[The contributor manual](https://m00qek.github.io/inkhold-beta/contributor/)**: build, test,
+- **[The contributor manual](https://m00qek.github.io/inkhold/contributor/)**: build, test,
   and how it works.
 
-Found a bug? [Open an issue](https://github.com/m00qek/inkhold-beta/issues):
+Found a bug? [Open an issue](https://github.com/m00qek/inkhold/issues):
 that feedback is the point of the beta.
 
 ## License

@@ -75,7 +75,7 @@ jobs:
           path: docs/public
 
   # PUBLISHES ONLY FROM `pre-release`, the source of truth, like the image in
-  # ci.yaml: https://m00qek.github.io/inkhold-beta/ is what it holds.
+  # ci.yaml: https://m00qek.github.io/inkhold/ is what it holds.
   pages:
     needs: [links, site]
     if: github.ref == 'refs/heads/pre-release' && github.event_name != 'pull_request'

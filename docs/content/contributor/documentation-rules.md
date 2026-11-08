@@ -167,6 +167,6 @@ reference (from `--help`).
   build), never the code CI. Docs are `docs/**` and every `*.md`; a change
   to the app's tokens or fonts runs both.
 - On `pre-release`, a docs run that passes publishes the site to
-  <https://m00qek.github.io/inkhold-beta/>. To republish without a change:
+  <https://m00qek.github.io/inkhold/>. To republish without a change:
   Actions → Docs → Run workflow.
 - Pages meet the quality bar above.

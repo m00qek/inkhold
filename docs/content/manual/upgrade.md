@@ -26,12 +26,12 @@ the way back.
 ## 2a. In Docker
 
 ```sh
-docker pull ghcr.io/m00qek/inkhold-beta:latest
+docker pull ghcr.io/m00qek/inkhold:latest
 docker stop inkhold && docker rm inkhold
 docker run -d --name inkhold -p 8089:8089 \
   -v inkhold:/var/lib/inkhold \
   -v /mnt/nas/inkhold-backup:/backup \
-  ghcr.io/m00qek/inkhold-beta:latest
+  ghcr.io/m00qek/inkhold:latest
 ```
 
 Use the same volumes as before: everything that matters lives in them, not in
