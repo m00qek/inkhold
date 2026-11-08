@@ -321,11 +321,49 @@ pub fn tags(db: sqlite.Db, arena: std.mem.Allocator, user_id: u64) Error![]Tag {
     return out.items;
 }
 
+// ---- handwritten notes ----
+
+/// A digest's handwritten note as the server holds it. `inner_name` is set
+/// only when the server took a reference to the note's blob (a claimed
+/// upload): only then is there something to release or serve.
+pub const Handwriting = struct { md5: ?[]const u8, inner_name: ?[]const u8 };
+
+/// The live digest's note, or null when there is no such live digest.
+pub fn handwriting(db: sqlite.Db, arena: std.mem.Allocator, user_id: u64, id: u64) Error!?Handwriting {
+    var r = (try db.rowCached(
+        \\SELECT handwrite_md5, handwrite_inner_name FROM digests
+        \\WHERE user_id = ?1 AND id = ?2 AND is_group = 0 AND deleted = 0;
+    , &.{ .{ .int = @intCast(user_id) }, .{ .int = @intCast(id) } })) orelse return null;
+    defer r.finalize();
+    return .{
+        .md5 = if (r.isNull(0)) null else try arena.dupe(u8, r.text(0)),
+        .inner_name = if (r.isNull(1)) null else try arena.dupe(u8, r.text(1)),
+    };
+}
+
+/// The id of the live digest with this uid (metadata `unique_identifier`).
+pub fn liveDigestId(db: sqlite.Db, user_id: u64, uid: []const u8) sqlite.Error!?u64 {
+    return liveId(db, user_id, false, uid);
+}
+
 // ---- retention ----
 
-/// Removes rows soft-deleted before `before_ms` for good (the bin's retention).
-pub fn purgeDeleted(db: sqlite.Db, before_ms: i64) sqlite.Error!void {
+/// Removes rows soft-deleted before `before_ms` for good (the bin's
+/// retention). Returns the md5s of the handwritten notes they held a
+/// reference to, owned by `arena`: the caller releases them.
+pub fn purgeDeleted(db: sqlite.Db, arena: std.mem.Allocator, before_ms: i64) Error![]const []const u8 {
+    var held: std.ArrayList([]const u8) = .empty;
+    {
+        var st = try db.prepareCached(
+            \\SELECT handwrite_md5 FROM digests
+            \\WHERE deleted = 1 AND deleted_at < ?1 AND handwrite_inner_name IS NOT NULL AND handwrite_md5 IS NOT NULL;
+        );
+        defer st.finalize();
+        st.bindInt(1, before_ms);
+        while (try st.step()) try held.append(arena, try arena.dupe(u8, st.columnText(0)));
+    }
     try db.runCached("DELETE FROM digests WHERE deleted = 1 AND deleted_at < ?1;", &.{.{ .int = before_ms }});
+    return held.items;
 }
 
 // ---- internals ----
@@ -491,7 +529,9 @@ test "ids are never reused, even after the newest digest is purged" {
     const first = try addDigest(db, 1, .{}, 0);
     const second = try addDigest(db, 1, .{}, 0);
     try deleteDigest(db, 1, second, 1);
-    try purgeDeleted(db, 100);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    _ = try purgeDeleted(db, arena.allocator(), 100);
     const third = try addDigest(db, 1, .{}, 200);
     try testing.expect(third > second and second > first);
 }

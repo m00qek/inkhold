@@ -325,3 +325,205 @@ test "a body the app would never send is refused, never stored" {
     defer r.finalize();
     try std.testing.expectEqual(@as(i64, 0), r.int(0));
 }
+
+// ---- handwritten notes ----
+
+const buildRequest = harness.buildRequest;
+const roundtrip = harness.roundtrip;
+const buildMultipart = @import("device_helpers.zig").buildMultipart;
+
+fn md5Hex(bytes: []const u8) [32]u8 {
+    var d: [16]u8 = undefined;
+    std.crypto.hash.Md5.hash(bytes, &d, .{});
+    return std.fmt.bytesToHex(d, .lower);
+}
+
+/// `upload/apply/summary`, then the multipart POST to the URL it gives, as
+/// the app does; returns the upload's inner name.
+fn uploadNote(f: *Fixture, obuf: []u8, reqbuf: []u8, tok: *const [32]u8, bytes: []const u8) ![16]u8 {
+    var inner: [16]u8 = undefined;
+    {
+        const resp = try call(f, obuf, reqbuf, tok, "POST", "/api/file/upload/apply/summary", "{\"fileName\":\"6003a8c1725a175c14868baedd7133a1.mark\"}");
+        var p = try std.json.parseFromSlice(struct { success: bool, innerName: []const u8, fullUploadUrl: []const u8 }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expect(p.value.success);
+        try std.testing.expect(std.mem.endsWith(u8, p.value.fullUploadUrl, p.value.innerName));
+        @memcpy(&inner, p.value.innerName[0..16]);
+    }
+    const boundary = "----DigestNoteBoundary";
+    const wire = try buildMultipart(boundary, bytes);
+    defer gpa.free(wire);
+    var ctbuf: [96]u8 = undefined;
+    const ct = try std.fmt.bufPrint(&ctbuf, "multipart/form-data; boundary={s}", .{boundary});
+    var pbuf: [48]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/oss/put/{s}", .{&inner});
+    const req = try buildRequest(reqbuf, "POST", path, &.{
+        .{ .name = "content-type", .value = ct },
+        .{ .name = "x-access-token", .value = tok },
+        .{ .name = "equipmentNo", .value = "SN1" },
+    }, wire);
+    const resp = try roundtrip(&f.ctx, req, obuf);
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    return inner;
+}
+
+fn refcount(f: *Fixture, md5: []const u8) !?i64 {
+    var r = (try f.ctx.db.row("SELECT refcount FROM blobs WHERE md5 = ?1;", &.{.{ .text = md5 }})) orelse return null;
+    defer r.finalize();
+    return r.int(0);
+}
+
+fn noteAdd(alloc: std.mem.Allocator, inner: []const u8, md5: []const u8, uid: []const u8) ![]u8 {
+    return std.fmt.allocPrint(alloc,
+        \\{{"commentHandwriteName":"6003a8c1725a175c14868baedd7133a1.mark","commentStr":"yeah","content":"x","handwriteInnerName":"{s}","handwriteMD5":"{s}","md5Hash":"m1","metadata":"{{\"unique_identifier\":\"{s}\"}}","parentUniqueIdentifier":"","sourceType":1}}
+    , .{ inner, md5, uid });
+}
+
+/// `download/summary`, then the GET of the URL it gives; returns the body.
+fn fetchNote(f: *Fixture, obuf: []u8, reqbuf: []u8, tok: *const [32]u8, id: u64) !harness.Response {
+    var path_buf: [256]u8 = undefined;
+    const path = blk: {
+        const body = try std.fmt.allocPrint(gpa, "{{\"id\":{d}}}", .{id});
+        defer gpa.free(body);
+        const resp = try call(f, obuf, reqbuf, tok, "POST", "/api/file/download/summary", body);
+        var p = try std.json.parseFromSlice(struct { success: bool, url: []const u8 = "" }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        if (!p.value.success) return resp;
+        const at = std.mem.indexOf(u8, p.value.url, "/oss/summary/").?;
+        const rest = p.value.url[at..];
+        @memcpy(path_buf[0..rest.len], rest);
+        break :blk path_buf[0..rest.len];
+    };
+    const req = try buildRequest(reqbuf, "GET", path, &.{}, "");
+    return roundtrip(&f.ctx, req, obuf);
+}
+
+test "a handwritten note: uploaded, claimed by its digest, served back byte for byte" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    const tok = try signedIn(f, &obuf, &reqbuf, "alice", "SN1");
+
+    const note = "SUPERNOTE MARK — a page of ink, stand-in bytes";
+    const md5 = md5Hex(note);
+    const inner = try uploadNote(f, &obuf, &reqbuf, &tok, note);
+    const body = try noteAdd(gpa, &inner, &md5, "u-note");
+    defer gpa.free(body);
+    const id = try addId(f, &obuf, &reqbuf, &tok, "/api/file/add/summary", body);
+    try std.testing.expectEqual(@as(?i64, 1), try refcount(f, &md5));
+
+    // Resent after a lost reply: the upload is already claimed, the digest
+    // holds exactly that note, so it is the same digest and no second reference.
+    try std.testing.expectEqual(id, try addId(f, &obuf, &reqbuf, &tok, "/api/file/add/summary", body));
+    try std.testing.expectEqual(@as(?i64, 1), try refcount(f, &md5));
+
+    const resp = try fetchNote(f, &obuf, &reqbuf, &tok, id);
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings(note, resp.body);
+
+    // The manifest carries the note's md5, which is what the app compares.
+    const hresp = try call(f, &obuf, &reqbuf, &tok, "POST", "/api/file/query/summary/hash", whole);
+    var p = try std.json.parseFromSlice(Hash, gpa, hresp.body, .{ .ignore_unknown_fields = true });
+    defer p.deinit();
+    try std.testing.expectEqualStrings(&md5, p.value.summaryInfoVOList[0].handwriteMd5.?);
+}
+
+test "a replaced note releases the old one; a note that does not match its md5 is refused, storing nothing" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    const tok = try signedIn(f, &obuf, &reqbuf, "alice", "SN1");
+
+    const first = "first ink";
+    const first_md5 = md5Hex(first);
+    const inner1 = try uploadNote(f, &obuf, &reqbuf, &tok, first);
+    const body1 = try noteAdd(gpa, &inner1, &first_md5, "u-rep");
+    defer gpa.free(body1);
+    const id = try addId(f, &obuf, &reqbuf, &tok, "/api/file/add/summary", body1);
+
+    // Redrawn on the tablet: a new upload named in the update.
+    const second = "second ink, redrawn";
+    const second_md5 = md5Hex(second);
+    const inner2 = try uploadNote(f, &obuf, &reqbuf, &tok, second);
+    {
+        const upd = try std.fmt.allocPrint(gpa,
+            \\{{"id":{d},"commentHandwriteName":"6003a8c1725a175c14868baedd7133a1.mark","content":"x","handwriteInnerName":"{s}","handwriteMD5":"{s}","md5Hash":"m2","metadata":"{{\"unique_identifier\":\"u-rep\"}}","sourceType":1}}
+        , .{ id, &inner2, &second_md5 });
+        defer gpa.free(upd);
+        try expectSuccess((try call(f, &obuf, &reqbuf, &tok, "PUT", "/api/file/update/summary", upd)).body);
+    }
+    try std.testing.expectEqual(@as(?i64, 1), try refcount(f, &second_md5));
+    try std.testing.expectEqual(@as(?i64, null), try refcount(f, &first_md5)); // reaped
+    try std.testing.expectEqualStrings(second, (try fetchNote(f, &obuf, &reqbuf, &tok, id)).body);
+
+    // An upload that is not what the md5 says: refused, and nothing changes.
+    const third = "third ink";
+    const inner3 = try uploadNote(f, &obuf, &reqbuf, &tok, third);
+    {
+        const upd = try std.fmt.allocPrint(gpa,
+            \\{{"id":{d},"content":"x","handwriteInnerName":"{s}","handwriteMD5":"{s}","md5Hash":"m3","sourceType":1}}
+        , .{ id, &inner3, &first_md5 });
+        defer gpa.free(upd);
+        try expectFailure((try call(f, &obuf, &reqbuf, &tok, "PUT", "/api/file/update/summary", upd)).body, "HASH_MISMATCH");
+    }
+    try std.testing.expectEqual(@as(?i64, 1), try refcount(f, &second_md5));
+    try std.testing.expectEqualStrings(second, (try fetchNote(f, &obuf, &reqbuf, &tok, id)).body);
+
+    // An update naming an upload that never arrived is refused too.
+    {
+        const upd = try std.fmt.allocPrint(gpa,
+            \\{{"id":{d},"content":"x","handwriteInnerName":"0000000000000000","handwriteMD5":"{s}","md5Hash":"m4","sourceType":1}}
+        , .{ id, &first_md5 });
+        defer gpa.free(upd);
+        try expectFailure((try call(f, &obuf, &reqbuf, &tok, "PUT", "/api/file/update/summary", upd)).body, "NO_CONTENT");
+    }
+}
+
+test "a note's upload can never be filed as a document, and tokens do not cross between files and notes" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var obuf: [16384]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    const tok = try signedIn(f, &obuf, &reqbuf, "alice", "SN1");
+
+    const note = "ink";
+    const md5 = md5Hex(note);
+    const inner = try uploadNote(f, &obuf, &reqbuf, &tok, note);
+    {
+        const fin = try std.fmt.allocPrint(gpa,
+            \\{{"innerName":"{s}","content_hash":"{s}","path":"/Note/","fileName":"x.note","equipmentNo":"SN1","size":"3"}}
+        , .{ &inner, &md5 });
+        defer gpa.free(fin);
+        const resp = try call(f, &obuf, &reqbuf, &tok, "POST", "/api/file/2/files/upload/finish", fin);
+        try expectFailure(resp.body, "NOT_FOUND");
+    }
+    var r = (try f.ctx.db.row("SELECT COUNT(*) FROM files WHERE name = 'x.note';", &.{})).?;
+    defer r.finalize();
+    try std.testing.expectEqual(@as(i64, 0), r.int(0));
+
+    // A note's token for digest N is refused on the file route for id N.
+    const body = try noteAdd(gpa, &inner, &md5, "u-tok");
+    defer gpa.free(body);
+    const id = try addId(f, &obuf, &reqbuf, &tok, "/api/file/add/summary", body);
+    var tbuf: [256]u8 = undefined;
+    const t = blk: {
+        const b = try std.fmt.allocPrint(gpa, "{{\"id\":{d}}}", .{id});
+        defer gpa.free(b);
+        const resp = try call(f, &obuf, &reqbuf, &tok, "POST", "/api/file/download/summary", b);
+        var p = try std.json.parseFromSlice(struct { url: []const u8 }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        const q = std.mem.indexOf(u8, p.value.url, "?t=").?;
+        const v = p.value.url[q + 3 ..];
+        @memcpy(tbuf[0..v.len], v);
+        break :blk tbuf[0..v.len];
+    };
+    var pbuf: [256]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&pbuf, "/oss/get/{d}?t={s}", .{ id, t });
+    const resp = try roundtrip(&f.ctx, try buildRequest(&reqbuf, "GET", file_path, &.{}, ""), &obuf);
+    try std.testing.expectEqual(@as(u16, 403), resp.status);
+}

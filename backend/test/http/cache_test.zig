@@ -120,6 +120,8 @@ const non_immutable_routes = [_][]const u8{
     "/api/file/delete/summary/group",
     "/api/file/delete/summary/tag",
     "/api/file/download/summary",
+    "/api/file/upload/apply/summary",
+    "/oss/summary/:id",
     "/api/file/schedule/group",
     "/api/file/schedule/group/:id",
     "/api/file/schedule/group/all",

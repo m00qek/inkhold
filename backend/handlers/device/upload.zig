@@ -321,6 +321,9 @@ pub fn uploadFinish(ctx: *Context, req: *Request, params: Params) anyerror!void 
 
     const session = (files.uploadSession(a, caller.user_id, in.innerName) catch return serverError(ctx, req)) orelse
         return fail(ctx, req, .ok, "NOT_FOUND", "no such upload");
+    // A digest's handwritten note is claimed by its digest, never filed.
+    if (std.mem.eql(u8, session.path, filesmod.Files.digest_upload_path))
+        return fail(ctx, req, .ok, "NOT_FOUND", "no such upload");
     const blob_md5 = session.blob_md5 orelse return fail(ctx, req, .ok, "NO_CONTENT", "upload not received");
 
     // On mismatch, commit nothing; the orphan blob goes to the sweep.

@@ -21,6 +21,8 @@ const context = @import("../../http/context.zig");
 const json = @import("../../http/json.zig");
 const reply = @import("../../http/reply.zig");
 const digest = @import("../../services/digest.zig");
+const filesmod = @import("../../services/files.zig");
+const blobstore = @import("../../store/blobs.zig");
 
 const Context = context.Context;
 const Request = router.Request;
@@ -171,11 +173,7 @@ pub fn add(ctx: *Context, req: *Request, params: Params) anyerror!void {
     if (!ctx.config.digest_sync) return refuse(ctx, req);
     var parsed = json.readBody(DigestWire, ctx.gpa, req) catch return badBody(ctx, req);
     defer parsed.deinit();
-    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
-    defer arena.deinit();
-    const d = digestOf(arena.allocator(), parsed.value) orelse return badBody(ctx, req);
-    const id = digest.addDigest(ctx.db, ctx.caller.?.user_id, d, nowMs(ctx)) catch return serverError(ctx, req);
-    try json.respond(ctx.gpa, req, .ok, IdVO{ .id = id }, null);
+    return store(ctx, req, parsed.value, null);
 }
 
 /// PUT /api/file/update/summary
@@ -185,14 +183,94 @@ pub fn update(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var parsed = json.readBody(DigestWire, ctx.gpa, req) catch return badBody(ctx, req);
     defer parsed.deinit();
     const id = idOf(parsed.value.id) orelse return badBody(ctx, req);
+    return store(ctx, req, parsed.value, id);
+}
+
+/// An add (`id` null) or an update, with its handwritten note, in one
+/// transaction: the note's upload is claimed (or the digest's current note
+/// kept) and a replaced note's reference released together with the row.
+fn store(ctx: *Context, req: *Request, w: DigestWire, update_id: ?u64) anyerror!void {
+    const user_id = ctx.caller.?.user_id;
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();
-    const d = digestOf(arena.allocator(), parsed.value) orelse return badBody(ctx, req);
-    // Gone on the server meanwhile: the app's next sync finds it missing from
-    // the manifest, and an edited digest is then sent again as new.
-    const found = digest.putDigest(ctx.db, ctx.caller.?.user_id, id, d, nowMs(ctx)) catch return serverError(ctx, req);
-    if (!found) return notFound(ctx, req);
+    const a = arena.allocator();
+    var d = digestOf(a, w) orelse return badBody(ctx, req);
+    const now = nowMs(ctx);
+
+    ctx.db.exec("BEGIN IMMEDIATE;") catch return serverError(ctx, req);
+    var committed = false;
+    defer if (!committed) ctx.db.exec("ROLLBACK;") catch {};
+
+    // The digest this lands on, if it exists: the updated one, or the live one
+    // a resent add (same uid) folds into.
+    const target: ?u64 = update_id orelse if (d.uid) |uid|
+        (digest.liveDigestId(ctx.db, user_id, uid) catch return serverError(ctx, req))
+    else
+        null;
+    const old: ?digest.Handwriting = if (target) |t|
+        (digest.handwriting(ctx.db, a, user_id, t) catch return serverError(ctx, req))
+    else
+        null;
+    if (update_id != null and old == null) return notFound(ctx, req);
+
+    switch (resolveHandwriting(ctx, a, user_id, &d, w, old) catch return serverError(ctx, req)) {
+        .ok => {},
+        .upload_missing => return fail(ctx, req, .ok, "NO_CONTENT", "the handwritten note was not uploaded"),
+        .mismatch => return fail(ctx, req, .ok, "HASH_MISMATCH", "the handwritten note does not match its md5"),
+    }
+    var remove: ?[]const u8 = null;
+    if (old) |o| if (o.inner_name != null) if (o.md5) |old_md5| {
+        const kept = d.handwrite_inner_name != null and d.handwrite_md5 != null and std.mem.eql(u8, d.handwrite_md5.?, old_md5);
+        if (!kept) {
+            if (ctx.files.releaseBlob(old_md5) catch return serverError(ctx, req)) remove = old_md5;
+        }
+    };
+
+    var id: u64 = undefined;
+    if (update_id) |uid| {
+        if (!(digest.putDigest(ctx.db, user_id, uid, d, now) catch return serverError(ctx, req))) return notFound(ctx, req);
+        id = uid;
+    } else {
+        id = digest.addDigest(ctx.db, user_id, d, now) catch return serverError(ctx, req);
+    }
+    ctx.db.exec("COMMIT;") catch return serverError(ctx, req);
+    committed = true;
+    if (remove) |m| ctx.files.removeBlobFiles(m);
+
+    if (update_id == null)
+        return json.respond(ctx.gpa, req, .ok, IdVO{ .id = id }, null);
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
+}
+
+const HandwritingOutcome = enum { ok, upload_missing, mismatch };
+
+/// Decides what `d` stores for its handwritten note. A row holds a reference
+/// to the note's blob exactly when `handwrite_inner_name` is set, which only a
+/// claimed upload does; anything else is the md5 as the app sent it.
+fn resolveHandwriting(ctx: *Context, a: std.mem.Allocator, user_id: u64, d: *digest.Digest, w: DigestWire, old: ?digest.Handwriting) !HandwritingOutcome {
+    const sent_md5 = w.handwriteMD5;
+    const held = if (old) |o| (if (o.inner_name != null) o else null) else null;
+    const keeps_held = held != null and sent_md5 != null and held.?.md5 != null and std.ascii.eqlIgnoreCase(held.?.md5.?, sent_md5.?);
+
+    const inner = w.handwriteInnerName orelse "";
+    if (inner.len > 0) {
+        if (try ctx.files.claimUploadedBlob(a, user_id, inner)) |md5| {
+            if (sent_md5) |m| if (!std.ascii.eqlIgnoreCase(m, md5)) return .mismatch;
+            d.handwrite_md5 = md5;
+            d.handwrite_inner_name = inner;
+            return .ok;
+        }
+        // No such upload: a resend after the claim, when the digest already
+        // holds exactly this note; otherwise the upload never arrived.
+        if (!keeps_held) return .upload_missing;
+    }
+    if (keeps_held) {
+        d.handwrite_md5 = held.?.md5;
+        d.handwrite_inner_name = held.?.inner_name;
+    } else {
+        d.handwrite_inner_name = null;
+    }
+    return .ok;
 }
 
 /// DELETE /api/file/delete/summary
@@ -271,12 +349,110 @@ pub fn query(ctx: *Context, req: *Request, params: Params) anyerror!void {
 }
 
 /// POST /api/file/download/summary: where to fetch a digest's handwritten
-/// note. Phase 1 stores none, so there is nothing to fetch yet.
+/// note, as a short-lived token URL (as `download_v3` gives for files).
 pub fn download(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     if (!ctx.config.digest_sync) return refuse(ctx, req);
-    return notFound(ctx, req);
+    const user_id = ctx.caller.?.user_id;
+    var host_buf: [256]u8 = undefined;
+    const host = router.headerCopy(req, "host", &host_buf);
+    var parsed = json.readBody(IdReq, ctx.gpa, req) catch return badBody(ctx, req);
+    defer parsed.deinit();
+    const id = idOf(parsed.value.id) orelse return badBody(ctx, req);
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const hw = (digest.handwriting(ctx.db, a, user_id, id) catch return serverError(ctx, req)) orelse return notFound(ctx, req);
+    if (hw.inner_name == null or hw.md5 == null) return notFound(ctx, req);
+    const tokens = ctx.download_tokens orelse return serverError(ctx, req);
+    const tok = tokens.mint(ctx.io, id | token_kind_digest, user_id, nowMs(ctx)) catch return serverError(ctx, req);
+    const scheme = if (ctx.config.tls.enabled) "https" else "http";
+    const url = try std.fmt.allocPrint(a, "{s}://{s}/oss/summary/{d}?t={s}", .{ scheme, host, id, &tok });
+    try json.respond(ctx.gpa, req, .ok, struct { success: bool = true, url: []const u8 }{ .url = url }, null);
 }
+
+/// A download token for digest `id` is minted for `id | token_kind_digest`,
+/// so it can never fetch the file with the same number, nor a file's token
+/// a digest's note (`download_tokens` matches the id exactly).
+const token_kind_digest: u64 = 1 << 62;
+
+/// GET /oss/summary/:id?t=<token>: a digest's handwritten note. `.public`,
+/// authorized by the token `download` minted; any failure is 403 (a 401 logs
+/// the device out).
+pub fn serveNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    const id = reply.pathId(params) orelse return reply.notFound(req);
+    const tokens = ctx.download_tokens orelse return reply.forbidden(req);
+    const t = reply.queryParam(req.head.target, "t") orelse return reply.forbidden(req);
+    const user_id = tokens.lookup(ctx.io, t, id | token_kind_digest, nowMs(ctx)) orelse return reply.forbidden(req);
+
+    var md5_buf: [64]u8 = undefined;
+    const md5: []const u8 = blk: {
+        var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer arena.deinit();
+        ctx.lockDb();
+        defer ctx.unlockDb();
+        const hw = (digest.handwriting(ctx.db, arena.allocator(), user_id, id) catch return serverError(ctx, req)) orelse
+            return reply.notFound(req);
+        const m = hw.md5 orelse return reply.notFound(req);
+        if (hw.inner_name == null or m.len > md5_buf.len) return reply.notFound(req);
+        @memcpy(md5_buf[0..m.len], m);
+        break :blk md5_buf[0..m.len];
+    };
+
+    var file = ctx.files.blobs.open(md5) catch return reply.notFound(req);
+    defer file.close(ctx.io);
+    const size = ctx.files.blobs.sizeOf(md5) catch return reply.notFound(req);
+    var cd_buf: [96]u8 = undefined;
+    const cd = std.fmt.bufPrint(&cd_buf, "attachment; filename=\"{s}.mark\"", .{md5}) catch return serverError(ctx, req);
+
+    var wbuf: [blobstore.chunk_len]u8 = undefined;
+    var body = req.respondStreaming(&wbuf, .{
+        .content_length = size,
+        .respond_options = .{ .extra_headers = &.{
+            .{ .name = "content-type", .value = "application/octet-stream" },
+            .{ .name = "content-disposition", .value = cd },
+        } },
+    }) catch return;
+    var rbuf: [blobstore.chunk_len]u8 = undefined;
+    var fr = file.reader(ctx.io, &rbuf);
+    fr.interface.streamExact64(&body.writer, size) catch return error.StreamTruncated;
+    body.end() catch {};
+}
+
+/// POST /api/file/upload/apply/summary: a place to upload a handwritten note.
+/// The app then POSTs it (multipart) to the returned URL, the same
+/// `/oss/put` files use, and names the upload in its add or update.
+pub fn uploadApply(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    if (!ctx.config.digest_sync) return refuse(ctx, req);
+    const user_id = ctx.caller.?.user_id;
+    var host_buf: [256]u8 = undefined;
+    const host = router.headerCopy(req, "host", &host_buf);
+    var parsed = json.readBody(struct { fileName: ?[]const u8 = null, equipmentNo: ?[]const u8 = null }, ctx.gpa, req) catch
+        return badBody(ctx, req);
+    defer parsed.deinit();
+    const name = parsed.value.fileName orelse "note.mark";
+    if (name.len == 0 or name.len > 255) return badBody(ctx, req);
+
+    var raw: [8]u8 = undefined;
+    ctx.io.random(&raw);
+    const inner = std.fmt.bytesToHex(raw, .lower);
+    ctx.files.createUploadSession(user_id, &inner, filesmod.Files.digest_upload_path, name, max_note_bytes) catch
+        return serverError(ctx, req);
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const scheme = if (ctx.config.tls.enabled) "https" else "http";
+    const url = try std.fmt.allocPrint(arena.allocator(), "{s}://{s}/oss/put/{s}", .{ scheme, host, &inner });
+    try json.respond(ctx.gpa, req, .ok, struct {
+        success: bool = true,
+        innerName: []const u8,
+        fullUploadUrl: []const u8,
+        partUploadUrl: []const u8,
+    }{ .innerName = &inner, .fullUploadUrl = url, .partUploadUrl = url }, null);
+}
+
+/// A handwritten note is one page of ink; this only bounds junk.
+const max_note_bytes: u64 = 16 * 1024 * 1024;
 
 // ---- categories ----
 

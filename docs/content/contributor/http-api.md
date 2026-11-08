@@ -9,7 +9,7 @@ extra:
 
 # HTTP API
 
-Every route Inkhold serves, 121 of them, in the order of the route table.
+Every route Inkhold serves, 123 of them, in the order of the route table.
 **Who** is the caller's scope: `public` needs no session, `device` is a
 tablet, `controlplane` the browser app, `pending` a first sign-in that
 must still change its password. A caller outside a route's scopes gets 403.
@@ -57,6 +57,7 @@ The device routes' behaviour is in [Device protocol](@/contributor/device-protoc
 | PUT | `/api/file/update/summary` | device | `device.digestUpdate` |  |
 | DELETE | `/api/file/delete/summary` | device | `device.digestDelete` |  |
 | POST | `/api/file/download/summary` | device | `device.digestDownload` | read-only |
+| POST | `/api/file/upload/apply/summary` | device | `device.digestUploadApply` |  |
 | POST | `/api/file/query/summary/group` | device | `device.digestGroupQuery` | read-only |
 | POST | `/api/file/add/summary/group` | device | `device.digestGroupAdd` |  |
 | PUT | `/api/file/update/summary/group` | device | `device.digestGroupUpdate` |  |
@@ -74,6 +75,7 @@ The device routes' behaviour is in [Device protocol](@/contributor/device-protoc
 | POST | `/api/file/3/files/copy_v3` | device | `device.copyV3` |  |
 | POST | `/api/file/2/files/create_folder_v2` | device | `device.createFolderV2` |  |
 | GET | `/oss/get/:id` | public | `device.ossGet` | streams |
+| GET | `/oss/summary/:id` | public | `device.digestServeNote` | streams |
 | POST | `/api/file/3/files/upload/apply` | device | `device.uploadApply` |  |
 | POST | `/oss/put/:innerName` | device | `device.ossPut` | streams |
 | POST | `/api/file/2/files/upload/finish` | device | `device.uploadFinish` |  |

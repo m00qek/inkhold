@@ -82,6 +82,8 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
         // whole download.
         "/api/controlplane/search-index/stream",
         "/api/controlplane/text/:md5",
+        // A digest's handwritten note: streamed bytes, like `/oss/get/:id`.
+        "/oss/summary/:id",
     };
     var found: usize = 0;
     for (app.routes) |r| {

@@ -18,6 +18,7 @@ const filesmod = @import("services/files.zig");
 const deferred = @import("services/deferred.zig");
 const pendingsvc = @import("services/pending.zig");
 const settingsmod = @import("services/settings.zig");
+const digestmod = @import("services/digest.zig");
 const ratelimit = @import("http/ratelimit.zig");
 const dltokens = @import("http/download_tokens.zig");
 const eventstreams = @import("http/event_streams.zig");
@@ -171,6 +172,20 @@ fn sweepFailed(what: []const u8, e: anyerror) usize {
     return 0;
 }
 
+/// Purges digests deleted before `before_ms` and releases their notes' blobs.
+fn purgeDigests(db: sqlite.Db, files_svc: filesmod.Files, before_ms: i64) !usize {
+    var arena = std.heap.ArenaAllocator.init(files_svc.gpa);
+    defer arena.deinit();
+    try db.exec("BEGIN IMMEDIATE;");
+    errdefer db.exec("ROLLBACK;") catch {};
+    const held = try digestmod.purgeDeleted(db, arena.allocator(), before_ms);
+    var remove: std.ArrayList([]const u8) = .empty;
+    for (held) |md5| if (try files_svc.releaseBlob(md5)) try remove.append(arena.allocator(), md5);
+    try db.exec("COMMIT;");
+    for (remove.items) |md5| files_svc.removeBlobFiles(md5);
+    return held.len;
+}
+
 /// Every startup housekeeping sweep, as one unit so the set can be tested. All
 /// best-effort: warn and let the server come up.
 fn startupSweeps(io: Io, db: sqlite.Db, svc: *authsvc.Service, files_svc: filesmod.Files) void {
@@ -188,6 +203,19 @@ fn startupSweeps(io: Io, db: sqlite.Db, svc: *authsvc.Service, files_svc: filesm
             break :sweep files_svc.sweepBinBefore(cutoff) catch |e| sweepFailed("recycle-bin retention", e);
         };
         if (purged > 0) std.log.info("recycle bin: purged {d} expired entr{s}", .{ purged, if (purged == 1) "y" else "ies" });
+    }
+
+    // Deleted digests go after the bin's retention too, releasing the
+    // handwritten notes they held.
+    {
+        const set = settingsmod.Settings.init(io, db);
+        const freed = sweep: {
+            const retention = set.binRetention() catch |e| break :sweep sweepFailed("digest retention", e);
+            const now = std.Io.Clock.real.now(io).toSeconds();
+            const cutoff = settingsmod.sweepCutoff(now, retention) orelse break :sweep 0;
+            break :sweep purgeDigests(db, files_svc, cutoff * 1000) catch |e| sweepFailed("digest retention", e);
+        };
+        if (freed > 0) std.log.info("digests: released {d} handwritten note{s}", .{ freed, if (freed == 1) "" else "s" });
     }
 
     // Abandoned uploads (hash mismatch, quota refusal, a stopped client) leave
@@ -375,4 +403,32 @@ pub fn loadCredKey(gpa: std.mem.Allocator, io: Io, path: []const u8) !?[password
     var key: [passwordmod.cred_key_len]u8 = undefined;
     @memcpy(&key, bytes);
     return key;
+}
+
+test "an expired deleted digest is purged and its handwritten note's blob released" {
+    const testing = std.testing;
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try schema.migrate(db);
+    try db.exec("INSERT INTO users(id, email, password_md5, cred_enc, is_admin, created_at) VALUES(1,'a@h','','',1,0);");
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const store = try blobstore.BlobStore.init(testing.io, tmp.dir);
+    const thumbs_dir = try tmp.dir.createDirPathOpen(testing.io, "thumbs", .{});
+    const thumbs = try thumbstore.ThumbStore.init(testing.io, thumbs_dir);
+    const files_svc = filesmod.Files.init(testing.allocator, testing.io, db, store, thumbs);
+
+    const md5 = "245354713d4c121a2368d9295f6379ca";
+    try db.exec("INSERT INTO blobs(md5, size, refcount, created_at) VALUES('245354713d4c121a2368d9295f6379ca', 3, 1, 0);");
+    // Deleted long ago, holding the note; and one deleted just now, kept.
+    try db.exec(
+        \\INSERT INTO digests(user_id, handwrite_md5, handwrite_inner_name, created_at, updated_at, deleted, deleted_at)
+        \\VALUES (1, '245354713d4c121a2368d9295f6379ca', 'abcd', 0, 0, 1, 1000),
+        \\       (1, NULL, NULL, 0, 0, 1, 900000);
+    );
+    try testing.expectEqual(@as(usize, 1), try purgeDigests(db, files_svc, 5000));
+    var left = (try db.row("SELECT COUNT(*) FROM digests;", &.{})).?;
+    defer left.finalize();
+    try testing.expectEqual(@as(i64, 1), left.int(0));
+    try testing.expectEqual(@as(?sqlite.Row, null), try db.row("SELECT 1 FROM blobs WHERE md5 = ?1;", &.{.{ .text = md5 }}));
 }

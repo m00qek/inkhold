@@ -290,6 +290,8 @@ pub const digestTagAdd = device_digest.tagAdd;
 pub const digestTagUpdate = device_digest.tagUpdate;
 pub const digestTagDelete = device_digest.tagDelete;
 pub const digestTagQuery = device_digest.tagQuery;
+pub const digestUploadApply = device_digest.uploadApply;
+pub const digestServeNote = device_digest.serveNote;
 
 test {
     _ = device_files;

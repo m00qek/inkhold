@@ -58,6 +58,7 @@ pub const routes = [_]router.Route{
     .{ .method = .PUT, .path = "/api/file/update/summary", .scopes = &.{.device}, .handler = device.digestUpdate },
     .{ .method = .DELETE, .path = "/api/file/delete/summary", .scopes = &.{.device}, .handler = device.digestDelete },
     .{ .method = .POST, .path = "/api/file/download/summary", .scopes = &.{.device}, .handler = device.digestDownload, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/upload/apply/summary", .scopes = &.{.device}, .handler = device.digestUploadApply },
     .{ .method = .POST, .path = "/api/file/query/summary/group", .scopes = &.{.device}, .handler = device.digestGroupQuery, .read_only = true },
     .{ .method = .POST, .path = "/api/file/add/summary/group", .scopes = &.{.device}, .handler = device.digestGroupAdd },
     .{ .method = .PUT, .path = "/api/file/update/summary/group", .scopes = &.{.device}, .handler = device.digestGroupUpdate },
@@ -86,6 +87,8 @@ pub const routes = [_]router.Route{
     // The /oss byte routes stream multi-MB bodies and lock the DB only around their
     // own DB calls. Set `manual_db_lock` only on a handler audited to do that.
     .{ .method = .GET, .path = "/oss/get/:id", .scopes = &.{.public}, .handler = device.ossGet, .manual_db_lock = true },
+    // A digest's handwritten note, by the token `download/summary` mints.
+    .{ .method = .GET, .path = "/oss/summary/:id", .scopes = &.{.public}, .handler = device.digestServeNote, .manual_db_lock = true },
     // apply reserves an upload and returns an /oss/put URL; finish commits it. The
     // device sends x-access-token to all three.
     .{ .method = .POST, .path = "/api/file/3/files/upload/apply", .scopes = &.{.device}, .handler = device.uploadApply },
