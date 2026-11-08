@@ -32,6 +32,12 @@
   --toc-w: 15rem;
   color-scheme: light dark;
 }
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
 
 * {
   box-sizing: border-box;
@@ -88,6 +94,7 @@ a {
   text-transform: none;
 }
 .manuals {
+  flex: 1;
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-4);
@@ -103,6 +110,41 @@ a {
   text-decoration: underline;
   text-decoration-color: var(--accent);
   text-decoration-thickness: 2px;
+}
+
+/* Light or dark: the app's quiet glyph button. */
+.theme {
+  display: inline-grid;
+  place-items: center;
+  align-self: center;
+  inline-size: var(--hit-target-min);
+  block-size: var(--hit-target-min);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.theme[hidden] {
+  display: none;
+}
+.theme:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+.theme svg {
+  inline-size: 18px;
+  block-size: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.theme[aria-pressed="false"] .theme__sun,
+.theme[aria-pressed="true"] .theme__moon {
+  display: none;
 }
 
 /* ---- the manual's pages beside the page ---- */
@@ -276,11 +318,17 @@ main:focus {
 .diagram__dark {
   display: none;
 }
+:root[data-theme="dark"] .diagram__light {
+  display: none;
+}
+:root[data-theme="dark"] .diagram__dark {
+  display: block;
+}
 @media (prefers-color-scheme: dark) {
-  .diagram__light {
+  :root:not([data-theme="light"]) .diagram__light {
     display: none;
   }
-  .diagram__dark {
+  :root:not([data-theme="light"]) .diagram__dark {
     display: block;
   }
 }

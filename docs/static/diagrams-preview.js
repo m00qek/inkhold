@@ -12,7 +12,8 @@
     const base = new URL(`diagrams/${h}`, document.querySelector('link[href$="site.css"]').href);
     const figure = document.createElement("figure");
     figure.className = "diagram";
-    figure.innerHTML = `<picture><source media="(prefers-color-scheme: dark)" srcset="${base}-dark.svg"><img alt="" src="${base}-light.svg"></picture>`;
+    // Both, as a built page has them: the theme (or the toggle) shows one.
+    figure.innerHTML = `<img class="diagram__light" alt="" src="${base}-light.svg"><img class="diagram__dark" alt="" src="${base}-dark.svg">`;
     code.closest("pre").replaceWith(figure);
   }
 })();
