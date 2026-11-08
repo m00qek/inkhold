@@ -67,6 +67,20 @@ it:
 
 The build turns it into the light and dark versions; the page's theme shows one.
 
+The tablet's own screens are the one exception: no script reaches them. With
+the tablet on USB, open the screen and capture it over `adb`, cropped to the
+part that matters, in grey:
+
+```sh
+adb exec-out screencap -p > full.png
+magick full.png -crop 999x440+405+0 +repage -colorspace Gray -strip \
+  docs/static/screenshots/tablet-private-cloud.png
+```
+
+A name starting `tablet-` is one picture, shown in either theme in the
+tablet's bezel. Only open screens to look at them: don't log out, change a
+setting or start a sync on a tablet that holds real notes.
+
 ## Generated pages
 
 **config.zon settings**, **Command line** and **HTTP API** are written by

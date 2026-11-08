@@ -25,8 +25,8 @@ certificate and its key in [config.zon](@/manual/configuration.md):
 },
 ```
 
-Restart Inkhold, and use `https://` in the tablet's server address and in the
-browser.
+Restart Inkhold. On the tablet's sign-in screen, turn on **Enable HTTPS**; in
+the browser, use `https://`.
 
 Leave `cipher_suites` empty. Inkhold then picks what is cheap on its own
 processor: AES-GCM where the processor has AES instructions, ChaCha20 where it

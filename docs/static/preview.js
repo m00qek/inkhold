@@ -24,6 +24,13 @@
     const name = img.getAttribute("src").replace(/^.*\/screenshots\//, "").replace(/\.png$/, "");
     const figure = document.createElement("figure");
     figure.className = "shot";
+    // A tablet- shot is the e-ink screen: one picture for either theme.
+    if (name.startsWith("tablet-")) {
+      figure.classList.add("shot--tablet");
+      figure.innerHTML = `<img alt="${img.alt}" src="${new URL(`screenshots/${name}.png`, root)}" loading="lazy">`;
+      img.parentElement.replaceWith(figure);
+      continue;
+    }
     const one = (theme) => `<img class="shot__${theme}" alt="${img.alt}" src="${new URL(`screenshots/${name}-${theme}.png`, root)}" loading="lazy">`;
     figure.innerHTML = one("light") + one("dark");
     const light = figure.querySelector(".shot__light");

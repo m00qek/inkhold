@@ -784,6 +784,14 @@ main:focus {
   border-width: 4px;
   border-color: color-mix(in srgb, var(--ink) 80%, var(--desk));
 }
+/* The tablet's e-ink screen: the same in either theme, in the device's dark bezel. */
+.prose .shot--tablet {
+  max-inline-size: 30rem;
+}
+.shot--tablet {
+  border-width: 10px;
+  border-color: color-mix(in srgb, var(--ink) 80%, var(--desk));
+}
 /* One theme's picture: the hidden one, lazy, is never fetched. */
 .shot > .shot__dark {
   display: none;

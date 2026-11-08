@@ -14,17 +14,22 @@ address, for example `http://192.168.1.20:8089`, and an Inkhold account.
 
 1. **Copy the tablet's folders to another computer first.** Sync runs both ways,
    and Inkhold is in beta.
-2. On the tablet, open **Settings → Supernote Cloud / Private Cloud**, and enter
-   Inkhold's address as the server address.
-3. Sign in with your Inkhold email and password.
-4. If the tablet asks how to treat its digest and to-do data, choose
+2. On the tablet, open **Settings → Drive**, and next to **Private Cloud** tap
+   **Log in**.
+3. After `http://`, type the address without its port, `192.168.1.20`. Type
+   the port, `8089`, in **Port**. Leave **Enable HTTPS** off, unless you set
+   Inkhold up [behind HTTPS](@/manual/https.md). Tap **Connect**.
+4. Enter your Inkhold email and password, and tap **Log in**.
+5. If the tablet asks how to treat its digest and to-do data, choose
    **Retain locally**. **Delete locally** removes them from the tablet.
-5. Sync from the tablet's top bar. Your notebooks appear in the library in the
+6. Sync from the tablet's top bar. Your notebooks appear in the library in the
    browser.
 
-To sync without thinking about it, turn on **Settings → Drive → Private Cloud
-→ Auto Sync**: the tablet then sends each change as you make it, and receives
-what you change in the browser within a second or two.
+To sync without thinking about it, open **Settings → Drive → Private Cloud**
+and turn on **Auto Sync**. The tablet then sends each change as you make it,
+and receives what you change in the browser within a second or two.
+
+![The tablet's Private Cloud screen: Auto Sync, off, and Select Folders to Sync.](screenshots/tablet-private-cloud.png)
 
 ## When the server is new or restored
 

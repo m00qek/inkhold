@@ -31,8 +31,8 @@ It is a backup on the old machine and a restore on the new one.
    sudo systemctl start inkhold
    ```
 
-6. If the address changed, enter the new one on each tablet
-   (**Settings → Supernote Cloud / Private Cloud**). Either way, each tablet
+6. If the address changed, log each tablet out (**Settings → My Account → Log
+   out**) and [sign it in](@/manual/point-supernote.md) at the new one. Either way, each tablet
    notices the restored library at its next sign-in and syncs from scratch,
    uploading what the server lacks rather than deleting anything. If it asks
    how to treat its digest and to-do data, choose **Retain locally**.

@@ -53,8 +53,9 @@ The library is empty: nothing has synced yet.
 
 ## 4. Point the tablet at it
 
-On the tablet, open **Settings → Supernote Cloud / Private Cloud**. Enter
-`http://<that address>:8089` as the server address and sign in with
+On the tablet, open **Settings → Drive**, and next to **Private Cloud** tap
+**Log in**. After `http://`, type the computer's address; in **Port**, type
+`8089`; leave **Enable HTTPS** off. Tap **Connect**, then sign in with
 `admin@home.lan` and your new password. If the tablet asks how to treat its
 digest and to-do data, choose **Retain locally**.
 

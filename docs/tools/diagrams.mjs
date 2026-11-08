@@ -206,17 +206,23 @@ function pngSize(path) {
   return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
 }
 
-/** The screenshot figure: both themes, the page's shows one (site.css `.shot`). */
+/**
+ * The screenshot figure: both themes, the page's shows one (site.css `.shot`).
+ * A `tablet-` shot is the e-ink screen, one picture for either theme, taken
+ * by hand over adb (docs/content/contributor/write-documentation.md).
+ */
 function shotFigure(publicDir, htmlFile, name, alt) {
-  const light = join(publicDir, "screenshots", `${name}-light.png`);
-  const dark = join(publicDir, "screenshots", `${name}-dark.png`);
-  if (!existsSync(light) || !existsSync(dark)) throw new Error(`${htmlFile}: no screenshot ${name} (npm run screenshots in webapp/)`);
-  const { w, h } = pngSize(light);
+  const tablet = name.startsWith("tablet-");
+  const themes = tablet ? [""] : ["-light", "-dark"];
+  const paths = themes.map((t) => join(publicDir, "screenshots", `${name}${t}.png`));
+  if (!paths.every(existsSync)) throw new Error(`${htmlFile}: no screenshot ${name} (npm run screenshots in webapp/)`);
+  const { w, h } = pngSize(paths[0]);
   // Relative to the page, so the site works under any base path.
   const depth = htmlFile.slice(publicDir.length).split("/").filter(Boolean).length - 1;
   const up = "../".repeat(depth);
-  const img = (theme) => `<img class="shot__${theme}" src="${up}screenshots/${name}-${theme}.png" alt="${alt}" width="${w}" height="${h}" loading="lazy" decoding="async">`;
-  return `<figure class="shot${h > w ? " shot--phone" : ""}">${img("light")}${img("dark")}</figure>`;
+  const img = (t) => `<img${t ? ` class="shot__${t.slice(1)}"` : ""} src="${up}screenshots/${name}${t}.png" alt="${alt}" width="${w}" height="${h}" loading="lazy" decoding="async">`;
+  const kind = tablet ? " shot--tablet" : h > w ? " shot--phone" : "";
+  return `<figure class="shot${kind}">${themes.map(img).join("")}</figure>`;
 }
 const unescape = (s) =>
   s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
