@@ -4,7 +4,7 @@ name: Docs
 # (docs/contributor/documentation-rules.md).
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "pre-release" ]
     paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", ".github/workflows/docs.yaml" ]
   pull_request:
     paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", ".github/workflows/docs.yaml" ]

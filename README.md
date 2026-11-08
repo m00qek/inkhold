@@ -106,16 +106,16 @@ either way.
 
 ### Download a binary
 
-Rolling builds from `main`, statically linked against musl — they drop into any
+Rolling builds from `pre-release`, statically linked against musl — they drop into any
 Linux system without glibc version trouble.
 
-- **[x86_64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86_64-linux-musl.zip)**
+- **[x86_64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/pre-release/inkhold-x86_64-linux-musl.zip)**
   — modern PCs and servers, cloud VMs, Intel/AMD Synology NAS (the Plus series).
-- **[aarch64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-aarch64-linux-musl.zip)**
+- **[aarch64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/pre-release/inkhold-aarch64-linux-musl.zip)**
   — Raspberry Pi 3, 4, 400 and 5 **on a 64-bit OS**, ARM Synology NAS, ARM cloud servers.
-- **[armhf](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-arm-linux-musleabihf.zip)**
+- **[armhf](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/pre-release/inkhold-arm-linux-musleabihf.zip)**
   — older Pis (1, 2, the original Zero), and newer ones still running a 32-bit OS.
-- **[x86](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86-linux-musl.zip)**
+- **[x86](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/pre-release/inkhold-x86-linux-musl.zip)**
   — legacy 32-bit Intel/AMD machines and old thin clients.
 
 Extract the `.zip`, and put a config beside the binary:
@@ -165,7 +165,7 @@ docker run -d --name inkhold -p 8089:8089 \
   ghcr.io/m00qek/inkhold-beta:latest
 ```
 
-`:latest` follows `main`. To pin a build, use the commit SHA as the tag.
+`:latest` follows `pre-release`. To pin a build, use the commit SHA as the tag.
 
 ### Build from source
 

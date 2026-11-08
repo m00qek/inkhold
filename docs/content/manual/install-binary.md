@@ -15,10 +15,10 @@ Install the release binary and run it as a service.
 
    | Build | For |
    |---|---|
-   | [x86_64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86_64-linux-musl.zip) | PCs, servers, cloud machines, Intel and AMD Synology NAS |
-   | [aarch64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-aarch64-linux-musl.zip) | Raspberry Pi 3, 4, 400 and 5 on a 64-bit system, ARM NAS and servers |
-   | [armhf](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-arm-linux-musleabihf.zip) | Raspberry Pi 1, 2 and the original Zero, and newer Pis on a 32-bit system |
-   | [x86](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/main/inkhold-x86-linux-musl.zip) | Old 32-bit PCs and thin clients |
+   | [x86_64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/pre-release/inkhold-x86_64-linux-musl.zip) | PCs, servers, cloud machines, Intel and AMD Synology NAS |
+   | [aarch64](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/pre-release/inkhold-aarch64-linux-musl.zip) | Raspberry Pi 3, 4, 400 and 5 on a 64-bit system, ARM NAS and servers |
+   | [armhf](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/pre-release/inkhold-arm-linux-musleabihf.zip) | Raspberry Pi 1, 2 and the original Zero, and newer Pis on a 32-bit system |
+   | [x86](https://nightly.link/m00qek/inkhold-beta/workflows/ci.yaml/pre-release/inkhold-x86-linux-musl.zip) | Old 32-bit PCs and thin clients |
 
    Each is a single file with nothing to install beside it.
 
