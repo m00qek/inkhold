@@ -57,9 +57,10 @@ job. A real change updates that test in the same commit.
 
 ## 5. Get it ready
 
-A commit says what changed for the person using the app, in one line, then why
-in the body. Run the whole suite before you send it
-([Run the tests](@/contributor/run-the-tests.md)).
+A commit's title says what changed, as a
+[Conventional Commit](@/contributor/commit-messages.md):
+`fix(webapp): name the To-Do button for what it does`. Run the whole suite
+before you send it ([Run the tests](@/contributor/run-the-tests.md)).
 
 ## Undo it
 

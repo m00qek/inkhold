@@ -1,0 +1,34 @@
+name: Commits
+
+# Every pushed or proposed commit has a Conventional Commit title under 120
+# characters (docs/content/contributor/commit-messages.md). Its own workflow,
+# with no path filter: a docs-only push is checked too.
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  titles:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The commits this push or pull request adds. A new branch, or a force
+      # push whose old head is gone, has no usable "before": check the head.
+      - name: Check commit titles
+        env:
+          BEFORE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          AFTER: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            make commit-check RANGE="$BEFORE..$AFTER"
+          else
+            make commit-check RANGE="$AFTER~1..$AFTER"
+          fi

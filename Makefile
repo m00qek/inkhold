@@ -14,7 +14,7 @@ SERVE_PORT := $(PORT)
 
 TARGET ?= native-linux-musl
 
-.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-test-e2e web-test-setup fmt fmt-fix lan-ip clean docs docs-build
+.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-test-e2e web-test-setup fmt fmt-fix commit-check commit-hook lan-ip clean docs docs-build
 
 help:
 	@echo "Inkhold"
@@ -33,6 +33,8 @@ help:
 	@echo "  make docs           preview the website and manuals at http://127.0.0.1:1111"
 	@echo "  make docs-build     build the website into docs/public"
 	@echo "  make fmt            check formatting        make fmt-fix   reformat in place"
+	@echo "  make commit-check   check commit titles (RANGE=, default origin/main..HEAD)"
+	@echo "  make commit-hook    check each title as you commit (installs a git hook)"
 	@echo "  make lan-ip         print this machine's LAN IP (to enter on the Nomad)"
 	@echo "  make clean          remove build artifacts"
 
@@ -279,6 +281,16 @@ web-test-e2e:
 # network). Unit tests need only Node; e2e additionally needs this Chromium.
 web-test-setup:
 	cd $(WEB) && npm install && npx playwright install chromium
+
+# Commit titles: Conventional Commits, under 120 characters
+# (docs/content/contributor/commit-messages.md). CI checks what a push adds.
+RANGE ?= origin/main..HEAD
+commit-check:
+	@scripts/commit-titles.sh $(RANGE)
+
+# The same check on every `git commit`, before the commit is made.
+commit-hook:
+	ln -sf ../../scripts/commit-titles.sh .git/hooks/commit-msg
 
 fmt:
 	zig fmt --check backend webapp/wasm parsers build.zig
