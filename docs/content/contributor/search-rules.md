@@ -11,7 +11,7 @@ extra:
 
 The rules of search: the index and its manifest, how words and names match,
 ranking, coverage, find in a document, phrases and excerpts. Why they are this
-way: [Search decisions](@/contributor/search.md).
+way: [Search, end to end](@/contributor/search.md).
 
 ## The index and its manifest
 

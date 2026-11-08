@@ -38,37 +38,44 @@ page marks use.
 
 Out of the text, whatever its source, the server derives two files per
 document for search: `terms/`, the words of each page folded for matching, and
-`text/`, the readable text of each page for excerpts and find-in-document.
+`text/`, the readable text of each page for excerpts and find-in-document. For
+a notebook they are written at upload, because its text is already there in
+the file; for a PDF or a text file they are written by the worker, once it has
+extracted the text.
 
 ## When it happens
 
 ```mermaid
 flowchart TD
-  up["Upload finishes: the blob is on disk"] --> tx["In the same transaction: the notebook's map (pages, layers, where the text sits)"]
-  tx --> commit["COMMIT: the file is listed and its pages can be served"]
+  up["Upload finishes: the blob is on disk"] --> parse["With the lock released: parse the notebook's map, or a sketch's database"]
+  parse --> tx["In the transaction: the map's rows, and a notebook's terms/ and text/ files"]
+  tx --> commit["COMMIT: the file is listed, its pages can be served, a notebook is searchable"]
   commit --> signal["The deferred worker is signalled"]
-  signal --> job["The worker asks the database: which blobs still owe work?"]
-  job --> derive["With the lock released: PDF probe and text, text file paragraphs, ink scan, the terms/ and text/ files"]
+  signal --> job["The worker asks the database: which blobs still owe work? (txt, pdf, ink)"]
+  job --> derive["With the lock released: a text file's paragraphs, a PDF's probe and text, a notebook's ink scan; their terms/ and text/ files"]
   derive --> verdict["Under the lock: the verdict recorded, the manifest now says derived"]
   verdict --> live["Live channel: the count of files still being indexed drops"]
 ```
 
-The notebook's map is built inside the upload's own transaction. Parsing it is
-pure CPU over a few addressed ranges (a 40 MB notebook allocates kilobytes),
-and the row is written with the file's row, so a listed file is always a
-servable file. Everything slower waits.
+The notebook's map is built as the upload lands: parsing is pure CPU over a
+few addressed ranges (a 40 MB notebook allocates kilobytes) and runs with the
+lock released; the rows are written in the upload's own transaction, with the
+notebook's search files, so a listed notebook is always a servable and
+searchable one. A sketch's database is read the same way, for its layers and
+its thumbnail. Everything slower waits.
 
 Indexing on the upload path once held the tablet's connection for the whole
 derivation: 48 to 60 seconds for a 16 MB text file on the Pi, long enough for
 the tablet to give up. So after the commit the server signals one background
-worker, running at the lowest priority, which does the rest.
+worker, running at the lowest priority, which does the rest: three tenants,
+for text files, PDFs and the ink scan, in that priority.
 
 ## Why the worker is a query, not a queue
 
 The worker has no queue, no claims and no status column. Each kind of work (a
 "tenant") is a database query that names the blobs still owing that work: a
-PDF with no probe verdict, a notebook with no terms file at the current
-version, a layer not yet scanned. The worker runs each query, does the work
+text file not yet split into paragraphs, a PDF with no probe or no text
+verdict, a notebook with a layer not yet scanned for ink. The worker runs each query, does the work
 with the lock released, and records the verdict under the lock.
 
 That shape gives three things for free. **Restart safety:** after a crash the

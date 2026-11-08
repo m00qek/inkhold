@@ -10,7 +10,7 @@ extra:
 # The browser app
 
 How the browser app is put together: its seams, routing, viewers, caches,
-export and the WebAssembly rules. Why: [Browser app decisions](@/contributor/browser-app.md).
+export and the WebAssembly rules. Why: [How the browser paces its work](@/contributor/browser-app.md).
 Adding a kind of file touches most of these: [Add a file type](@/contributor/file-type.md).
 
 ## Seams

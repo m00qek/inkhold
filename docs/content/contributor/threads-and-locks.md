@@ -10,7 +10,7 @@ extra:
 # Threads and locks
 
 Which thread may do what, the database lock, and the flags a route declares.
-Why it is this way: [Concurrency decisions](@/contributor/concurrency-decisions.md).
+Why it is this way: [How a request is served](@/contributor/concurrency-decisions.md).
 
 ## Threads and locks
 

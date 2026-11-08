@@ -156,4 +156,4 @@ person; one too many gets a single frame and a retry hint, never an error.
 
 **Cost.** Some responses revalidate that rarely change.
 
-**Revisit when** never. The rules themselves: [Serving and caching](@/contributor/serving-rules.md).
+**Revisit when** never.

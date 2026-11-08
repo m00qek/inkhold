@@ -10,7 +10,7 @@ extra:
 # Phones and offline
 
 How the app lays itself out on a phone and a tablet, how a bar folds into ⋯,
-text size, installing, and what works offline. Why: [Phone and offline decisions](@/contributor/phones-and-offline.md).
+text size, installing, and what works offline. Why: [How the app fits a phone, and works offline](@/contributor/phones-and-offline.md).
 
 ## Layout
 

@@ -83,7 +83,7 @@ and that is by design.
 
 **Decision.** One binary serves the tablet's sync, the browser's API and the app's files on one port, kept apart by caller scope (`.device`, `.controlplane`, `.pending`, `.public`); crossing a scope is a 403. One SQLite file, one writer.
 
-**Cost.** Everything shares one process and one database lock; a slow route can be felt by the others (see [Concurrency decisions](@/contributor/concurrency-decisions.md)).
+**Cost.** Everything shares one process and one database lock; a slow route can be felt by the others ([How a request is served](@/contributor/concurrency-decisions.md)).
 
 **Revisit when** a household needs more than one machine to serve it, which nobody has asked for.
 

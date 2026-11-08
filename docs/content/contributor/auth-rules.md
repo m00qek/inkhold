@@ -10,7 +10,7 @@ extra:
 # Authentication and untrusted content
 
 The rules for passwords, sessions, admin elevation, and the files a tablet
-sends. Why they are this way: [Security decisions](@/contributor/security.md).
+sends. Why they are this way: [How sign-in and trust work](@/contributor/security.md).
 
 ## Authentication
 

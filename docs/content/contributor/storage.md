@@ -11,7 +11,7 @@ extra:
 
 The rules every write to the library follows: how files are kept on disk, the
 recycle bin, allotments, version history, `.mark` pairs and backups. Why they
-are this way: [Storage decisions](@/contributor/storage-decisions.md).
+are this way: [What happens to a file](@/contributor/storage-decisions.md).
 
 ## Invariants
 

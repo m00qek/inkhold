@@ -11,7 +11,7 @@ extra:
 
 What the server derives from each file and the rules it keeps while doing so:
 the `.note` index, `index_version`, the derived stores, and what each format
-yields. Why it is this way: [Indexing decisions](@/contributor/indexing.md).
+yields. Why it is this way: [How indexing works](@/contributor/indexing.md).
 
 ## The `.note` index
 

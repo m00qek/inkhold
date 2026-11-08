@@ -17,8 +17,10 @@ are in [Search](@/contributor/search-rules.md).
 
 ## Step one: the server derives text
 
-When a file arrives, the [indexing worker](@/contributor/indexing.md) derives
-two files for it. `terms/` holds, for each page, the words of that page folded
+When a file arrives, the server derives two files for it: at upload for a
+notebook, whose text is already in the file, and on the
+[background worker](@/contributor/indexing.md) for a PDF or a text file, whose
+text must first be extracted. `terms/` holds, for each page, the words of that page folded
 by one tokenizer (`unicode61`, accents removed), one record per page. `text/`
 holds the readable text of each page. For a notebook, the words are the
 tablet's own handwriting recognition; for a PDF or a text file, the document's
