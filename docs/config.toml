@@ -23,7 +23,7 @@ index_format = "fuse_json"
 
 [extra]
 # Where the source lives: the footer's links and each page's "Edit this page".
-repo = "https://github.com/m00qek/inkhold-beta"
+repo = "https://github.com/m00qek/inkhold"
 branch = "main"
 # The two manuals, in the order the navigation shows them.
 manuals = ["manual", "contributor"]
