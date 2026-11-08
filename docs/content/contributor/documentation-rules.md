@@ -151,8 +151,8 @@ meets all of these. `make -C docs test` checks them
 
 ## Releases
 
-The docs describe the latest release. Anything only on `pre-release` is marked
-as **Unreleased** until it ships.
+The docs describe `main`: every push to it is published, so what the docs say
+is what people install.
 
 ## Generated, not written
 
@@ -166,7 +166,7 @@ reference (from `--help`).
 - A docs-only change runs the docs CI (links, diagrams, the site's check and
   build), never the code CI. Docs are `docs/**` and every `*.md`; a change
   to the app's tokens or fonts runs both.
-- On `pre-release`, a docs run that passes publishes the site to
+- On `main`, a docs run that passes publishes the site to
   <https://m00qek.github.io/inkhold/>. To republish without a change:
   Actions → Docs → Run workflow.
 - Pages meet the quality bar above.

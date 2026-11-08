@@ -4,7 +4,7 @@ name: Docs
 # (docs/contributor/documentation-rules.md).
 on:
   push:
-    branches: [ "main", "pre-release" ]
+    branches: [ "main" ]
     paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/config.zig", "backend/cli.zig", "backend/routes.zig", ".github/workflows/docs.yaml" ]
   # To republish the site without a change: Actions → Docs → Run workflow.
   workflow_dispatch:
@@ -69,16 +69,15 @@ jobs:
       # The build above, with the site's real address (docs/config.toml); the
       # test built its own copy, from the same sources, under a local one.
       - name: Upload the site for GitHub Pages
-        if: github.ref == 'refs/heads/pre-release' && github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/public
 
-  # PUBLISHES ONLY FROM `pre-release`, the source of truth, like the image in
-  # ci.yaml: https://m00qek.github.io/inkhold/ is what it holds.
+  # PUBLISHES ONLY FROM `main`, like the image in ci.yaml: https://m00qek.github.io/inkhold/ is what it holds.
   pages:
     needs: [links, site]
-    if: github.ref == 'refs/heads/pre-release' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       pages: write
