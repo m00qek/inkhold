@@ -9,16 +9,25 @@
 {%- endif -%}
 {% endcomponent kind %}
 
-{# The pages of one manual, in its order; `here` is the current path. #}
+{# A manual's pages under its four kinds (Diátaxis), each kind in weight order. #}
 {% component toc(section, here) %}
 <nav class="toc" aria-label="{{ section.title }}">
   <a class="toc__head" href="{{ section.permalink }}"{% if here == section.path %} aria-current="page"{% endif %}>{{ section.title }}</a>
-  {%- if section.pages %}
+  {%- for g in [{"type": "tutorial", "label": "Tutorials"}, {"type": "how-to", "label": "How-to guides"}, {"type": "reference", "label": "Reference"}, {"type": "explanation", "label": "Explanation"}] %}
+  {%- set pages = [p for p in section.pages if p.extra?.type == g.type] %}
+  {%- if pages %}
+  <h2 class="toc__kind">{{ g.label }}</h2>
   <ul>
-    {%- for p in section.pages %}
-    <li><a href="{{ p.permalink }}"{% if here == p.path %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+    {%- for p in pages %}
+    <li><a href="{{ p.permalink }}"{% if here == p.path %} aria-current="page"{% endif %}{% if p.extra?.stub %} class="is-stub"{% endif %}>{{ p.title }}</a></li>
     {%- endfor %}
   </ul>
   {%- endif %}
+  {%- endfor %}
 </nav>
 {% endcomponent toc %}
+
+{# A page that is planned but not written: said plainly, never left looking finished. #}
+{% component stub() %}
+<p class="stub" role="note">Not written yet. This page is planned; what it will cover is above.</p>
+{% endcomponent stub %}

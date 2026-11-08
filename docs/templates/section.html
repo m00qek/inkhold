@@ -5,14 +5,21 @@
 <article class="prose">
   <h1>{{ section.title }}</h1>
   {{ section.content | safe }}
-  {%- if section.pages %}
+  {%- for g in [{"type": "tutorial", "label": "Tutorials", "says": "Lessons: start here."}, {"type": "how-to", "label": "How-to guides", "says": "Steps for a task you have in mind."}, {"type": "reference", "label": "Reference", "says": "Facts to look up."}, {"type": "explanation", "label": "Explanation", "says": "Why things are the way they are."}] %}
+  {%- set pages = [p for p in section.pages if p.extra?.type == g.type] %}
+  {%- if pages %}
+  <h2>{{ g.label }}</h2>
+  <p class="kind-says">{{ g.says }}</p>
   <ul class="cards">
-    {%- for p in section.pages %}
-    <li><a href="{{ p.permalink }}"><b>{{ p.title }}</b></a>{{ <kind extra={p.extra} /> }}</li>
+    {%- for p in pages %}
+    <li{% if p.extra?.stub %} class="is-stub"{% endif %}>
+      <a href="{{ p.permalink }}"><b>{{ p.title }}</b></a>
+      <span>{{ p.description }}</span>
+      {%- if p.extra?.stub %}<span class="stub-mark">Not written yet</span>{% endif %}
+    </li>
     {%- endfor %}
   </ul>
-  {%- else %}
-  <p class="empty">No pages yet.</p>
   {%- endif %}
+  {%- endfor %}
 </article>
 {% endblock content %}

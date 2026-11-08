@@ -18,6 +18,8 @@
   <header class="masthead">
     <a class="brand" href="{{ get_url(path='@/_index.md') }}">Inkhold <span>docs</span></a>
     <nav class="manuals" aria-label="Manuals">
+      {%- set get = get_page(path="get-inkhold.md", metadata_only=true) %}
+      <a href="{{ get.permalink }}"{% if current_path == get.path %} aria-current="true"{% endif %}>{{ get.title }}</a>
       {%- for m in config.extra.manuals %}
       {%- set s = get_section(path=m ~ "/_index.md", metadata_only=true) %}
       <a href="{{ s.permalink }}"{% if s.path in current_path %} aria-current="true"{% endif %}>{{ s.title }}</a>

@@ -189,6 +189,18 @@ a {
   font-family: var(--font-display);
   font-weight: 600;
 }
+/* The four kinds: the app's eyebrow (mono, small, faint). */
+.toc__kind {
+  margin: var(--sp-4) 0 0;
+  padding-inline: var(--sp-2);
+  font: 400 var(--fs-eyebrow) var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+/* A planned page reads as such in the list, not as a finished one. */
+.toc a.is-stub:not([aria-current]) {
+  color: var(--ink-faint);
+}
 
 /* ---- the page: ink on a sheet ---- */
 main {
@@ -297,8 +309,21 @@ main:focus {
 .cards span {
   color: var(--ink-soft);
 }
-.empty {
+.kind-says {
+  margin-block-start: calc(-1 * var(--sp-2));
+  color: var(--ink-soft);
+}
+.stub-mark {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
   color: var(--ink-faint);
+}
+.stub {
+  margin: var(--sp-6) 0 0;
+  padding: var(--sp-3) var(--sp-4);
+  border-inline-start: 2px solid var(--line);
+  background: var(--hover);
+  color: var(--ink-soft);
 }
 
 /* A diagram, inlined at build in both themes; the page's theme picks one. */
@@ -339,4 +364,40 @@ main:focus {
   font-size: var(--fs-caption);
   color: var(--ink-faint);
   text-align: center;
+}
+
+/* ---- a phone ---- */
+@media (max-width: 699px) {
+  /* The brand and the toggle on one row, the links on their own under it. */
+  .masthead {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--sp-2);
+    padding: var(--sp-3) var(--sp-4);
+  }
+  .manuals {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  .theme {
+    grid-column: 2;
+    grid-row: 1;
+    inline-size: var(--hit-target-touch);
+    block-size: var(--hit-target-touch);
+  }
+  /* The page first; the manual's other pages after it. */
+  .layout {
+    padding-inline: 0;
+  }
+  .layout > .toc {
+    order: 1;
+    padding-inline: var(--sp-4);
+  }
+  .prose {
+    border-inline: 0;
+    border-radius: 0;
+  }
 }

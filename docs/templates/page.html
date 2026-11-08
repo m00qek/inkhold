@@ -2,13 +2,17 @@
 {% block title %}{{ page.title }} · {{ config.title }}{% endblock title %}
 {% block description %}{{ page.description or config.description }}{% endblock description %}
 {% block toc %}
+{#- A page of a manual shows its manual; a page of the site itself (Get Inkhold) none. #}
+{%- if page.ancestors | length > 1 %}
 {%- set section = get_section(path=page.ancestors | last) %}
 {{ <toc section={section} here={current_path} /> }}
+{%- endif %}
 {% endblock toc %}
 {% block content %}
 <article class="prose">
   {{ <kind extra={page.extra} /> }}
   {#- The page's own `# Title` heading is its h1. #}
   {{ page.content | safe }}
+  {%- if page.extra?.stub %}{{ <stub /> }}{% endif %}
 </article>
 {% endblock content %}

@@ -1,6 +1,6 @@
 ---
 title: Documentation rules
-weight: 900
+weight: 3080
 extra:
   reader: contributor
   type: reference
@@ -30,7 +30,7 @@ with its place in the manual:
 ```yaml
 ---
 title: Restore a deleted note
-weight: 30          # its place in the manual: lower comes first
+weight: 2030        # its place: 1000s tutorials, 2000s how-to, 3000s reference, 4000s explanation
 extra:
   reader: household
   type: how-to      # tutorial | how-to | reference | explanation
@@ -42,6 +42,10 @@ extra:
   pages of the user manual.
 - **Reference**: facts to look up: settings, commands, file types, limits.
 - **Explanation**: why things are the way they are.
+
+The navigation groups each manual's pages under these four kinds. A page that
+is planned but not written carries `stub: true` under `extra`, and says so on
+the page and in the lists.
 
 A page that starts to drift into another type links to that page instead.
 The quadrants are not filled evenly: one tutorial is fine.
