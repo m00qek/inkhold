@@ -23,15 +23,17 @@ docker logs inkhold    # the first admin password
 ```
 
 Open `http://<this machine's address>:8089`, sign in as `admin@home.lan`, then
-[point your Supernote at it](docs/content/manual/point-supernote.md).
+[point your Supernote at it](https://m00qek.github.io/inkhold-beta/manual/point-supernote/).
 
 ## Documentation
 
-- **[Your first sync](docs/content/manual/first-sync.md)**: install Inkhold,
+All of it is at **<https://m00qek.github.io/inkhold-beta/>**:
+
+- **[Your first sync](https://m00qek.github.io/inkhold-beta/manual/first-sync/)**: install Inkhold,
   sign in, point the tablet at it, and see your notes in the browser.
-- **[The manual](docs/content/manual/_index.md)**: install, back up, upgrade,
+- **[The manual](https://m00qek.github.io/inkhold-beta/manual/)**: install, back up, upgrade,
   and everyday use on the tablet and in the browser.
-- **[The contributor manual](docs/content/contributor/_index.md)**: build, test,
+- **[The contributor manual](https://m00qek.github.io/inkhold-beta/contributor/)**: build, test,
   and how it works.
 
 Found a bug? [Open an issue](https://github.com/m00qek/inkhold-beta/issues):

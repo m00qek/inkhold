@@ -1,5 +1,5 @@
 # The Inkhold website and its manuals. See content/contributor/documentation-rules.md.
-base_url = "https://m00qek.github.io/inkhold"
+base_url = "https://m00qek.github.io/inkhold-beta"
 title = "Inkhold"
 description = "A private cloud for your Supernote, on a computer you own."
 default_language = "en"

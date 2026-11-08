@@ -6,6 +6,8 @@ on:
   push:
     branches: [ "main", "pre-release" ]
     paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/config.zig", "backend/cli.zig", "backend/routes.zig", ".github/workflows/docs.yaml" ]
+  # To republish the site without a change: Actions → Docs → Run workflow.
+  workflow_dispatch:
   pull_request:
     paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/config.zig", "backend/cli.zig", "backend/routes.zig", ".github/workflows/docs.yaml" ]
 
@@ -63,3 +65,28 @@ jobs:
       # The quality bar: axe, no sideways scroll, tap targets, line length.
       - name: Test the site
         run: make -C docs test
+
+      # The build above, with the site's real address (docs/config.toml); the
+      # test built its own copy, from the same sources, under a local one.
+      - name: Upload the site for GitHub Pages
+        if: github.ref == 'refs/heads/pre-release' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/public
+
+  # PUBLISHES ONLY FROM `pre-release`, the source of truth, like the image in
+  # ci.yaml: https://m00qek.github.io/inkhold-beta/ is what it holds.
+  pages:
+    needs: [links, site]
+    if: github.ref == 'refs/heads/pre-release' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
