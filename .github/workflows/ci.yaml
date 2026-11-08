@@ -33,11 +33,11 @@ concurrency:
 jobs:
   # ---- Built once ----------------------------------------------------------
   #
-  # The three wasm modules, the SPA and the x86_64 musl server: every job below
-  # downloads them instead of compiling its own. This is the only web job with
-  # Zig, so its `.zig-cache` is the one that stays warm. The key changes with
-  # every commit, so each run saves its own; the prefix restores the last one,
-  # and Zig's cache is content-addressed, so unchanged code is simply reused.
+  # The three wasm modules and the SPA (`build`), and the x86_64 musl server
+  # (`build-server`): the jobs below download them instead of compiling. Each
+  # Zig job keeps its `.zig-cache`: the key changes with every commit, so each
+  # run saves its own; the prefix restores the last one, and Zig's cache is
+  # content-addressed, so unchanged code is simply reused.
   build:
     runs-on: ubuntu-latest
     outputs:
@@ -89,9 +89,6 @@ jobs:
       - name: Build the wasm and the SPA
         run: make web-dist
 
-      - name: Build the x86_64 server
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
-
       - name: Upload the wasm
         uses: actions/upload-artifact@v4
         with:
@@ -107,6 +104,30 @@ jobs:
           path: webapp/dist
           if-no-files-found: error
           retention-days: 1
+
+  # The server that ships, for smoke and footprint. Its own job, beside
+  # `build`: Zig compiles the server as one unit, about 5 minutes in
+  # ReleaseSafe however warm the cache, and the web suites need none of it.
+  build-server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Cache Zig build
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: ${{ runner.os }}-zig-server-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-zig-server-
+
+      - name: Build the x86_64 server
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
 
       - name: Upload the x86_64 server
         uses: actions/upload-artifact@v4
@@ -168,7 +189,7 @@ jobs:
 
   # The memory ceilings in scripts/footprint.py, on the binary that ships.
   footprint:
-    needs: [build]
+    needs: [build-server]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -254,7 +275,7 @@ jobs:
   # The shipped pieces together, nothing mocked: the x86_64 server serving the
   # built SPA. First sign-in, an upload, a page painted by the wasm decoder.
   smoke:
-    needs: [build]
+    needs: [build, build-server]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -469,7 +490,7 @@ jobs:
   # `:latest`, `:beta` and the docs' download links move only on promotion
   # (promote.yaml), after the release has been soaked on `:next`.
   publish:
-    needs: [build, release, smoke-archive, smoke-image, test-backend, test-parsers, footprint, test-web-unit, test-web-e2e, smoke]
+    needs: [build, build-server, release, smoke-archive, smoke-image, test-backend, test-parsers, footprint, test-web-unit, test-web-e2e, smoke]
     if: needs.build.outputs.release == 'true'
     runs-on: ubuntu-latest
     # Never two at once, and never cancelled halfway.
