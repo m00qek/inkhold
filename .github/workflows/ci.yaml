@@ -20,6 +20,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---- The suites, side by side ----------------------------------------------
+  #
+  # Each its own runner: the slowest one, not their sum, is how long a run takes.
+  # Every Zig job keeps its `.zig-cache` between runs. The key changes with
+  # every commit, so each run saves its own; the prefix restores the last one,
+  # and Zig's cache is content-addressed, so objects of unchanged code are
+  # simply reused.
   test-backend:
     runs-on: ubuntu-latest
     steps:
@@ -31,16 +38,43 @@ jobs:
         with:
           version: 0.17.0
 
-      # Before the suites: a formatting failure is cheap to find and cheap to
-      # fix, and finding it after twenty minutes of tests is neither.
+      - name: Cache Zig build
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: ${{ runner.os }}-zig-backend-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-zig-backend-
+
+      # Before the suite: a formatting failure is cheap to find and cheap to
+      # fix, and finding it after the tests is neither.
       - name: Check formatting
         run: make fmt
 
-      - name: Test Parsers
-        run: make parser-test
-
       - name: Test Backend
         run: make test
+
+  test-parsers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Cache Zig build
+        uses: actions/cache@v4
+        with:
+          path: |
+            parsers/note/.zig-cache
+            parsers/spd/.zig-cache
+          key: ${{ runner.os }}-zig-parsers-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-zig-parsers-
+
+      - name: Test Parsers
+        run: make parser-test
 
   footprint:
     runs-on: ubuntu-latest
@@ -53,13 +87,68 @@ jobs:
         with:
           version: 0.17.0
 
+      - name: Cache Zig build
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: ${{ runner.os }}-zig-footprint-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-zig-footprint-
+
       # The memory ceilings in scripts/footprint.py: idle RSS, the cost of a
       # parked socket, and that threads follow requests rather than sockets.
       - name: Measure the server footprint
         run: make footprint
 
-  test-frontend:
+  test-web-unit:
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: webapp/package-lock.json
+
+      # The three wasm modules are wasm32, the same in every job that builds
+      # them (and the MuPDF one is 441 C translation units).
+      - name: Cache Zig build
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: ${{ runner.os }}-zig-wasm-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-zig-wasm-
+
+      - name: Install Frontend Dependencies
+        run: npm --prefix webapp ci
+
+      # The only place `-DSQLITE_TEMP_STORE=3` is checked. Removing that flag
+      # changes nothing observable (measured — see `sqlite_core_wasm_flags`),
+      # so the module refuses to open an index without it and this step is what
+      # makes the refusal visible. A guard nobody runs is not a guard.
+      - name: Test the sqlite-core wasm ABI
+        run: zig build wasm-sqlite-core-test
+
+      - name: Lint styles and unit tests
+        run: |
+          npm --prefix webapp run build:wasm
+          npm --prefix webapp run lint:styles
+          npm --prefix webapp run test:unit
+
+  # The browser suite, in four slices on four runners: one runner took 19 min.
+  test-web-e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -82,39 +171,30 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('webapp/package-lock.json') }}
 
-      - name: Cache Zig build (the MuPDF wasm is 441 C translation units)
-        uses: actions/cache@v4
+      # Restore only: test-web-unit saves the same wasm build.
+      - name: Restore Zig build
+        uses: actions/cache/restore@v4
         with:
-          # `setup-zig` caches the GLOBAL cache (~/.cache/zig), which holds the
-          # unpacked MuPDF tarball. The compiled objects land in the repo-local
-          # `.zig-cache`, which it does not cover — so a cold runner rebuilds all
-          # of MuPDF (~3 min on 4 cores) on every job that runs `build:wasm`.
-          # Keyed on what actually changes the artifact; anything else restores.
           path: .zig-cache
-          key: ${{ runner.os }}-zigcache-${{ hashFiles('build.zig', 'build.zig.zon', 'webapp/wasm/**') }}
-          restore-keys: ${{ runner.os }}-zigcache-
+          key: ${{ runner.os }}-zig-wasm-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-zig-wasm-
 
       - name: Setup Web Tests
         run: make web-test-setup
 
-      # The only place `-DSQLITE_TEMP_STORE=3` is checked. Removing that flag
-      # changes nothing observable (measured — see `sqlite_core_wasm_flags`),
-      # so the module refuses to open an index without it and this step is what
-      # makes the refusal visible. A guard nobody runs is not a guard.
-      - name: Test the sqlite-core wasm ABI
-        run: zig build wasm-sqlite-core-test
+      - name: Browser tests, slice ${{ matrix.shard }} of 4
+        working-directory: webapp
+        run: npx playwright test --shard=${{ matrix.shard }}/4
 
-      - name: Test Frontend
-        run: make web-test
-
-  # ---- The SPA, built ONCE -----------------------------------------------------
+  # ---- What gets published, built while the suites run ------------------------
   #
-  # `webapp/dist` is the same bytes for every architecture, and it used to be
-  # rebuilt by all four release runners and all four image runners: eight
-  # identical `npm run build`s per push. It is one job now, and everything
-  # downstream downloads its output.
+  # Not gated on the suites: nothing here publishes. The archives are workflow
+  # artifacts, and nightly.link (the docs' download links) serves only the
+  # latest SUCCESSFUL run, so a red run's archives are never what anyone
+  # downloads. The image, which does publish, waits for every suite (below).
+  #
+  # `webapp/dist` is the same bytes for every architecture: built once, here.
   webapp:
-    needs: [test-backend, test-frontend]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -132,15 +212,13 @@ jobs:
           cache: 'npm'
           cache-dependency-path: webapp/package-lock.json
 
-      # `npm run build` runs `build:wasm` first, so this needs the same Zig
-      # cache the binaries do — the three wasm modules are wasm32 and identical
-      # across every release target.
-      - name: Cache Zig build
-        uses: actions/cache@v4
+      # `npm run build` runs `build:wasm` first: the same wasm as the tests.
+      - name: Restore Zig build
+        uses: actions/cache/restore@v4
         with:
           path: .zig-cache
-          key: ${{ runner.os }}-zigcache-${{ hashFiles('build.zig', 'build.zig.zon', 'webapp/wasm/**') }}
-          restore-keys: ${{ runner.os }}-zigcache-
+          key: ${{ runner.os }}-zig-wasm-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-zig-wasm-
 
       - name: Install Frontend Dependencies
         run: npm --prefix webapp ci
@@ -157,12 +235,7 @@ jobs:
           retention-days: 1
 
   release:
-    # GATED ON THE SUITES. Without this the release job ran in PARALLEL with
-    # them, so a red build still uploaded artifacts — and the README points
-    # beta testers straight at those downloads. Shipping a binary from a build
-    # that failed is worse than shipping nothing. The footprint too: a build
-    # that blows the memory ceilings a Pi depends on is not one to publish.
-    needs: [webapp, footprint]
+    needs: [webapp]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -184,15 +257,14 @@ jobs:
         with:
           version: 0.17.0
 
-      - name: Cache Zig build (shared across the matrix — the wasm is target-independent)
+      # One cache per target: a shared one was saved by whichever target
+      # finished first, so the other three compiled from cold every time.
+      - name: Cache Zig build
         uses: actions/cache@v4
         with:
-          # Every matrix target rebuilds the SAME `pdf-decode.wasm` (it is
-          # wasm32, not the release target), so without this the MuPDF compile is
-          # paid four times in parallel for one artifact.
           path: .zig-cache
-          key: ${{ runner.os }}-zigcache-${{ hashFiles('build.zig', 'build.zig.zon', 'webapp/wasm/**') }}
-          restore-keys: ${{ runner.os }}-zigcache-
+          key: ${{ runner.os }}-zig-release-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-zig-release-${{ matrix.target }}-
 
       # Built once by `webapp` above; no Node on this runner at all.
       - name: Download the SPA
@@ -210,11 +282,10 @@ jobs:
           name: inkhold-${{ matrix.target }}
           path: inkhold-${{ matrix.target }}.tar.gz
 
-      # THE SAME COMPILE, RELINKED WITHOUT DEBUG INFO — 42 s against the 65 s the
-      # unstripped build above just paid, because `.zig-cache` is warm in this
-      # very job. That is what makes it worth having both: the tarball keeps its
-      # symbols, so a beta tester's panic trace is readable, and the image gets
-      # 9.9 MB instead of 58.4 MB.
+      # THE SAME COMPILE, RELINKED WITHOUT DEBUG INFO — cheap, because
+      # `.zig-cache` is warm in this very job. The tarball keeps its symbols,
+      # so a beta tester's panic trace is readable, and the image gets 9.9 MB
+      # instead of 58.4 MB.
       #
       # Post-stripping the artifact instead would be cheaper still and does not
       # work: `zig objcopy` answers `error: unimplemented`, and GNU objcopy on
@@ -242,7 +313,10 @@ jobs:
   # NO QEMU, which is a property of the image rather than an oversight: the
   # Dockerfile is COPY-only, so nothing foreign is ever EXECUTED during a build.
   image:
-    needs: [release]
+    # GATED ON EVERY SUITE: this is the one job that publishes. A build that
+    # failed a test, or blew the memory ceilings a Pi depends on, is not one
+    # to ship as `:latest`.
+    needs: [release, test-backend, test-parsers, footprint, test-web-unit, test-web-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: read
