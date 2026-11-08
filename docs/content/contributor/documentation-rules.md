@@ -57,8 +57,8 @@ The quadrants are not filled evenly: one tutorial is fine.
   pages in `docs/content/`, the user manual under `manual/`, this manual
   under `contributor/`. `make -C docs serve` previews it as you write;
   `make -C docs build` builds it; `make -C docs check` checks it. Outside it the repository keeps only a few
-  small Markdown files: `README.md` (the pitch, a short install, links to the
-  site), `LICENSE`, `SECURITY.md` and `CONTRIBUTING.md` (each a few lines
+  small Markdown files: `README.md` (the pitch, one picture, a short install,
+  links into the docs), `LICENSE`, `SECURITY.md` and `CONTRIBUTING.md` (each a few lines
   that point into `docs/`).
 - How a page becomes the site: Zola turns the Markdown into HTML with the
   templates; the app's tokens and fonts are copied in; each diagram is drawn
