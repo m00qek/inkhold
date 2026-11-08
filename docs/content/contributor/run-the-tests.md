@@ -5,11 +5,65 @@ weight: 2010
 extra:
   reader: contributor
   type: how-to
-  stub: true
 ---
 
 # Run the tests
 
-Run the backend and web app suites, and the e2e tests in Chromium and WebKit.
+Run the server's, the parsers' and the browser app's suites. A change is ready
+when all of them pass.
 
-<!-- Not written yet. Source: DESIGN §12.4; Makefile -->
+## Once
+
+Install the browser app's dependencies and the Chromium the end-to-end tests
+drive:
+
+```sh
+make web-test-setup
+```
+
+## Everything
+
+```sh
+make test-all
+```
+
+That is the four suites below, in order.
+
+## One suite at a time
+
+| Command | What it runs |
+|---|---|
+| `make fmt` | Zig formatting, checked first: cheap to find, cheap to fix |
+| `make test` | The server's unit and HTTP tests (`zig build test`) |
+| `make parser-test` | The `.note` and `.spd` parsers' own suites, which the root suite cannot see |
+| `make web-test-unit` | The browser app's unit tests (Vitest) |
+| `make web-test-e2e` | The browser app end to end, in Chromium, against a fake server |
+
+In `webapp/`, `npm run typecheck` and `npm run lint:styles` check the types and
+that every size in the stylesheets is a design token.
+
+## Read the result, not the tail
+
+`zig build test` prints its verdict in a **Build Summary**, and its exit code
+is the truth. Piping it through `tail` or `grep` hides both: the pipe's exit
+code is the last command's, and a failure scrolls by. Run it as it is, or
+capture the exit code before you filter.
+
+## In Safari's engine
+
+Every iPhone browser is WebKit, so the phone layouts are also tested in it:
+
+```sh
+cd webapp
+E2E_BROWSER=webkit npx playwright test
+```
+
+WebKit needs Debian or Ubuntu system libraries. On another distribution, run
+it inside a Debian or Ubuntu container, never by installing those libraries on
+your own machine.
+
+## Long runs
+
+The whole end-to-end suite takes minutes. Run it with `--workers=4` on a
+machine with the cores for it; a tired laptop makes timing-sensitive tests
+look flaky when they aren't.

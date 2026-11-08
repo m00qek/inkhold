@@ -53,4 +53,7 @@
     timer = setTimeout(reach, 150);
   });
   reach();
+  // Widths change when the web fonts arrive: a block can start scrolling then.
+  document.fonts?.ready.then(reach);
+  addEventListener("load", reach);
 })();

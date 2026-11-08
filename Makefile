@@ -14,7 +14,7 @@ SERVE_PORT := $(PORT)
 
 TARGET ?= native-linux-musl
 
-.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-test-e2e web-test-setup fmt fmt-fix lan-ip clean docs docs-build docs-deps
+.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-test-e2e web-test-setup fmt fmt-fix lan-ip clean docs docs-build
 
 help:
 	@echo "Inkhold"
@@ -30,8 +30,8 @@ help:
 	@echo "  make web-test-unit  run the web unit tests (Vitest; needs Node only)"
 	@echo "  make web-test-e2e   run the web e2e tests (Playwright; needs Chromium)"
 	@echo "  make web-test-setup one-time web deps (npm install + Playwright Chromium)"
-	@echo "  make docs           serve the docs site locally (live-reload; MkDocs Material)"
-	@echo "  make docs-build     build the static docs site into release/docs (strict)"
+	@echo "  make docs           preview the website and manuals at http://127.0.0.1:1111"
+	@echo "  make docs-build     build the website into docs/public"
 	@echo "  make fmt            check formatting        make fmt-fix   reformat in place"
 	@echo "  make lan-ip         print this machine's LAN IP (to enter on the Nomad)"
 	@echo "  make clean          remove build artifacts"
@@ -292,31 +292,10 @@ lan-ip:
 clean:
 	rm -rf zig-out .zig-cache
 
-# ---- Documentation site (MkDocs + Material) --------------------------------
-# Self-contained: creates/reuses a local venv (.venv-docs, gitignored) and
-# installs docs/requirements.txt into it. No system Python packages touched.
-DOCS_VENV := .venv-docs
-DOCS_MKDOCS := $(DOCS_VENV)/bin/mkdocs
+# ---- Documentation site ----------------------------------------------------
+# The website and both manuals: a Zola site in docs/ (docs/Makefile has the rest).
+docs:
+	$(MAKE) -C docs serve
 
-# Sentinel: (re)build the venv only when requirements change. `python3 -m venv`
-# then pip-install the pinned toolchain.
-$(DOCS_MKDOCS): docs/requirements.txt
-	python3 -m venv $(DOCS_VENV)
-	$(DOCS_VENV)/bin/pip install --upgrade pip
-	$(DOCS_VENV)/bin/pip install -r docs/requirements.txt
-	@touch $(DOCS_MKDOCS)
-
-docs-deps: $(DOCS_MKDOCS)
-
-# Live-reload preview. Prints the local URL; Ctrl-C to stop.
-docs: docs-deps
-	@echo ""
-	@echo ">>> Docs preview (live-reload) at  http://127.0.0.1:8000/"
-	@echo ">>> Ctrl-C to stop."
-	@echo ""
-	$(DOCS_MKDOCS) serve
-
-# Static build into release/docs (strict: fails on broken links / nav warnings).
-docs-build: docs-deps
-	$(DOCS_MKDOCS) build --strict
-	@echo ">>> Static docs site built into release/docs"
+docs-build:
+	$(MAKE) -C docs build

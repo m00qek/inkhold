@@ -46,8 +46,7 @@ test-results/
 # fonts in public/ ARE source and stay tracked.
 webapp/public/*.wasm
 
-# --- docs site (MkDocs): local venv + built static site ---
-.venv-docs/
+# --- release artefacts ---
 release/
 
 # --- server instance state: the whole server/ tree is local (db, blobs, keys,
