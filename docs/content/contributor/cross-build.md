@@ -10,7 +10,7 @@ extra:
 # Cross-build for every architecture
 
 Build the release for all four targets on one machine. Do it before any push
-that changes the server: a push to `main` publishes `:latest`, and a
+that changes the server: a version tag publishes `:latest`, and a
 build that breaks only on 32-bit ARM is a broken Raspberry Pi.
 
 | Target | For |

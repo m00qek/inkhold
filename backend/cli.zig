@@ -349,7 +349,7 @@ pub fn writeHelp(w: *std.Io.Writer, st: Style) !void {
         \\  adds only what changed. Nothing in it is encrypted, so keep it as private
         \\  as your notes. cred.key is left out unless asked for: without it a restore
         \\  still returns every note, and every account gets a temporary password.
-        \\  To run one nightly, see the README.
+        \\  To run one nightly: https://m00qek.github.io/inkhold/manual/back-up/
         \\
         \\  {[b]s}Before restoring, back up each tablet.{[r]s} A restore signs every tablet
         \\  out and gives the library a new identity, so each one syncs from scratch

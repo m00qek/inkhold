@@ -30,8 +30,7 @@ uname -m
 On the Pi, with the build you chose (here, armhf):
 
 ```sh
-curl -LO https://nightly.link/m00qek/inkhold/workflows/ci.yaml/main/inkhold-arm-linux-musleabihf.zip
-unzip inkhold-*.zip
+curl -LO https://github.com/m00qek/inkhold/releases/latest/download/inkhold-arm-linux-musleabihf.tar.gz
 mkdir inkhold && tar -xzf inkhold-*.tar.gz -C inkhold
 ```
 

@@ -16,15 +16,15 @@ restarted if it stops. These steps were tested on Debian with systemd.
 
 | Build | For |
 |---|---|
-| [x86_64](https://nightly.link/m00qek/inkhold/workflows/ci.yaml/main/inkhold-x86_64-linux-musl.zip) | PCs, servers, cloud machines, Intel and AMD Synology NAS |
-| [aarch64](https://nightly.link/m00qek/inkhold/workflows/ci.yaml/main/inkhold-aarch64-linux-musl.zip) | Raspberry Pi 3, 4, 400 and 5 on a 64-bit system, ARM NAS and servers |
-| [armhf](https://nightly.link/m00qek/inkhold/workflows/ci.yaml/main/inkhold-arm-linux-musleabihf.zip) | Raspberry Pi 1, 2 and the original Zero, and newer Pis on a 32-bit system |
-| [x86](https://nightly.link/m00qek/inkhold/workflows/ci.yaml/main/inkhold-x86-linux-musl.zip) | Old 32-bit PCs and thin clients |
+| [x86_64](https://github.com/m00qek/inkhold/releases/latest/download/inkhold-x86_64-linux-musl.tar.gz) | PCs, servers, cloud machines, Intel and AMD Synology NAS |
+| [aarch64](https://github.com/m00qek/inkhold/releases/latest/download/inkhold-aarch64-linux-musl.tar.gz) | Raspberry Pi 3, 4, 400 and 5 on a 64-bit system, ARM NAS and servers |
+| [armhf](https://github.com/m00qek/inkhold/releases/latest/download/inkhold-arm-linux-musleabihf.tar.gz) | Raspberry Pi 1, 2 and the original Zero, and newer Pis on a 32-bit system |
+| [x86](https://github.com/m00qek/inkhold/releases/latest/download/inkhold-x86-linux-musl.tar.gz) | Old 32-bit PCs and thin clients |
 
-The zip holds one archive. Unpack both:
+Each is the latest [release](https://github.com/m00qek/inkhold/releases).
+Unpack it:
 
 ```sh
-unzip inkhold-*.zip
 mkdir inkhold && tar -xzf inkhold-*.tar.gz -C inkhold
 ```
 

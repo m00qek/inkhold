@@ -62,5 +62,5 @@ for your machine. The ARM image runs on every Raspberry Pi from the original B+
 up. The image is about 25 MB: the server and a small busybox that schedules
 backups, so `docker exec -it inkhold sh` gives you a shell.
 
-`:latest` follows the `main` branch. To stay on one build, use its commit as the
-tag.
+`:latest` is the newest [release](https://github.com/m00qek/inkhold/releases).
+To stay on one, use its version as the tag, as in `:v0.1.0`.

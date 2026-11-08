@@ -151,8 +151,9 @@ meets all of these. `make -C docs test` checks them
 
 ## Releases
 
-The docs describe `main`: every push to it is published, so what the docs say
-is what people install.
+The site is published from `main`, but people install the latest release.
+Anything on `main` that no release has yet is marked **Unreleased** until the
+next one ships.
 
 ## Generated, not written
 
