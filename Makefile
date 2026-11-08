@@ -14,7 +14,7 @@ SERVE_PORT := $(PORT)
 
 TARGET ?= native-linux-musl
 
-.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-lint web-test-e2e smoke web-test-setup fmt fmt-fix commit-check commit-hook lan-ip clean docs docs-build
+.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-lint web-test-e2e smoke web-test-setup fmt fmt-fix release-status promote commit-check commit-hook lan-ip clean docs docs-build
 
 help:
 	@echo "Inkhold"
@@ -34,6 +34,8 @@ help:
 	@echo "  make docs           preview the website and manuals at http://127.0.0.1:1111"
 	@echo "  make docs-build     build the website into docs/public"
 	@echo "  make fmt            check formatting        make fmt-fix   reformat in place"
+	@echo "  make release-status the version in build.zig.zon, and whether it is released"
+	@echo "  make promote        VERSION=1.0.0-beta.N: after the soak, :next becomes :latest"
 	@echo "  make commit-check   check commit titles (RANGE=, default origin/main..HEAD)"
 	@echo "  make commit-hook    check each title as you commit (installs a git hook)"
 	@echo "  make lan-ip         print this machine's LAN IP (to enter on the Nomad)"
@@ -300,6 +302,17 @@ smoke:
 # network). Unit tests need only Node; e2e additionally needs this Chromium.
 web-test-setup:
 	cd $(WEB) && npm install && npx playwright install chromium
+
+# Releases (docs/content/contributor/release.md). release-status: the version in
+# build.zig.zon and whether it is released yet. promote: after the soak on
+# :next, make VERSION the one people get (:latest, :beta, the download links).
+release-status:
+	@scripts/release-version.sh
+
+promote:
+	@test -n "$(VERSION)" || { echo "make promote VERSION=1.0.0-beta.N"; exit 1; }
+	gh workflow run promote.yaml --repo m00qek/inkhold -f version=$(VERSION)
+	@echo "Started; follow it with: gh run watch --repo m00qek/inkhold"
 
 # Commit titles: Conventional Commits, under 120 characters
 # (docs/content/contributor/commit-messages.md). CI checks what a push adds.

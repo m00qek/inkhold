@@ -1,6 +1,6 @@
 ---
 title: "Make a release"
-description: "Tag a version, build every image and binary, and publish the release notes."
+description: "Name the version, let CI build, test and publish it, soak it, then promote it."
 weight: 2070
 extra:
   reader: contributor
@@ -9,43 +9,56 @@ extra:
 
 # Make a release
 
-A push to `main` runs the suites and publishes nothing. A version tag
-publishes a release: the container image and a GitHub release with the
-archives.
+A release is a commit on `main` that names a new version in `build.zig.zon`.
+CI builds it, runs it on every architecture and, only if every job is green,
+publishes it to `:next` and tags the commit. After a soak, you promote it.
 
 ```mermaid
 flowchart TD
-  main["git push origin main"] --> suites["The suites, side by side: server, parsers, footprint, web unit, web e2e in 4 slices"]
-  tag["git push origin v0.1.0"] --> suites
-  tag --> rel["release job: inkhold-target.tar.gz for 4 targets, with the browser app"]
-  suites --> img["image job: ghcr.io/m00qek/inkhold :v0.1.0 and :latest"]
-  rel --> img
-  img --> gh["github-release job: the release page, its archives and notes"]
+  commit["chore(release): 1.0.0-beta.2 pushed to main"] --> suites["The suites, the smoke test, footprint"]
+  commit --> rel["Four archives, each run on its own architecture; the image, run on amd64 and arm64"]
+  suites --> pub{"Every job green?"}
+  rel --> pub
+  pub -->|yes| next["ghcr :1.0.0-beta.2 and :next, a GitHub pre-release, the tag v1.0.0-beta.2"]
+  pub -->|no| none["Nothing published, no tag: fix it on main"]
+  next --> soak["Soak: the hub runs :next"]
+  soak --> promote["make promote: :latest, :beta, the download links"]
 ```
 
+During the beta, every version is `1.0.0-beta.N`, one more than the last.
+
 1. [Cross-build](@/contributor/cross-build.md) if the server changed, and
-   [run the tests](@/contributor/run-the-tests.md).
-2. Set the version in `build.zig.zon`, which `inkhold --version` reports, and
-   take **Unreleased** off what ships in it
-   ([Documentation rules](@/contributor/documentation-rules.md)). Commit and
-   push `main`.
-3. Tag that commit with the same version and push the tag:
+   [run the tests](@/contributor/run-the-tests.md). To try the release jobs
+   themselves without releasing, run Actions → Test → Run workflow with
+   **Rehearse** ticked: it builds and smoke-tests everything, publishes
+   nothing.
+2. Set `.version` in `build.zig.zon` to the next `1.0.0-beta.N`, which
+   `inkhold --version` reports. `make release-status` says whether it is
+   released yet, and refuses a version that could never be.
+3. Commit it as `chore(release): 1.0.0-beta.N` and push `main`.
+4. CI, in the same run:
+   - runs the suites, the smoke test and the footprint check;
+   - builds the four archives and runs each on its own architecture:
+     aarch64 on an ARM runner, the Pi 1's ARMv6 emulated, x86 and x86_64
+     natively;
+   - builds the image and runs it on amd64 and arm64;
+   - if every job is green, pushes the image as `:1.0.0-beta.N` and `:next`
+     with provenance, creates the release with the archives, `SHA256SUMS`,
+     provenance and the version's section of `CHANGELOG.md`, and publishes
+     it as a pre-release, which tags the commit `v1.0.0-beta.N`.
+5. Soak it: run `:next` on the hub and use it.
+6. Promote it:
 
    ```sh
-   git tag v0.1.0
-   git push origin v0.1.0
+   make promote VERSION=1.0.0-beta.N
    ```
 
-4. CI then:
-   - refuses the tag if it doesn't match `build.zig.zon`;
-   - runs the suites, each on its own runner, and meanwhile builds the server
-     for the four targets, with the browser app, as archives;
-   - once every suite has passed, publishes the container image for all four
-     architectures, as `ghcr.io/m00qek/inkhold:v0.1.0` and `:latest`;
-   - creates the release on GitHub with the four archives and notes from the
-     commits since the last tag. The docs' download links point at the
-     latest release's archives.
-5. Check the release page, and edit its notes if they need it.
+   `:latest` and `:beta` then point at the same image, and the release
+   becomes the latest one, which the docs' download links follow. Nothing is
+   rebuilt.
 
-If a suite fails, nothing is published. Fix it on `main`, then delete the tag
-(`git push origin :v0.1.0`) and tag again, or tag the next version.
+If a job fails, nothing is published and nothing is tagged. Fix it on `main`:
+the version is still unreleased, so the next run tries again. After a
+docs-only fix, which runs no tests, start it from Actions → Test → Run
+workflow. A candidate that doesn't survive the soak is never promoted; release
+the next version instead.

@@ -3,25 +3,32 @@ name: Test
 # Docs-only changes run `docs.yaml`, not this (docs/contributor/documentation-rules.md).
 on:
   push:
-    # A push to `main` is tested. A version tag (`v0.1.0`) is tested AND
-    # published: the image, and a GitHub release with the archives (below).
-    # Path filters do not apply to tags.
+    # A push to `main` is tested. When build.zig.zon names a version not yet
+    # released, the same run also builds, smoke-tests and, if every job is
+    # green, publishes it and tags the commit (docs/content/contributor/release.md).
     branches: [ "main" ]
-    tags: [ "v*" ]
     paths-ignore: [ "docs/**", "**/*.md" ]
   pull_request:
     paths-ignore: [ "docs/**", "**/*.md" ]
-  # To run the suites without a change: Actions → Test → Run workflow.
+  # To run without a change, e.g. to retry a release after a docs-only fix:
+  # Actions → Test → Run workflow. "Rehearse" builds and smoke-tests
+  # everything a release would, and publishes nothing.
   workflow_dispatch:
+    inputs:
+      rehearse:
+        description: "Rehearse a release: build and smoke-test it, publish nothing"
+        type: boolean
+        default: false
 
-# Read-only by default; `image` asks for more to push to GHCR, and
-# `github-release` to create the release.
+# Read-only by default; only `publish` asks for more.
 permissions:
   contents: read
 
+# A newer push cancels a pull request's run, never main's: a run on main may be
+# publishing a release, and stopping it halfway would leave half a release.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # ---- Built once ----------------------------------------------------------
@@ -33,20 +40,21 @@ jobs:
   # and Zig's cache is content-addressed, so unchanged code is simply reused.
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      # "true" when this run releases: a version not yet tagged, on main.
+      release: ${{ steps.version.outputs.pending == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+      # "true" when the release jobs run: a release, or a rehearsal of one.
+      build-release: ${{ (steps.version.outputs.pending == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || inputs.rehearse == true }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # A tag names the version the server reports (`inkhold --version`, from
-      # build.zig.zon): a release whose binary says otherwise is refused.
-      - name: The tag matches build.zig.zon
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          want="v$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)"
-          if [ "$want" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME, but build.zig.zon says $want"
-            exit 1
-          fi
+      # On every run, pull requests too: a version that could never be
+      # released (not 1.0.0-beta.N, or not newer than the last) fails here.
+      - name: The version, and whether it is released yet
+        id: version
+        run: make release-status >> "$GITHUB_OUTPUT"
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -293,13 +301,14 @@ jobs:
           path: webapp/test-results
           retention-days: 7
 
-  # ---- A release: built while the suites run, published once they pass ---------
+  # ---- A release -------------------------------------------------------------
   #
-  # Only for a version tag. Nothing is published until `image` and
-  # `github-release`, which wait for every suite.
+  # Only when `build` says this run releases. Built and smoke-tested while the
+  # suites run; nothing leaves CI until `publish`, which waits for every job.
+
   release:
     needs: [build]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.build.outputs.build-release == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -376,14 +385,104 @@ jobs:
   #
   # NO QEMU, which is a property of the image rather than an oversight: the
   # Dockerfile is COPY-only, so nothing foreign is ever EXECUTED during a build.
-  image:
-    # GATED ON EVERY SUITE: a build that failed a test, or blew the memory
-    # ceilings a Pi depends on, is not one to ship as `:latest`.
-    needs: [release, test-backend, test-parsers, footprint, test-web-unit, test-web-e2e, smoke]
+  # Each archive run on its own architecture: aarch64 on GitHub's ARM runner,
+  # the Pi 1's ARMv6 emulated (proves it runs there, not how fast), the 32-bit
+  # x86 one natively, since an x86_64 kernel runs it.
+  smoke-archive:
+    needs: [build, release]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux-musl
+            runner: ubuntu-24.04
+          - target: x86-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: arm-linux-musleabihf
+            runner: ubuntu-24.04
+            emulator: qemu-arm-static -cpu arm1176
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install qemu
+        if: matrix.emulator
+        run: sudo apt-get update -q && sudo apt-get install -y -q qemu-user-static
+
+      - name: Download the archive
+        uses: actions/download-artifact@v4
+        with:
+          name: inkhold-${{ matrix.target }}
+
+      - name: Smoke test the archive
+        run: scripts/smoke-archive.sh inkhold-${{ matrix.target }}.tar.gz ${{ needs.build.outputs.version }} ${{ matrix.emulator }}
+
+  # The image for each platform a runner can run natively, built from the same
+  # COPY-only context `publish` pushes, and run as people will.
+  smoke-image:
+    needs: [build, release]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            target: x86_64-linux-musl
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            target: aarch64-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download the SPA
+        uses: actions/download-artifact@v4
+        with:
+          name: webapp-dist
+          path: docker/context/webapp/dist
+
+      - name: Download the binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: docker/context/${{ matrix.platform }}
+
+      - name: Build the image
+        run: |
+          chmod +x docker/context/${{ matrix.platform }}/inkhold
+          docker build --platform ${{ matrix.platform }} --file docker/Dockerfile \
+            --build-arg VERSION=${{ needs.build.outputs.version }} --tag inkhold:smoke docker
+
+      - name: Smoke test the image
+        run: scripts/smoke-image.sh inkhold:smoke ${{ needs.build.outputs.version }}
+
+  # Every job green, or nothing happens. Then, in this order: the image as the
+  # version and `:next`, a draft release with the archives, their checksums
+  # and provenance, and last the release made public, which creates the tag on
+  # this commit. A failure before that last step leaves no tag, so the next run
+  # on main tries the release again.
+  #
+  # `:latest`, `:beta` and the docs' download links move only on promotion
+  # (promote.yaml), after the release has been soaked on `:next`.
+  publish:
+    needs: [build, release, smoke-archive, smoke-image, test-backend, test-parsers, footprint, test-web-unit, test-web-e2e, smoke]
+    if: needs.build.outputs.release == 'true'
     runs-on: ubuntu-latest
+    # Never two at once, and never cancelled halfway.
+    concurrency:
+      group: publish
+      cancel-in-progress: false
     permissions:
-      contents: read
+      contents: write
       packages: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -400,11 +499,16 @@ jobs:
           path: /tmp/binaries
           pattern: binary-*
 
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: inkhold-*
+          merge-multiple: true
+
       # Into the `TARGETPLATFORM` layout the Dockerfile copies from, using the
-      # Makefile's own platform=target mapping rather than a second copy of it —
-      # an artifact name cannot carry a slash, so the two have to be related
-      # somewhere, and the Makefile is where that relation already lives.
-      - name: Lay out the build context
+      # Makefile's own platform=target mapping.
+      - name: Lay out the image context
         run: |
           set -e
           for a in $(make -s print-docker-arches); do
@@ -413,18 +517,19 @@ jobs:
             cp "/tmp/binaries/binary-$target/inkhold" "docker/context/$platform/inkhold"
             chmod +x "docker/context/$platform/inkhold"
           done
-          find docker/context -type f -printf '%p  %s bytes\n'
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum inkhold-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      - name: Provenance for the archives
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/inkhold-*.tar.gz
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Before the build step, which needs it. Registries reject an uppercase
-      # path and `github.repository` preserves whatever case the owner typed.
-      - name: Lowercase the image name
-        id: name
-        run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      # `:latest` is the newest release; the version tag stays on its build.
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -432,40 +537,52 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      # Registries reject an uppercase path, and `github.repository` keeps the
+      # owner's case.
+      - name: The image's name
+        id: name
+        run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # No QEMU: the Dockerfile is COPY-only, so nothing foreign is executed.
+      - name: Push the image as the version and :next
+        id: image
         uses: docker/build-push-action@v6
         with:
           context: docker
           file: docker/Dockerfile
           platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v6
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ env.VERSION }}
             SOURCE=${{ github.server_url }}/${{ github.repository }}
           push: true
           tags: |
-            ${{ steps.name.outputs.image }}:latest
-            ${{ steps.name.outputs.image }}:${{ github.ref_name }}
+            ${{ steps.name.outputs.image }}:${{ env.VERSION }}
+            ${{ steps.name.outputs.image }}:next
 
-      - name: Show what was published
-        run: docker buildx imagetools inspect ${{ steps.name.outputs.image }}:latest
-
-  # The release page: the four archives (the docs' download links point at the
-  # latest release's) and notes generated from the commits since the last tag.
-  github-release:
-    needs: [image]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download the archives
-        uses: actions/download-artifact@v4
+      - name: Provenance for the image
+        uses: actions/attest-build-provenance@v2
         with:
-          pattern: inkhold-*
-          merge-multiple: true
+          subject-name: ${{ steps.name.outputs.image }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
 
-      - name: Create the release
+      # The notes are the version's section of CHANGELOG.md when there is one.
+      - name: The release, as a draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" inkhold-*.tar.gz \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          notes=$(mktemp)
+          if [ -f CHANGELOG.md ]; then
+            awk -v v="$VERSION" '/^## / { on = ($2 == v); next } on' CHANGELOG.md > "$notes"
+          fi
+          [ -s "$notes" ] || echo "Inkhold $VERSION." > "$notes"
+          gh release create "v$VERSION" dist/inkhold-*.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease \
+            --title "Inkhold $VERSION" --notes-file "$notes"
+
+      - name: Publish the release, which tags this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
+          gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json tagName,url,isPrerelease

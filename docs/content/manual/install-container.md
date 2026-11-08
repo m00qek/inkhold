@@ -63,4 +63,5 @@ up. The image is about 25 MB: the server and a small busybox that schedules
 backups, so `docker exec -it inkhold sh` gives you a shell.
 
 `:latest` is the newest [release](https://github.com/m00qek/inkhold/releases).
-To stay on one, use its version as the tag, as in `:v0.1.0`.
+To stay on one, use its version as the tag, as in `:1.0.0-beta.1`. `:next` is
+the release being tried before it becomes `:latest`: newer, less proven.

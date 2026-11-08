@@ -1,0 +1,66 @@
+name: Promote
+
+# After a release has been soaked on `:next`: make it the one people get.
+# No rebuild: `:latest` and `:beta` point at the same image digest, and the
+# release becomes GitHub's latest, which the docs' download links follow.
+# `make promote VERSION=1.0.0-beta.N` starts it
+# (docs/content/contributor/release.md).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The release to promote, e.g. 1.0.0-beta.2"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Only a published release that passed its smoke tests (publish runs
+      # last), and never one older than what people already have.
+      - name: The release can be promoted
+        run: |
+          set -e
+          case $VERSION in 1.0.0-beta.[1-9]*) ;; *) echo "::error::not a release version: $VERSION"; exit 1 ;; esac
+          gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -qx false \
+            || { echo "::error::v$VERSION is not a published release"; exit 1; }
+          current=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName' 2>/dev/null || true)
+          n=${VERSION##*.}
+          c=${current##*.}
+          if [ -n "$current" ] && [ "$n" -lt "$c" ]; then
+            echo "::error::v$VERSION is older than $current, the current latest"
+            exit 1
+          fi
+          echo "promoting v$VERSION (latest was ${current:-none})"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Point :latest and :beta at the release's image
+        run: |
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          docker buildx imagetools create --tag "$image:latest" --tag "$image:beta" "$image:$VERSION"
+          docker buildx imagetools inspect "$image:latest"
+
+      - name: Make it the latest release
+        run: gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
