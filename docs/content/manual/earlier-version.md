@@ -18,6 +18,8 @@ see how its pages looked then, and bring it back if you need it.
 3. To make it the current version again, choose **Restore this version**. The
    version you replace is kept too, so a restore can itself be undone.
 
+![A notebook with Version history open: three versions, each with its date, how many pages changed, and the current one marked.](screenshots/history.png)
+
 The tablet gets the restored version at its next sync.
 
 On a PDF, the history is the history of your handwriting on it, and you can

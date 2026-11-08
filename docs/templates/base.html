@@ -61,8 +61,8 @@
   </footer>
   <script src="{{ get_url(path='site.js') }}"></script>
   {%- if config.mode == "serve" %}
-  {#- Previews only: a built site has its diagrams inlined (tools/diagrams.mjs). #}
-  <script src="{{ get_url(path='diagrams-preview.js') }}"></script>
+  {#- Previews only: a built site has its diagrams and screenshots inlined (tools/diagrams.mjs). #}
+  <script src="{{ get_url(path='preview.js') }}"></script>
   {%- endif %}
 </body>
 </html>

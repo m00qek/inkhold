@@ -20,6 +20,19 @@ The rules every write to the library follows: how files are kept, the recycle bi
 - Blobs are content-addressed by md5. Write order: stream to a temp file while
   hashing → fsync → verify the expected md5 → atomic rename to `<ab>/<md5>`. A
   name is its hash, so an existing blob is known-good and never overwritten.
+The order of a write, and of a delete, so a crash never leaves a row that
+points at nothing:
+
+```mermaid
+flowchart TD
+  up["Bytes arrive"] --> tmp["Stream to a temp file, hashing"]
+  tmp --> fsync["fsync, check the md5"]
+  fsync --> ren["Rename to blobs/ab/md5: the blob exists"]
+  ren --> tx["BEGIN: files row, refcount, history, quota"]
+  tx --> commit["COMMIT: the row references a blob that is already on disk"]
+  drop["Later: the last reference goes, in its own transaction"] --> reap["After that COMMIT: reapIfUnreferenced removes the blob"]
+```
+
 - **Blob before commit, GC after commit.** Multi-table mutations run in one
   transaction; the blob (and any derived file) is on disk before the commit that
   references it and is removed only after the commit that drops the last

@@ -27,6 +27,19 @@ copy. So deleting in the browser deletes on the tablet at its next sync, and
 deleting on the tablet moves the file into Inkhold's
 [recycle bin](@/manual/deleted-file.md), where it can be brought back.
 
+The diagram shows what the tablet does with a file it remembers syncing but
+can't find on the server: deleted, unless the server turns out to be a
+different library.
+
+```mermaid
+flowchart TD
+  rec["The tablet remembers every file it synced"] --> cmp["At the next sync it looks for each one on the server"]
+  cmp -->|"found"| same["Compares and syncs the difference"]
+  cmp -->|"missing"| id{"Same library as last time?"}
+  id -->|"yes"| del["Treats it as deleted in the cloud: deletes its own copy"]
+  id -->|"no: a new or restored server"| merge["Forgets what it synced before, uploads what the server lacks"]
+```
+
 That rule is why a new or [restored](@/manual/restore.md) server is dangerous
 to a tablet: every file missing from it would look deleted. Each Inkhold
 library has its own identity, so a tablet that signs in to a different one

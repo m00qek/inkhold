@@ -1,9 +1,12 @@
 // Renders the docs' Mermaid diagrams to SVG, so the site ships no diagram
-// script (content/contributor/documentation-rules.md, "Diagrams").
+// script (content/contributor/documentation-rules.md, "Diagrams"), and turns a
+// page's screenshots (`![alt](screenshots/name.png)`) into their two-theme
+// figures ("Screenshots").
 //
 //   node tools/diagrams.mjs render <content> <out>   each ```mermaid block → <out>/<hash>-{light,dark}.svg
 //   node tools/diagrams.mjs watch  <content> <out>   render, then again on every change (make serve)
-//   node tools/diagrams.mjs inline <public> <out>    swap each built block for its two SVGs (make build)
+//   node tools/diagrams.mjs inline <public> <out>    swap each built block for its two SVGs, and each
+//                                                    screenshot for its light and dark files (make build)
 //
 // A diagram is named by the hash of its source, so an unchanged one is never
 // rendered twice and the preview (static/diagrams-preview.js) finds it by the
@@ -180,6 +183,28 @@ async function render(contentDir, outDir) {
 // ---- inline (after `zola build`) ----
 
 const BUILT = /<pre[^>]*>\s*<code[^>]*data-lang="mermaid"[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/g;
+// A Markdown image of a screenshot, alone in its paragraph. Zola makes the
+// path absolute under the page's own URL; only the name matters here.
+const SHOT = /<p>\s*<img src="[^"]*?screenshots\/([\w-]+)\.png" alt="([^"]*)"\s*\/?>\s*<\/p>/g;
+
+/** A PNG's width and height, from its header. */
+function pngSize(path) {
+  const b = readFileSync(path);
+  return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+}
+
+/** The screenshot figure: both themes, the page's shows one (site.css `.shot`). */
+function shotFigure(publicDir, htmlFile, name, alt) {
+  const light = join(publicDir, "screenshots", `${name}-light.png`);
+  const dark = join(publicDir, "screenshots", `${name}-dark.png`);
+  if (!existsSync(light) || !existsSync(dark)) throw new Error(`${htmlFile}: no screenshot ${name} (npm run screenshots in webapp/)`);
+  const { w, h } = pngSize(light);
+  // Relative to the page, so the site works under any base path.
+  const depth = htmlFile.slice(publicDir.length).split("/").filter(Boolean).length - 1;
+  const up = "../".repeat(depth);
+  const img = (theme) => `<img class="shot__${theme}" src="${up}screenshots/${name}-${theme}.png" alt="${alt}" width="${w}" height="${h}" loading="lazy" decoding="async">`;
+  return `<figure class="shot${h > w ? " shot--phone" : ""}">${img("light")}${img("dark")}</figure>`;
+}
 const unescape = (s) =>
   s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 
@@ -187,12 +212,19 @@ function inline(publicDir, outDir) {
   let n = 0;
   for (const f of files(publicDir, ".html")) {
     const html = readFileSync(f, "utf8");
-    const out = html.replace(BUILT, (_, code) => {
-      const h = hashOf(unescape(code));
-      const read = (name) => readFileSync(join(outDir, `${h}-${name}.svg`), "utf8");
-      n++;
-      return `<figure class="diagram"><div class="diagram__light">${read("light")}</div><div class="diagram__dark">${read("dark")}</div></figure>`;
-    });
+    let shots = 0;
+    const out = html
+      .replace(BUILT, (_, code) => {
+        const h = hashOf(unescape(code));
+        const read = (name) => readFileSync(join(outDir, `${h}-${name}.svg`), "utf8");
+        n++;
+        return `<figure class="diagram"><div class="diagram__light">${read("light")}</div><div class="diagram__dark">${read("dark")}</div></figure>`;
+      })
+      .replace(SHOT, (_, name, alt) => {
+        shots++;
+        return shotFigure(publicDir, f, name, alt);
+      });
+    if (shots) console.log(`screenshots: ${shots} in ${f.slice(publicDir.length)}`);
     if (out !== html) writeFileSync(f, out);
   }
   // The built pages carry them inline; the files are only for the preview.

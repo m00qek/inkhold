@@ -21,6 +21,18 @@ The folder holds one store of files and a folder per snapshot:
 - **A snapshot** is a copy of the database at that moment, and a list of the
   files it needs from the store.
 
+What the backup folder holds: one store of files, and a folder per night that
+points into it.
+
+```mermaid
+flowchart TD
+  dir["The backup folder"] --> store["blobs: every file once, named by its content"]
+  dir --> s1["2026-11-04: the database that night + the list of files it needs"]
+  dir --> s2["2026-11-05: the database that night + its list"]
+  s1 --> store
+  s2 --> store
+```
+
 So each night's backup copies only what is new and stays small, yet every
 snapshot is complete on its own: restoring one needs that snapshot and the
 store, never a chain of earlier ones. `--keep=7` keeps the newest seven and

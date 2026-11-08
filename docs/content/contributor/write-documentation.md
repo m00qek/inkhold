@@ -57,7 +57,15 @@ cd webapp && npm run screenshots
 ```
 
 `tests/screenshots/shots.spec.ts` lists them; each is taken in both themes into
-`docs/static/screenshots/`. Add one there, then show it on a page.
+`docs/static/screenshots/`. Add one there, then show it on a page as a
+Markdown image alone in its paragraph, with alt text that says what matters in
+it:
+
+```markdown
+![The recycle bin, with the days each file has left.](screenshots/bin.png)
+```
+
+The build turns it into the light and dark versions; the page's theme shows one.
 
 ## Generated pages
 

@@ -12,6 +12,18 @@ extra:
 `pre-release` is the source of truth: every push to it is tested and, when the
 suites pass, published.
 
+What a push sets off:
+
+```mermaid
+flowchart TD
+  push["git push origin pre-release"] --> ci["CI: fmt, server tests, parsers, footprint, web unit + e2e"]
+  ci --> rel["release job: inkhold-target.tar.gz for 4 targets, with the browser app"]
+  rel --> img["image job: one multi-arch image"]
+  img --> ghcr["ghcr.io/m00qek/inkhold-beta :latest and :sha"]
+  rel --> dl["The archives the docs' download links point at"]
+  main["git push origin main"] --> ci2["CI: the same suites, nothing published"]
+```
+
 1. [Cross-build](@/contributor/cross-build.md) if the server changed, and
    [run the tests](@/contributor/run-the-tests.md).
 2. Push `pre-release`. CI then:

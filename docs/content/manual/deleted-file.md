@@ -18,6 +18,8 @@ it back puts it where it was, and on the tablet at its next sync.
 2. Choose the file to look at it before you decide.
 3. Choose **Restore**, in the file's own view or in its row's menu.
 
+![The recycle bin: deleted files grouped by the day they were deleted, each with a bar and the days it has left, and a menu at the end of each row.](screenshots/bin.png)
+
 How long the bin keeps things is up to the household's administrator: 30 days
 unless they [changed it](@/manual/quotas-and-bin.md).
 

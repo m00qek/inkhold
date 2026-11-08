@@ -19,6 +19,8 @@ In the library's left rail, choose **Admin**. Confirm your password and choose
 people's notes. It locks itself after 15 minutes without use, or when you
 choose **Lock console**.
 
+![The admin console's people: each person with their email, their storage meter with Change beside it, their tablets, and Reset password and Delete.](screenshots/admin-people.png)
+
 ## Add someone
 
 1. Choose **Add person**.

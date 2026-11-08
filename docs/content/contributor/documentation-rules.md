@@ -39,7 +39,8 @@ extra:
 
 - **Tutorial**: a lesson that leads a newcomer to a first success. Few pages.
 - **How-to**: the steps for one task the reader already has in mind. Most
-  pages of the user manual.
+  pages of the user manual. Steps are a numbered list; numbered headings only
+  when a step has its own code and notes under it.
 - **Reference**: facts to look up: settings, commands, file types, limits.
 - **Explanation**: why things are the way they are.
 
@@ -114,7 +115,12 @@ only their outcome. Each decision has the same shape:
 ## Screenshots
 
 - From the desktop web app, in the demo library (`npm run demo`), taken by a
-  script, never by hand: they never go stale and never show anyone's notes.
+  script (`npm run screenshots` in `webapp/`), never by hand: they never go
+  stale and never show anyone's notes.
+- In a page, a Markdown image whose path is `screenshots/<name>.png`, alone in
+  its paragraph: the build swaps it for the light and dark files the script
+  took, and the page's theme shows one.
+- Where a page tells someone what to choose on a screen, show the screen.
 - The home page also shows the phone version.
 - Every screenshot has alt text that says what matters in it.
 

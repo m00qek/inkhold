@@ -13,6 +13,8 @@ Give each person a storage allotment, and choose how long the recycle bin keeps
 what they delete. Both are in the [admin console](@/manual/household-members.md).
 The config and the command line call an allotment a quota.
 
+![The admin console's Server panel: Memory, Disk used, Recycle bin with its Change button, Backups, and the list of backup folders.](screenshots/admin-server.png)
+
 ## A person's allotment
 
 1. Under their name, choose **Change** beside their storage meter.

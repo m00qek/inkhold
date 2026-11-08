@@ -26,6 +26,8 @@ Choose **To-Do** in the library's left rail. **Inbox**, **Planned**, **All** and
 - **Download** saves the list: **Tasks**, a calendar file (`.ics`) other apps
   import, or **Plain text**.
 
+![The To-Do page showing every list: a box to add a task at the top, then Inbox, Learning French and Trip to Lyon, each task with its circle, its date and its menu.](screenshots/todo.png)
+
 Until the tablet has synced a change you made, the page says it is waiting for
 the tablet.
 

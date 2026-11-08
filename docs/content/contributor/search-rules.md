@@ -13,6 +13,19 @@ The index and its manifest, matching, ranking, coverage, find in a document, phr
 
 ## Index and manifest
 
+Where the text comes from and where the searching happens:
+
+```mermaid
+flowchart TD
+  up["A file is uploaded"] --> worker["Deferred worker derives text: terms/ and text/ files, by md5 and index_version"]
+  worker --> man["Manifest: the caller's whole live document set, with each one's derivation state"]
+  man -->|"GET manifest"| browser["Browser"]
+  browser -->|"want= bitmap of what it lacks"| frag["One stitched gzip stream of terms fragments"]
+  frag --> fts["FTS5 index in sqlite-core.wasm, kept in the browser"]
+  fts --> q["Every query is answered here; the server sees none"]
+  browser -->|"text/md5, ahead of time"| ex["Excerpts and find in a document"]
+```
+
 - **There is no server search.** The browser downloads per-document derived
   text and answers every query from a local FTS5 index in `sqlite-core.wasm`.
   The server-side FTS index was removed: it held `db_lock` for 98 s per

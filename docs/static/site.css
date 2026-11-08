@@ -756,6 +756,14 @@ main:focus {
 }
 
 /* ---- a screenshot: the app's sheet, framed like a window on the desk ---- */
+.prose .shot {
+  margin: var(--sp-4) 0 var(--sp-6);
+}
+/* A phone's screen in a reading column: its own width, centred. */
+.prose .shot--phone {
+  max-inline-size: 18rem;
+  margin-inline: auto;
+}
 .shot {
   margin: 0;
   border: 1px solid var(--line);

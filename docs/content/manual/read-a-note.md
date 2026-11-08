@@ -22,6 +22,8 @@ the pages, with the same ink as on the tablet.
 - **Layers** shows a page's layers, each on its own, to hide the ones you don't
   want to see. It is available when the page has more than one.
 
+![A notebook open in the browser: the page on the right, the Pages panel listing every page on the left, and the bar with paging, zoom, Find and the panels.](screenshots/reader.png)
+
 A sketch (`.spd`) opens the same way, with its layers' opacity too. Text files
 and images open in their own viewers; PDFs have
 [their own page](@/manual/pdf.md).

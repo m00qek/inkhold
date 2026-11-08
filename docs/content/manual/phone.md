@@ -13,6 +13,8 @@ On a phone, Inkhold is laid out for one hand: the library in two columns, a
 bar at the bottom for **Library**, **To-Do**, **Search** and **You**, and the
 reader's page controls within reach of your thumb.
 
+![The library on a phone: notebooks in two columns, and the bar at the bottom with Library, To-Do, Search and You.](screenshots/phone-library.png)
+
 Add it to your home screen and it opens like an app, full screen:
 
 - **iPhone, in Safari**: the share button, then **Add to Home Screen**.

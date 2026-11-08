@@ -22,5 +22,7 @@ A PDF opens in its own viewer, with what makes long documents manageable.
 - **Annotations** lists the layers of what you wrote on it with the tablet,
   above the PDF itself, to hide any of them.
 
+![A PDF open in its viewer, with its bar: Outline, Pages, the page number, Find and Annotations.](screenshots/pdf.png)
+
 The handwriting on a PDF is not searchable: the tablet only recognises
 handwriting in notebooks.

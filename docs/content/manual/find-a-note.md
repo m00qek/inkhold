@@ -19,6 +19,8 @@ of PDFs and text files, and your to-dos.
 3. Open a result: it opens on the page the quoted line comes from, with the
    matches marked. **Find in this note** steps through the rest.
 
+![Searching for “desert”: one result, the notebook Ozymandias, with the line it matched quoted under it and the matched word marked.](screenshots/search.png)
+
 ## What it finds
 
 - **Handwriting**, from the text your Supernote recognised itself. A notebook

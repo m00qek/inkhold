@@ -13,6 +13,18 @@ Which thread may do what, the database lock and the route flags. Why: [Concurren
 
 ## Threads and locks
 
+How a request finds a thread, and how a thread finds the database:
+
+```mermaid
+flowchart TD
+  sock["Sockets, up to max_connections (192), parked with the poller"] -->|"one becomes readable"| pool["Worker pool: workers (4) threads"]
+  pool -->|"ordinary route"| lock["db_lock: the one writer connection"]
+  pool -->|"read_only route"| readers["Reader pool (3), WAL readers; empty: the writer serves"]
+  pool -->|"manual_db_lock route"| stream["Streams bytes with the lock released, locking only around its own queries"]
+  sock -->|"held route: the live channel"| held["A thread of its own, up to max_held (24)"]
+  bg["Deferred worker, nice 19: indexing"] --> lock
+```
+
 - **Threads follow requests, not sockets.** The acceptor parks every socket
   with the poller (`http/poller.zig`, one `poll` thread); a readable one goes
   to a worker from a fixed pool (`workers`, 4) which serves it and parks it

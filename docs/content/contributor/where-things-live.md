@@ -16,6 +16,20 @@ in `services/` may import `store/` and `db/`, and nothing in `store/` knows
 `http/` exists. The one deliberate exception is `http/context.zig`, the
 per-request bag of service pointers every handler receives.
 
+The layers, with imports pointing down:
+
+```mermaid
+flowchart TD
+  entry["entry: main, cli, app, routes, config"] --> transport["transport: http/"]
+  transport --> handlers["handlers/: one function per route"]
+  handlers --> services["services/: files, auth, controlplane, sync, backup, the indexers, deferred, search"]
+  services --> stores["store/: blobs, thumbnails, derived files"]
+  services --> db["db/: SQLite, schema, migrations, the reader pool"]
+  stores --> leaf["leaf: compress/, pdf/, util/"]
+  db --> leaf
+  ctx["http/context.zig: the per-request bag of service pointers, the one exception that reaches up"] -.-> services
+```
+
 | layer | directory | holds |
 |---|---|---|
 | entry | `backend/main.zig`, `cli.zig`, `cli/`, `app.zig`, `routes.zig`, `config.zig` | process start, the CLI grammar, the composition root, the route table |

@@ -126,6 +126,30 @@ const SHOTS: Shot[] = [
       await p.locator(".admin-backups").waitFor();
     },
   },
+  {
+    // The admin console's people: each person, their tablets and their allotment.
+    name: "admin-people",
+    admin: true,
+    element: ".admin-people",
+    open: async (p) => {
+      await p.goto("/#/admin");
+      await settle(p);
+      await p.getByLabel("Password").fill("inkhold");
+      await p.getByRole("button", { name: "Unlock console" }).click();
+      await p.locator(".admin-people").waitFor();
+    },
+  },
+  {
+    // The Download menu open over a notebook: the three groups of exports.
+    name: "export-menu",
+    crop: 560,
+    open: async (p) => {
+      await p.goto("/#/note/192");
+      await settle(p);
+      await p.locator(".reader__bar").getByRole("button", { name: "Download" }).click();
+      await p.locator(".reader__bar .menu__pop", { has: p.locator(".menu__head") }).waitFor({ state: "visible" });
+    },
+  },
   { name: "phone-library", phone: true, open: async (p) => { await p.goto("/#/folder/note"); await settle(p); } },
   { name: "phone-reader", phone: true, open: async (p) => { await p.goto("/#/note/191"); await settle(p); } },
 ];
@@ -148,8 +172,8 @@ for (const shot of SHOTS) {
         }
         await shot.open(page);
         await freezeMotion(page);
-        // No focus ring left on whatever was clicked last.
-        await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+        // No focus ring left on whatever was clicked last (a menu's trigger keeps it: blurring closes the menu).
+        if (!shot.name.endsWith("-menu")) await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
         await page.waitForTimeout(600);
         const clip = shot.crop ? { x: 232, y: 0, width: 1440 - 232, height: shot.crop } : undefined;
         const path = `${OUT}/${shot.name}-${scheme}.png`;
