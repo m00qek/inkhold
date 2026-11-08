@@ -262,7 +262,7 @@ test.describe("recycle bin", () => {
     await page.goto("/");
     await openBin(page);
 
-    await page.getByRole("button", { name: "Delete everything in the recycle bin permanently" }).click();
+    await page.getByRole("button", { name: "Empty bin: delete everything in it permanently" }).click();
     const dialog = page.locator("dialog.confirm");
     await expect(dialog.locator("h2")).toHaveText("Delete all 4 items permanently?");
     // A folder's bytes are its children's; do not count them twice.

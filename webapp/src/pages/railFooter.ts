@@ -20,20 +20,23 @@ function initials(email: string): string {
  * which gives the name column room.
  */
 export function createNameplate(email: string, onOpen: () => void): HTMLElement {
+  const name = (email || "").split("@")[0] || "Signed in";
   const nameplate = el(
     "a",
     {
       class: "account",
       href: accountHref(),
-      // Says what pressing does and who it's about.
-      "aria-label": `Your account: ${email || "signed in"}`,
       title: "Your account",
     },
+    // The name is the content: what pressing does, then the words on it, so a
+    // voice user can say what they see (WCAG 2.5.3).
+    el("span", { class: "sr-only", text: "Your account: " }),
     el("span", { class: "avatar", "aria-hidden": "true", text: initials(email) }),
     el(
       "span",
       { class: "account__who" },
-      el("span", { class: "account__name", text: (email || "").split("@")[0] || "Signed in" }),
+      el("span", { class: "account__name", text: name }),
+      " ",
       el("span", { class: "account__mail", text: email }),
     ),
     el("span", { class: "account__chevron", "aria-hidden": "true", html: svg(ICONS.chevron, 1.8) }),

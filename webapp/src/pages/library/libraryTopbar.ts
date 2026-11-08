@@ -157,7 +157,8 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     id: "empty-bin",
     label: "Empty bin",
     icon: "trash",
-    ariaLabel: "Delete everything in the recycle bin permanently",
+    // Starts with the words on it, so a voice user can say what they see (WCAG 2.5.3).
+    ariaLabel: "Empty bin: delete everything in it permanently",
     danger: true,
   });
   emptyBinBtn.addEventListener("click", () => deps.onEmptyBin());
