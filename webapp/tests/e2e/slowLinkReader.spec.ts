@@ -301,7 +301,8 @@ test.describe("the reader's note stage, mid-fetch", () => {
   });
 
   // `cancelPending` must abort a superseded `text/<md5>` fetch (up to ~3 MB) so it frees
-  // one of the ~6 connections per origin; an abort shows as `net::ERR_ABORTED`.
+  // one of the ~6 connections per origin. An abort shows as `net::ERR_ABORTED` in
+  // Chromium and "Load request cancelled" in WebKit.
   test("a superseded find gives its connection back rather than running to completion", async ({ page }) => {
     await mockApi(page, {
       // Recognised throughout, or Find stays disabled and the fetch is never issued.
@@ -332,7 +333,7 @@ test.describe("the reader's note stage, mid-fetch", () => {
 
     const dropped = page.waitForEvent("requestfailed", (r) => r.url().includes("controlplane/text/"));
     await field.fill("zebras");
-    expect((await dropped).failure()?.errorText ?? "").toContain("ABORTED");
+    expect((await dropped).failure()?.errorText ?? "").toMatch(/ABORTED|cancelled/);
   });
 
   // With layers on the listing's `firstPage`, the stack is up before `getNoteMeta` lands.

@@ -288,9 +288,21 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
   test("drags across three lines and copies the passage WITH its line breaks", async ({
     page,
     context,
+    browserName,
   }) => {
-    // End to end from the shim's per-word line id to the system clipboard.
-    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    // End to end from the shim's per-word line id to the system clipboard. WebKit
+    // has no clipboard permissions to grant, so there the test reads what the
+    // app handed to the clipboard instead of reading the clipboard back.
+    if (browserName === "chromium") {
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    } else {
+      await page.addInitScript(() => {
+        const w = window as unknown as { copied?: string };
+        navigator.clipboard.writeText = async (text: string) => {
+          w.copied = text;
+        };
+      });
+    }
     await signedIn(page);
     await servePdf(page, THREE_LINE_PDF_BYTES);
     await page.goto("/#/note/178");
@@ -318,7 +330,9 @@ test.describe("PDF viewer (real MuPDF wasm)", () => {
     await expect(copyBtn).toBeVisible();
     await copyBtn.click();
 
-    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    const copied = await page.evaluate(() =>
+      (window as unknown as { copied?: string }).copied ?? navigator.clipboard.readText(),
+    );
     expect(copied).toBe("Marmalade kettle descaling\ngamma delta epsilon\nzeta eta theta");
   });
 
