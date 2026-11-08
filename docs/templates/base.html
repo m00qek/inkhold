@@ -22,7 +22,7 @@
       <a href="{{ get.permalink }}"{% if current_path == get.path %} aria-current="true"{% endif %}>{{ get.title }}</a>
       {%- for m in config.extra.manuals %}
       {%- set s = get_section(path=m ~ "/_index.md", metadata_only=true) %}
-      <a href="{{ s.permalink }}"{% if s.path in current_path %} aria-current="true"{% endif %}>{{ s.title }}</a>
+      <a href="{{ s.permalink }}"{% if s.path in current_path %} aria-current="true"{% endif %}>{{ s.extra.short }}</a>
       {%- endfor %}
     </nav>
     {#- The app's sun and moon (webapp/src/ui/icons.ts); the one shown is where a press takes you. #}
@@ -40,7 +40,7 @@
   <footer class="colophon">
     <p>Unofficial. Inkhold is an independent project, not affiliated with or endorsed by Ratta or Supernote.</p>
   </footer>
-  <script src="{{ get_url(path='theme.js') }}"></script>
+  <script src="{{ get_url(path='site.js') }}"></script>
   {%- if config.mode == "serve" %}
   {#- Previews only: a built site has its diagrams inlined (tools/diagrams.mjs). #}
   <script src="{{ get_url(path='diagrams-preview.js') }}"></script>

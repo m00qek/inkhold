@@ -2,6 +2,7 @@
 /.tools/
 /node_modules/
 /public/
+/.test-site/
 /static/diagrams/
 /static/fonts/
 /static/tokens.css

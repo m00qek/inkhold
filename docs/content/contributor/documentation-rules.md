@@ -126,6 +126,23 @@ fonts (`webapp/src/styles/00-tokens.css`, `webapp/public/fonts/`), copied in
 at build, never forked. They need not match the app pixel for
 pixel, but they must agree with each other on every page.
 
+## The quality bar
+
+Every page of the site, at 320, 390, 768 and 1440 px wide, light and dark,
+meets all of these. `make -C docs test` checks them
+(`docs/tools/check-site.mjs`), and the docs CI runs it.
+
+- No accessibility findings (axe: WCAG 2.2 AA and best practice), which
+  includes text contrast in both themes.
+- Nothing scrolls sideways. A code block, table or diagram wider than the
+  column scrolls inside itself and can be reached with the keyboard.
+- Every navigation target is at least 24 px, and 44 px on a phone.
+- Running text is 16 px or larger, and 60 to 75 characters a line on a
+  computer.
+- A manual's index is a list, not a wall: one row per page, no boxes, in
+  columns on a wide screen, and within three screens at 1440 × 900.
+- No script errors.
+
 ## Releases
 
 The docs describe the latest release. Anything only on `pre-release` is marked
@@ -143,4 +160,4 @@ reference (from `--help`).
 - A docs-only change runs the docs CI (links, diagrams, the site's check and
   build), never the code CI. Docs are `docs/**` and every `*.md`; a change
   to the app's tokens or fonts runs both.
-- Pages pass the same accessibility check (axe) as the app.
+- Pages meet the quality bar above.

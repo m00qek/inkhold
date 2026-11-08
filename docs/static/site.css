@@ -28,7 +28,7 @@
 }
 
 :root {
-  --measure: 70ch;
+  --measure: 66ch;
   --toc-w: 15rem;
   color-scheme: light dark;
 }
@@ -79,6 +79,10 @@ a {
   background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
 }
 .brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding-block: var(--sp-1);
   font: 600 1.125rem var(--font-display);
   letter-spacing: 0.08em;
   color: var(--ink);
@@ -100,6 +104,7 @@ a {
   gap: var(--sp-4);
 }
 .manuals a {
+  padding-block: var(--sp-1);
   color: var(--ink-soft);
   text-decoration: none;
   font-family: var(--font-display);
@@ -160,6 +165,13 @@ a {
   .layout:has(> .toc) {
     grid-template-columns: var(--toc-w) minmax(0, 1fr);
   }
+}
+/* No sidebar (home, Get Inkhold, a manual's index): the page is centred. */
+.layout:not(:has(> .toc)) .prose {
+  margin-inline: auto;
+}
+.layout:not(:has(> .toc)) {
+  max-inline-size: calc(64rem + 2 * var(--sp-4));
 }
 .toc {
   font-size: 0.9375rem;
@@ -286,44 +298,92 @@ main:focus {
   color: var(--ink-faint);
 }
 
-/* A manual's pages, or the two manuals, as a list of cards. */
-.cards {
+/* ---- a manual's index: every page as a row, the whole row the link ---- */
+.prose--index {
+  max-inline-size: 64rem;
+}
+.prose--index > p {
+  max-inline-size: var(--measure);
+}
+.progress {
+  color: var(--ink-soft);
+}
+.group h2 {
+  margin-block-end: var(--sp-1);
+}
+.group__says {
+  color: var(--ink-soft);
+}
+.rows {
   display: grid;
-  gap: var(--sp-3);
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 18rem), 1fr));
+  column-gap: var(--sp-6);
   padding: 0;
   list-style: none;
 }
-.cards li {
+/* The home page's two manuals: one per row, the column's width. */
+.rows--wide {
+  grid-template-columns: minmax(0, 1fr);
+}
+.prose .rows li {
+  margin: 0;
+  border-block-start: 1px solid var(--line);
+}
+.row {
   display: grid;
-  gap: var(--sp-1);
-  padding: var(--sp-3) var(--sp-4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
+  gap: 2px;
+  min-block-size: var(--hit-target-touch);
+  padding: var(--sp-2) var(--sp-2) var(--sp-3);
+  color: var(--ink);
+  text-decoration: none;
 }
-.cards li + li {
-  margin: 0;
+.row:hover {
+  background: var(--hover);
 }
-.cards .kind {
-  margin: 0;
+.row:hover b {
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
 }
-.cards span {
+.row b {
+  font-weight: 600;
+}
+.row span {
   color: var(--ink-soft);
+  font-size: 0.9375rem;
+  line-height: 1.5;
 }
-.kind-says {
-  margin-block-start: calc(-1 * var(--sp-2));
+/* A planned page: its title faint and marked, in the app's small mono. */
+.row.is-stub b {
   color: var(--ink-soft);
+  font-weight: 400;
 }
-.stub-mark {
-  font-family: var(--font-mono);
-  font-size: var(--fs-caption);
-  color: var(--ink-faint);
+/* Planned: the app's open to-do ring (22-todo.css), "not done yet". */
+.ring {
+  display: inline-block;
+  inline-size: 0.7em;
+  block-size: 0.7em;
+  margin-inline-end: 0.45em;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  vertical-align: -0.05em;
+  opacity: 0.8;
 }
+
 .stub {
   margin: var(--sp-6) 0 0;
   padding: var(--sp-3) var(--sp-4);
   border-inline-start: 2px solid var(--line);
   background: var(--hover);
   color: var(--ink-soft);
+}
+
+.sr-only {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* A diagram, inlined at build in both themes; the page's theme picks one. */
@@ -382,6 +442,18 @@ main:focus {
     overflow-x: auto;
     white-space: nowrap;
   }
+  /* Thumb-sized: the bar's links, the manual's pages. */
+  .manuals a,
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: var(--hit-target-touch);
+  }
+  .toc a {
+    display: flex;
+    align-items: center;
+    min-block-size: var(--hit-target-touch);
+  }
   .theme {
     grid-column: 2;
     grid-row: 1;
@@ -400,4 +472,9 @@ main:focus {
     border-inline: 0;
     border-radius: 0;
   }
+}
+
+/* In running text the ring is a word: the space after it is the gap. */
+.progress .ring {
+  margin-inline-end: 0;
 }

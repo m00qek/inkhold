@@ -1,9 +1,10 @@
 {
   "name": "inkhold-docs",
   "private": true,
-  "description": "Renders the docs' Mermaid diagrams to SVG at build time (tools/diagrams.mjs).",
+  "description": "Draws the docs' Mermaid diagrams (tools/diagrams.mjs) and checks the built site against its quality bar (tools/check-site.mjs).",
   "type": "module",
   "devDependencies": {
+    "@axe-core/playwright": "4.10.1",
     "mermaid": "12.3.0",
     "playwright-core": "1.61.1"
   }

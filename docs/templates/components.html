@@ -4,22 +4,22 @@
 <p class="kind">
   {%- if extra?.reader %}{{ extra.reader | replace(from=", ", to=" and ") | capitalize }}{% endif -%}
   {%- if extra?.reader and extra?.type %} · {% endif -%}
-  {%- if extra?.type %}{{ extra.type | replace(from="-", to=" ") | capitalize }}{% endif -%}
+  {%- if extra?.type %}{{ extra.type | capitalize }}{% endif -%}
 </p>
 {%- endif -%}
 {% endcomponent kind %}
 
-{# A manual's pages under its four kinds (Diátaxis), each kind in weight order. #}
+{# A manual's pages under its groups (section front matter, `extra.groups`), in weight order. #}
 {% component toc(section, here) %}
 <nav class="toc" aria-label="{{ section.title }}">
   <a class="toc__head" href="{{ section.permalink }}"{% if here == section.path %} aria-current="page"{% endif %}>{{ section.title }}</a>
-  {%- for g in [{"type": "tutorial", "label": "Tutorials"}, {"type": "how-to", "label": "How-to guides"}, {"type": "reference", "label": "Reference"}, {"type": "explanation", "label": "Explanation"}] %}
-  {%- set pages = [p for p in section.pages if p.extra?.type == g.type] %}
+  {%- for g in section.extra.groups %}
+  {%- set pages = [p for p in section.pages if p.extra.type == g.type and (g.reader == "" or p.extra.reader == g.reader)] %}
   {%- if pages %}
   <h2 class="toc__kind">{{ g.label }}</h2>
   <ul>
     {%- for p in pages %}
-    <li><a href="{{ p.permalink }}"{% if here == p.path %} aria-current="page"{% endif %}{% if p.extra?.stub %} class="is-stub"{% endif %}>{{ p.title }}</a></li>
+    <li><a href="{{ p.permalink }}"{% if here == p.path %} aria-current="page"{% endif %}{% if p.extra?.stub %} class="is-stub"{% endif %}>{{ p.title }}{% if p.extra?.stub %}<span class="sr-only"> (planned)</span>{% endif %}</a></li>
     {%- endfor %}
   </ul>
   {%- endif %}
@@ -29,5 +29,5 @@
 
 {# A page that is planned but not written: said plainly, never left looking finished. #}
 {% component stub() %}
-<p class="stub" role="note">Not written yet. This page is planned; what it will cover is above.</p>
+<p class="stub" role="note">Planned, not written yet. What it will cover is above.</p>
 {% endcomponent stub %}

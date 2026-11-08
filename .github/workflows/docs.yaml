@@ -49,3 +49,7 @@ jobs:
 
       - name: Build the site
         run: make -C docs build
+
+      # The quality bar: axe, no sideways scroll, tap targets, line length.
+      - name: Test the site
+        run: make -C docs test

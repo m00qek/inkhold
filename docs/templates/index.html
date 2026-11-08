@@ -3,13 +3,14 @@
 <article class="prose">
   <h1>{{ section.title }}</h1>
   {{ section.content | safe }}
-  <ul class="cards">
+  {#- The same rows a manual's index uses: one way to list pages everywhere. #}
+  <ul class="rows rows--wide">
     {%- for m in config.extra.manuals %}
     {%- set s = get_section(path=m ~ "/_index.md") %}
-    <li>
-      <a href="{{ s.permalink }}"><b>{{ s.title }}</b></a>
+    <li><a class="row" href="{{ s.permalink }}">
+      <b>{{ s.title }}</b>
       <span>{{ s.description }}</span>
-    </li>
+    </a></li>
     {%- endfor %}
   </ul>
 </article>

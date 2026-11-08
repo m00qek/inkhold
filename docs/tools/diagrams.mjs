@@ -32,7 +32,7 @@ function* files(dir, ext) {
 }
 
 // Bumped when the SVGs themselves change (sizing, theming), so cached ones are redrawn.
-const RENDER_VERSION = "3";
+const RENDER_VERSION = "4";
 
 /** Mermaid sizes its SVG `width="100%"` with a max-width: no size of its own, so as
  *  an <img> (the preview) it collapses. Give it its drawn size; CSS still shrinks it. */
@@ -86,6 +86,8 @@ function themes() {
     const c = (name) => solid(t[name], t.sheet);
     return {
       darkMode,
+      // The app is flat: no shadows under the boxes.
+      dropShadow: "none",
       background: c("sheet"),
       fontFamily: '"Space Grotesk", sans-serif',
       fontSize: "15px",

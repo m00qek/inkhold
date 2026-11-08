@@ -2,7 +2,9 @@
 #
 #   serve   preview at http://127.0.0.1:1111, reloading as you write
 #   build   the static site, in docs/public/
-#   check   links and anchors, offline (what the docs CI runs)
+#   check   links and anchors, offline
+#   test    the built site against the quality bar: every page, four widths,
+#           light and dark (tools/check-site.mjs; the docs CI runs check and test)
 #   clean   drop everything generated
 #
 # Zola is downloaded once, pinned and checksummed, into .tools/: the same
@@ -36,7 +38,9 @@ ZOLA_URL := https://github.com/getzola/zola/releases/download/v$(ZOLA_VERSION)/z
 APP_TOKENS := ../webapp/src/styles/00-tokens.css
 APP_FONTS  := $(wildcard ../webapp/public/fonts/*.woff2)
 
-.PHONY: serve build check clean assets diagrams
+TEST_PORT := 1112
+
+.PHONY: serve build check test clean assets diagrams
 
 serve: $(ZOLA) assets diagrams
 	@trap 'kill 0' INT TERM EXIT; \
@@ -50,8 +54,13 @@ build: $(ZOLA) assets diagrams
 check: $(ZOLA) assets diagrams
 	$(ZOLA) check --skip-external-links
 
+test: $(ZOLA) assets diagrams
+	$(ZOLA) build --base-url http://127.0.0.1:$(TEST_PORT) --output-dir .test-site --force
+	node tools/diagrams.mjs inline .test-site static/diagrams
+	node tools/check-site.mjs .test-site $(TEST_PORT)
+
 clean:
-	rm -rf public static/diagrams static/fonts static/tokens.css
+	rm -rf public .test-site static/diagrams static/fonts static/tokens.css
 
 assets: static/tokens.css $(patsubst ../webapp/public/fonts/%,static/fonts/%,$(APP_FONTS))
 
