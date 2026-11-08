@@ -1,0 +1,47 @@
+# The Inkhold server. Install the binary at /usr/local/bin/inkhold, the
+# browser app's files at /usr/local/share/inkhold/web and the config at
+# /etc/inkhold/config.zon (docs: "Install the binary"), then
+#   systemctl enable --now inkhold
+#   journalctl -u inkhold      # the first start prints the first account's password
+#
+# Edit before enabling (or use `systemctl edit inkhold`):
+#   - User=/Group= : a system account of its own (`useradd --system inkhold`)
+#   - --config=    : the config file
+#
+# The state (database, cred.key, notebooks, search index) lives in
+# /var/lib/inkhold: systemd creates it for the account, and it is the only
+# place the server may write. Give the config absolute paths into it: the
+# backup unit (inkhold-backup.service) reads the same config from another
+# working directory.
+#
+# Not needed in Docker: the image runs the server itself.
+
+[Unit]
+Description=Inkhold
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=inkhold
+Group=inkhold
+ExecStart=/usr/local/bin/inkhold --config=/etc/inkhold/config.zon
+StateDirectory=inkhold
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/inkhold
+Restart=on-failure
+RestartSec=5
+
+# Nothing but its own state is writable; nothing it does can gain privileges.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
