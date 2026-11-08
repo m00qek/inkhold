@@ -28,7 +28,9 @@
 }
 
 :root {
-  --measure: 66ch;
+  /* 62, not 66: text is in the reader's system font, and one font's 66ch is
+     another's 78 characters a line (Noto Sans 75, Ubuntu's 78). */
+  --measure: 62ch;
   --toc-w: 15rem;
   color-scheme: light dark;
 }

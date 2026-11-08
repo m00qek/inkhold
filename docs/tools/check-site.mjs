@@ -53,9 +53,10 @@ try {
         const page = await ctx.newPage();
         page.on("pageerror", (e) => fail(where, `script error: ${e.message}`));
         await page.goto(BASE + url);
-        // Every face loaded before anything is measured. A canvas measures in a
-        // font only once it has loaded, and before that in whatever the machine
-        // falls back to, so line lengths differed between a laptop and CI.
+        // Every face loaded before anything is measured: a canvas measures in a
+        // font only once it has loaded. Running text is in the system's own
+        // font (site.css `--font-body`), so line lengths still differ a little
+        // from one machine to the next; `--measure` leaves room for that.
         await page.evaluate(() => Promise.all([...document.fonts].map((f) => f.load())).then(() => document.fonts.ready));
 
         const m = await page.evaluate((minTarget) => {
