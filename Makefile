@@ -14,7 +14,7 @@ SERVE_PORT := $(PORT)
 
 TARGET ?= native-linux-musl
 
-.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-lint web-test-e2e smoke web-test-setup fmt fmt-fix release-status promote commit-check commit-hook lan-ip clean docs docs-build
+.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-lint web-test-e2e smoke web-test-setup fmt fmt-fix release-status backport promote commit-check commit-hook lan-ip clean docs docs-build
 
 help:
 	@echo "Inkhold"
@@ -35,6 +35,7 @@ help:
 	@echo "  make docs-build     build the website into docs/public"
 	@echo "  make fmt            check formatting        make fmt-fix   reformat in place"
 	@echo "  make release-status the version in build.zig.zon, and whether it is released"
+	@echo "  make backport       COMMIT=<sha on main>: copy a fix onto stable"
 	@echo "  make promote        VERSION=1.0.0-beta.N: after the soak, :next becomes :latest"
 	@echo "  make commit-check   check commit titles (RANGE=, default origin/main..HEAD)"
 	@echo "  make commit-hook    check each title as you commit (installs a git hook)"
@@ -308,6 +309,12 @@ web-test-setup:
 # :next, make VERSION the one people get (:latest, :beta, the download links).
 release-status:
 	@scripts/release-version.sh
+
+# backport: copy COMMIT, already on main, onto stable: a docs fix reaches the
+# site's root, a code fix waits there for a fix release.
+backport:
+	@test -n "$(COMMIT)" || { echo "make backport COMMIT=<sha on main>"; exit 1; }
+	@scripts/backport.sh $(COMMIT)
 
 promote:
 	@test -n "$(VERSION)" || { echo "make promote VERSION=1.0.0-beta.N"; exit 1; }

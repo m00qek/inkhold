@@ -2,8 +2,8 @@ name: Promote
 
 # After a release has been soaked on `:next`: make it the one people get.
 # No rebuild: `:latest` and `:beta` point at the same image digest, and the
-# release becomes GitHub's latest, which the docs' download links follow, and
-# the docs site's root is rebuilt from it.
+# release becomes GitHub's latest, which the docs' download links follow,
+# `stable` is reset to it, and the docs site's root is rebuilt from stable.
 # `make promote VERSION=1.0.0-beta.N` starts it
 # (docs/content/contributor/release.md).
 on:
@@ -35,13 +35,14 @@ jobs:
       - name: The release can be promoted
         run: |
           set -e
-          case $VERSION in 1.0.0-beta.[1-9]*) ;; *) echo "::error::not a release version: $VERSION"; exit 1 ;; esac
+          echo "$VERSION" | grep -Eqx '1\.0\.0-beta\.[1-9][0-9]*(\.[1-9][0-9]*)?' \
+            || { echo "::error::not a release version: $VERSION"; exit 1; }
           gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' | grep -qx false \
             || { echo "::error::v$VERSION is not a published release"; exit 1; }
+          # 1.0.0-beta.N.M as one number, M = 0 for a beta itself: beta.2 < beta.2.1 < beta.3.
+          order() { v=${1#v}; v=${v#1.0.0-beta.}; n=${v%%.*}; m=0; [ "$v" = "$n" ] || m=${v#*.}; echo $((n * 1000 + m)); }
           current=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq '.tagName' 2>/dev/null || true)
-          n=${VERSION##*.}
-          c=${current##*.}
-          if [ -n "$current" ] && [ "$n" -lt "$c" ]; then
+          if [ -n "$current" ] && [ "$(order "$VERSION")" -lt "$(order "$current")" ]; then
             echo "::error::v$VERSION is older than $current, the current latest"
             exit 1
           fi
@@ -66,7 +67,18 @@ jobs:
       - name: Make it the latest release
         run: gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
 
-  # The site's root now shows this release.
+      # `stable` is what people have: reset to this release, dropping the
+      # backports the previous one carried (this release has them, or newer).
+      - name: Reset stable to the release
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/v$VERSION" --jq .sha)
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/stable" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/stable" -f sha="$sha" -F force=true --jq .object.sha
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/heads/stable -f sha="$sha" --jq .object.sha
+          fi
+
+  # The site's root now shows this release (stable).
   docs:
     needs: [promote]
     uses: ./.github/workflows/docs.yaml

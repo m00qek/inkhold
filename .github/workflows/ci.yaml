@@ -3,10 +3,12 @@ name: Test
 # Docs-only changes run `docs.yaml`, not this (docs/contributor/documentation-rules.md).
 on:
   push:
-    # A push to `main` is tested. When build.zig.zon names a version not yet
-    # released, the same run also builds, smoke-tests and, if every job is
-    # green, publishes it and tags the commit (docs/content/contributor/release.md).
-    branches: [ "main" ]
+    # A push to `main` or `stable` is tested. When build.zig.zon names a
+    # version not yet released, the same run also builds, smoke-tests and, if
+    # every job is green, publishes it and tags the commit: main releases the
+    # next beta, stable a fix of the current one
+    # (docs/content/contributor/release.md).
+    branches: [ "main", "stable" ]
     paths-ignore: [ "docs/**", "**/*.md" ]
   pull_request:
     paths-ignore: [ "docs/**", "**/*.md" ]
@@ -24,11 +26,11 @@ on:
 permissions:
   contents: read
 
-# A newer push cancels a pull request's run, never main's: a run on main may be
-# publishing a release, and stopping it halfway would leave half a release.
+# A newer push cancels a pull request's run, never main's or stable's: such a
+# run may be publishing a release, and stopping it halfway would leave half one.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/stable' }}
 
 jobs:
   # ---- Built once ----------------------------------------------------------
@@ -42,18 +44,26 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
-      # "true" when this run releases: a version not yet tagged, on main.
-      release: ${{ steps.version.outputs.pending == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+      # "true" when this run releases: a version not yet tagged, pushed to
+      # main or stable.
+      release: ${{ steps.version.outputs.pending == 'true' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/stable') && github.event_name != 'pull_request' }}
       # "true" when the release jobs run: a release, or a rehearsal of one.
-      build-release: ${{ (steps.version.outputs.pending == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || inputs.rehearse == true }}
+      build-release: ${{ (steps.version.outputs.pending == 'true' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/stable') && github.event_name != 'pull_request') || inputs.rehearse == true }}
     steps:
+      # All history: on stable, the version is checked against the release
+      # stable is based on (`git describe`).
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       # On every run, pull requests too: a version that could never be
       # released (not 1.0.0-beta.N, or not newer than the last) fails here.
       - name: The version, and whether it is released yet
         id: version
+        env:
+          # A pull request is held to the rules of the branch it targets.
+          BRANCH: ${{ github.base_ref || github.ref_name }}
         run: make release-status >> "$GITHUB_OUTPUT"
 
       - name: Setup Zig
@@ -486,7 +496,7 @@ jobs:
         run: scripts/smoke-image.sh inkhold:smoke ${{ needs.build.outputs.version }}
 
   # Every job green, or nothing happens. Then, in this order: the image as the
-  # version and `:next`, a draft release with the archives, their checksums
+  # version (and `:next`, from main), a draft release with the archives, their checksums
   # and provenance, and last the release made public, which creates the tag on
   # this commit. A failure before that last step leaves no tag, so the next run
   # on main tries the release again.
@@ -569,7 +579,9 @@ jobs:
         run: echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       # No QEMU: the Dockerfile is COPY-only, so nothing foreign is executed.
-      - name: Push the image as the version and :next
+      # `:next` is main's candidate: a fix released from stable gets its version
+      # tag only, so it never knocks main's candidate off `:next`.
+      - name: Push the image as the version (and :next, from main)
         id: image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -582,7 +594,7 @@ jobs:
           push: true
           tags: |
             ${{ steps.name.outputs.image }}:${{ env.VERSION }}
-            ${{ steps.name.outputs.image }}:next
+            ${{ github.ref == 'refs/heads/main' && format('{0}:next', steps.name.outputs.image) || '' }}
 
       - name: Provenance for the image
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

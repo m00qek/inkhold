@@ -9,9 +9,16 @@ extra:
 
 # Make a release
 
-A release is a commit on `main` that names a new version in `build.zig.zon`.
-CI builds it, runs it on every architecture and, only if every job is green,
-publishes it to `:next` and tags the commit. After a soak, you promote it.
+A release is a commit that names a new version in `build.zig.zon`. CI builds
+it, runs it on every architecture and, only if every job is green, publishes it
+and tags the commit. After a soak, you promote it.
+
+Two branches:
+
+- `main`, where work happens. It releases the next beta, `1.0.0-beta.N`.
+- `stable`, what people have: the promoted release, plus fixes copied onto it
+  since. It releases fixes, `1.0.0-beta.N.M`, and the docs site's root is
+  built from it. Promoting a release resets `stable` to it.
 
 ```mermaid
 flowchart TD
@@ -54,11 +61,39 @@ During the beta, every version is `1.0.0-beta.N`, one more than the last.
    ```
 
    `:latest` and `:beta` then point at the same image, the release becomes
-   the latest one, which the docs' download links follow, and the docs site's
-   root is rebuilt from its tag. Nothing else is rebuilt.
+   the latest one, which the docs' download links follow, `stable` is reset
+   to it, and the docs site's root is rebuilt from `stable`. Nothing else is
+   rebuilt.
 
 If a job fails, nothing is published and nothing is tagged. Fix it on `main`:
 the version is still unreleased, so the next run tries again. After a
 docs-only fix, which runs no tests, start it from Actions → Test → Run
 workflow. A candidate that doesn't survive the soak is never promoted; release
 the next version instead.
+
+## Fix a typo in the docs
+
+Fix it on `main`, then copy the commit onto `stable`:
+
+```sh
+make backport COMMIT=<sha>
+```
+
+`/next/` has the fix as soon as `main`'s docs run deploys; the site's root, a
+few minutes after the backport. No release is needed.
+
+## Release a fix on its own
+
+To ship a bug fix without what `main` has gained since the last release:
+
+1. Fix it on `main`, then `make backport COMMIT=<sha>`.
+2. On `stable`, set `.version` to the next fix of the current release, for
+   example `1.0.0-beta.2.1` after `1.0.0-beta.2`, and commit it as
+   `chore(release): 1.0.0-beta.2.1`. Push `stable`.
+3. CI releases it as above, except that it moves only its own version tag,
+   never `:next`, which stays `main`'s candidate.
+4. Soak it (`:1.0.0-beta.2.1`), then `make promote VERSION=1.0.0-beta.2.1`.
+
+`1.0.0-beta.2.1` sorts after `1.0.0-beta.2` and before `1.0.0-beta.3`. A
+backport that doesn't apply cleanly stops with nothing pushed: resolve it in a
+checkout of `stable` by hand.

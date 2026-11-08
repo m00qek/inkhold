@@ -5,7 +5,7 @@ name: Commits
 # with no path filter: a docs-only push is checked too.
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "stable" ]
   pull_request:
 
 permissions:

@@ -4,7 +4,7 @@ name: Docs
 # (docs/contributor/documentation-rules.md).
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "stable" ]
     paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/config.zig", "backend/cli.zig", "backend/routes.zig", ".github/workflows/docs.yaml" ]
   # To republish the site without a change: Actions → Docs → Run workflow.
   workflow_dispatch:
@@ -68,53 +68,56 @@ jobs:
           DOCS_CHANNEL: next
         run: make -C docs test
 
-      # ---- The site as published: the release at the root, main under /next/ ----
+      # ---- The site as published: stable at the root, main under /next/ -------
       #
-      # The root shows the latest release (the one people install, which
-      # promote.yaml makes latest), built from its own tag, where its pages
-      # passed this same test. Before the first release, main.
-      - name: The release the site's root shows
-        id: release
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: echo "tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+      # The root is `stable`: the latest release (promote.yaml resets stable to
+      # it) plus any docs fixes backported since. Before the first release,
+      # main. /next/ is always main. So a push to either rebuilds both.
+      - name: Is there a stable branch
+        id: stable
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/stable') && github.event_name != 'pull_request'
+        run: echo "ref=$(git ls-remote --heads origin stable | grep -q . && echo stable || echo main)" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout the release
-        if: steps.release.outputs.tag
+      - name: Checkout the root's source
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/stable') && github.event_name != 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.release.outputs.tag }}
-          path: release
+          ref: ${{ steps.stable.outputs.ref }}
+          path: root
+
+      - name: Checkout main, for /next/
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/stable') && github.event_name != 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: next
 
       - name: Build the root
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/stable') && github.event_name != 'pull_request'
         run: |
-          src=.
-          if [ -n "${{ steps.release.outputs.tag }}" ]; then
-            src=release
-            (cd release/docs && npm ci --no-audit --no-fund && npx playwright-core install --only-shell chromium)
-          fi
-          make -C "$src/docs" build OUT="$RUNNER_TEMP/site"
+          (cd root/docs && npm ci --no-audit --no-fund && npx playwright-core install --only-shell chromium)
+          make -C root/docs build OUT="$RUNNER_TEMP/site"
 
       # After the root: building the root with --force would remove /next/.
       - name: Build /next/
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/stable') && github.event_name != 'pull_request'
         env:
           DOCS_CHANNEL: next
-        run: make -C docs build OUT="$RUNNER_TEMP/site/next" BASE_URL=https://m00qek.github.io/inkhold/next
+        run: |
+          (cd next/docs && npm ci --no-audit --no-fund && npx playwright-core install --only-shell chromium)
+          make -C next/docs build OUT="$RUNNER_TEMP/site/next" BASE_URL=https://m00qek.github.io/inkhold/next
 
       - name: Upload the site for GitHub Pages
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/stable') && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ${{ runner.temp }}/site
 
-  # PUBLISHES ONLY FROM `main`: https://m00qek.github.io/inkhold/ (the latest
-  # release) and /next/ (main).
+  # PUBLISHES ONLY FROM `main` and `stable`: https://m00qek.github.io/inkhold/
+  # (stable: the latest release and its docs fixes) and /next/ (main).
   pages:
     needs: [links, site]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/stable') && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
       pages: write

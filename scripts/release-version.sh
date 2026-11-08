@@ -5,23 +5,22 @@
 #   version=1.0.0-beta.2
 #   pending=true       no tag v<version> yet: this commit releases it once green
 #
-# Fails when the version could never be released: not 1.0.0-beta.N while the
-# beta lasts, or not newer than the last release. 0.0.0 means "no release yet".
+# Which versions a branch may release, while the beta lasts:
+#   main     1.0.0-beta.N, N one past every release so far
+#   stable   1.0.0-beta.N.M, a fix of the release stable is based on
+# A version that could never be released fails here. 0.0.0 means "no release
+# yet". BRANCH defaults to the checked-out one.
 set -eu
 
 version=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
+branch=${BRANCH:-$(git rev-parse --abbrev-ref HEAD)}
 echo "version=$version"
+
+fail() { echo "::error::$*" >&2; exit 1; }
 
 if [ "$version" = 0.0.0 ]; then
   echo "pending=false"
   exit 0
-fi
-
-# While the beta lasts, every release is 1.0.0-beta.N.
-n=$(printf '%s\n' "$version" | sed -n 's/^1\.0\.0-beta\.\([1-9][0-9]*\)$/\1/p')
-if [ -z "$n" ]; then
-  echo "::error::build.zig.zon says $version; releases are 1.0.0-beta.N during the beta" >&2
-  exit 1
 fi
 
 tags=$(git ls-remote --tags --refs origin 'v1.0.0-beta.*' | sed 's|.*refs/tags/||')
@@ -30,9 +29,29 @@ if printf '%s\n' "$tags" | grep -qx "v$version"; then
   exit 0
 fi
 
-last=$(printf '%s\n' "$tags" | sed -n 's/^v1\.0\.0-beta\.\([0-9]*\)$/\1/p' | sort -n | tail -n 1)
-if [ -n "$last" ] && [ "$n" -le "$last" ]; then
-  echo "::error::build.zig.zon says $version, but v1.0.0-beta.$last is already out" >&2
-  exit 1
-fi
+case $branch in
+  main)
+    n=$(printf '%s\n' "$version" | sed -n 's/^1\.0\.0-beta\.\([1-9][0-9]*\)$/\1/p')
+    [ -n "$n" ] || fail "build.zig.zon says $version; main releases 1.0.0-beta.N during the beta"
+    last=$(printf '%s\n' "$tags" | sed -n 's/^v1\.0\.0-beta\.\([0-9]*\).*/\1/p' | sort -n | tail -n 1)
+    if [ -n "$last" ] && [ "$n" -le "$last" ]; then
+      fail "build.zig.zon says $version, but v1.0.0-beta.$last is already out"
+    fi
+    ;;
+  stable)
+    n=$(printf '%s\n' "$version" | sed -n 's/^1\.0\.0-beta\.\([1-9][0-9]*\)\.[1-9][0-9]*$/\1/p')
+    m=${version##*.}
+    [ -n "$n" ] || fail "build.zig.zon says $version; stable releases fixes, 1.0.0-beta.N.M"
+    # The release stable is based on: the newest release tag in its history.
+    base=$(git describe --tags --abbrev=0 --match 'v1.0.0-beta.*' 2>/dev/null | sed -n 's/^v1\.0\.0-beta\.\([0-9]*\).*/\1/p')
+    [ "$n" = "$base" ] || fail "build.zig.zon says $version, but stable is based on 1.0.0-beta.$base"
+    last=$(printf '%s\n' "$tags" | sed -n "s/^v1\.0\.0-beta\.$n\.\([0-9]*\)$/\1/p" | sort -n | tail -n 1)
+    if [ -n "$last" ] && [ "$m" -le "$last" ]; then
+      fail "build.zig.zon says $version, but v1.0.0-beta.$n.$last is already out"
+    fi
+    ;;
+  *)
+    fail "releases are made from main or stable, not $branch"
+    ;;
+esac
 echo "pending=true"
