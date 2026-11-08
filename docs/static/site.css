@@ -885,3 +885,16 @@ main:focus {
     padding-inline: var(--sp-4);
   }
 }
+
+/* A key, as the app draws one (22-todo.css, `.todo-keys kbd`). */
+.prose kbd {
+  display: inline-block;
+  min-inline-size: 1.6em;
+  padding: 0 0.35em;
+  border: 1px solid var(--line);
+  border-block-end-width: 2px;
+  border-radius: var(--radius);
+  background: var(--sheet);
+  font: 0.8125em/1.5 var(--font-mono);
+  text-align: center;
+}
