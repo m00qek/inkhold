@@ -28,7 +28,7 @@ flowchart TD
    [run the tests](@/contributor/run-the-tests.md).
 2. Push `pre-release`. CI then:
    - runs the server, parser and browser app suites, and the footprint check;
-   - builds the server for the four targets, with the browser app, as
+   - only if all of them pass, builds the server for the four targets, with the browser app, as
      archives (the download links in the docs point at them);
    - builds and publishes the container image for all four architectures, as
      `ghcr.io/m00qek/inkhold-beta:latest` and as the commit's hash.

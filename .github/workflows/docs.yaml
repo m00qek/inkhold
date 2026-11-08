@@ -9,6 +9,9 @@ on:
   pull_request:
     paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/config.zig", "backend/cli.zig", "backend/routes.zig", ".github/workflows/docs.yaml" ]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -22,10 +25,13 @@ jobs:
 
       # Offline: links between our own files and anchors. The web is not
       # checked here, so a site being down never fails a docs change.
+      # Not the site's pages: their `@/page.md` links are Zola's, which lychee
+      # reads as missing files, and `zola check` below checks them and their
+      # anchors.
       - name: Check links
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --offline --include-fragments --no-progress --exclude-path "docs/(node_modules|\.tools|public)" "docs/**/*.md" "*.md"
+          args: --offline --include-fragments --no-progress --exclude-path "docs/(node_modules|\.tools|public|content)" "docs/**/*.md" "*.md"
           fail: true
 
   site:

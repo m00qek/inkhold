@@ -10,6 +10,10 @@ on:
   pull_request:
     paths-ignore: [ "docs/**", "**/*.md" ]
 
+# Read-only by default; only `image` asks for more, to push to GHCR.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -155,8 +159,9 @@ jobs:
     # GATED ON THE SUITES. Without this the release job ran in PARALLEL with
     # them, so a red build still uploaded artifacts — and the README points
     # beta testers straight at those downloads. Shipping a binary from a build
-    # that failed is worse than shipping nothing.
-    needs: [webapp]
+    # that failed is worse than shipping nothing. The footprint too: a build
+    # that blows the memory ceilings a Pi depends on is not one to publish.
+    needs: [webapp, footprint]
     runs-on: ubuntu-latest
     strategy:
       matrix:
