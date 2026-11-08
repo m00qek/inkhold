@@ -5,6 +5,7 @@
 import { delay } from "./fake";
 import { ApiError } from "./errors";
 import type { NewTodoTask, TodoList, TodoSnapshot, TodoTask, TodoTaskPatch } from "./todoTypes";
+import { demoNotesOn } from "./demoNotes";
 
 const DAY = 86_400_000;
 
@@ -18,16 +19,27 @@ export function fakeTodoMethods(latency: number) {
   let seq = 0;
   const id = (): string => (++seq).toString(16).padStart(32, "0");
   const now = () => Date.now();
-  const lists: TodoList[] = [
-    { id: id(), title: "Français", waiting: false },
-    { id: id(), title: "Casa", waiting: false },
-  ];
-  const [fr, casa] = [lists[0]!.id, lists[1]!.id];
   const t = (p: Partial<TodoTask> & Pick<TodoTask, "title">): TodoTask => ({
     id: id(), listId: null, done: false, due: null, completedAt: null, sort: 0, sortTime: now() - DAY,
     linked: false, link: null, waiting: false, ...p,
   });
-  const tasks: TodoTask[] = [
+  // The demo and the docs' screenshots (`demoNotes.ts`): someone learning French, in English.
+  // The e2e suite keeps the second set, whose names its tests read.
+  const demo = demoNotesOn();
+  const lists: TodoList[] = demo
+    ? [{ id: id(), title: "Learning French", waiting: false }, { id: id(), title: "Trip to Lyon", waiting: false }]
+    : [{ id: id(), title: "Français", waiting: false }, { id: id(), title: "Casa", waiting: false }];
+  const [fr, casa] = [lists[0]!.id, lists[1]!.id];
+  const tasks: TodoTask[] = demo ? [
+    t({ title: "Practise the passé composé", listId: fr, due: noonIn(2), sort: 0, linked: true, link: { noteId: "101", page: 2, name: "Weekly review", text: "confirm the page-range serving budget" } }),
+    t({ title: "Learn twenty new verbs", listId: fr, sort: 1 }),
+    t({ title: "Watch a film in French, French subtitles on", listId: fr, due: noonIn(5), sort: 2 }),
+    t({ title: "Book a conversation class", listId: fr, due: noonIn(-1), sort: 3 }),
+    t({ title: "Learn the numbers to a hundred", listId: fr, done: true, completedAt: now() - 2 * DAY, sort: 4 }),
+    t({ title: "Book the train to Lyon", listId: casa, due: noonIn(0), sort: 0 }),
+    t({ title: "Find a café by the Saône for Sunday", listId: casa, sort: 1 }),
+    t({ title: "Write to my pen pal in Lyon" }),
+  ] : [
     t({ title: "Estudar", listId: fr, due: noonIn(8), sort: 0 }),
     t({ title: "Ler", listId: fr, sort: 1 }),
     t({ title: "Revisar o passé composé", listId: fr, sort: 2, linked: true, link: { noteId: "101", page: 2, name: "Weekly review", text: "confirm the page-range serving budget" } }),
