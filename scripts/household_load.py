@@ -29,6 +29,11 @@ would compete with the server it is measuring.
     scripts/household_load.py --ssh devlab-pi1bplus --attach 8080 --admin EMAIL:PASSWORD \
         --seconds 900 --stop-file /tmp/stop-load
 
+`--url HOST:PORT --first-password PW` loads a fresh install started somewhere
+this script cannot reach by ssh: a devlab job on a Pi (scripts/pi-load.sh runs
+the whole thing). Memory then comes from the admin health endpoint, the CPU
+from the job's own accounting, and indexing gets a fixed `--settle` time.
+
 `--attach` loads a server that is already running there (say, one a real tablet
 syncs with) instead of a fresh install: it never stops it or deletes anything.
 The admin's own library is browsed as it is and gets no seeded files, so
@@ -179,10 +184,19 @@ def parse_sample(status_text, stat_text):
 class Server:
     """`inkhold serve` on a temp install, here or on `ssh` host."""
 
-    def __init__(self, binary, ssh, remote_binary, port, tls=None, suites=(), attach=False):
+    def __init__(self, binary, ssh, remote_binary, port, tls=None, suites=(), attach=False, url=None, settle=180,
+                 go_file=None):
         """`tls`: (cert.pem, key.pem) paths here, sent along when remote.
-        `attach`: use the server already listening on `port` on `ssh`; never stop it."""
+        `attach`: use the server already listening on `port` on `ssh`; never stop it.
+        `url`: a fresh install already started at HOST:PORT, out of ssh's reach."""
         self.ssh, self.port, self.attached = ssh, port, attach
+        self.url, self.settle, self.health, self.go_file = url, settle, None, go_file
+        if url:
+            self.host, port_s = url.rsplit(":", 1)
+            self.port = int(port_s)
+            self.ticks = 1
+            self.last = {"RssAnon": 0, "VmRSS": 0, "Threads": 0, "cpu_ticks": 0}
+            return
         if attach:
             assert ssh, "--attach needs --ssh"
             self.host = subprocess.check_output(["ssh", "-G", ssh], text=True).split("\nhostname ")[1].split()[0]
@@ -249,6 +263,18 @@ class Server:
         raise SystemExit("server did not come up")
 
     def sample(self):
+        if self.url:
+            # The admin health endpoint: memory only (CPU is the job's to report).
+            if self.health:
+                try:
+                    st, r = self.health.json("GET", "/api/admin/health", kind="health")
+                    if st == 200:
+                        h = r["health"]
+                        self.last = {"RssAnon": (h["memory_anon_bytes"] or 0) // 1024,
+                                     "VmRSS": (h["memory_bytes"] or 0) // 1024, "Threads": 0, "cpu_ticks": 0}
+                except (OSError, KeyError, ValueError):
+                    pass
+            return dict(self.last)
         if not self.ssh:
             return parse_sample(open(f"/proc/{self.pid}/status").read(), open(f"/proc/{self.pid}/stat").read())
         out = subprocess.check_output(["ssh", "-o", "BatchMode=yes", self.ssh,
@@ -259,6 +285,17 @@ class Server:
     def wait_quiet(self, limit_s=900):
         """Until the deferred worker has indexed what arrived: CPU under 5% of a core
         for three seconds running. Returns how long that took."""
+        if self.url:
+            # No CPU to watch from here. With --go-file, whoever can see it (pi-load.sh,
+            # through the job's accounting) says when indexing is done; else a fixed settle.
+            print("seeded: waiting for indexing", flush=True)
+            if not self.go_file:
+                time.sleep(self.settle)
+                return self.settle
+            t0 = time.time()
+            while not os.path.exists(self.go_file) and time.time() - t0 < limit_s:
+                time.sleep(0.5)
+            return time.time() - t0
         t0 = time.time()
         prev, quiet = self.sample(), 0
         while time.time() - t0 < limit_s:
@@ -272,7 +309,7 @@ class Server:
         return time.time() - t0
 
     def stop(self):
-        if self.attached:
+        if self.attached or self.url:
             return  # not ours: leave it running, with its data
         if self.ssh:
             subprocess.run(["ssh", "-o", "BatchMode=yes", self.ssh,
@@ -378,6 +415,10 @@ def main():
     ap.add_argument("--attach", type=int, metavar="PORT", help="load the server already running on --ssh at this port")
     ap.add_argument("--admin", metavar="EMAIL:PASSWORD", help="with --attach: an existing admin account")
     ap.add_argument("--stop-file", help="end the evening early once this local file exists")
+    ap.add_argument("--url", metavar="HOST:PORT", help="a fresh install already started there, out of ssh's reach")
+    ap.add_argument("--first-password", help="with --url: the first-run admin's temporary password")
+    ap.add_argument("--settle", type=int, default=180, help="with --url: seconds to let indexing finish")
+    ap.add_argument("--go-file", help="with --url: start the evening once this file exists (indexing done), not after --settle")
     a = ap.parse_args()
     global TLS_CTX
     if a.tls:
@@ -390,10 +431,13 @@ def main():
     port = a.attach or (free_port() if not a.ssh else 18400)
     if a.attach and not a.admin:
         ap.error("--attach needs --admin EMAIL:PASSWORD")
+    if a.url and not a.first_password:
+        ap.error("--url needs --first-password")
     stats = Stats()
     rng = random.Random(7)
 
-    srv = Server(binary, a.ssh, a.remote_binary, port, tls=a.tls, suites=a.suite, attach=bool(a.attach))
+    srv = Server(binary, a.ssh, a.remote_binary, port, tls=a.tls, suites=a.suite, attach=bool(a.attach),
+                 url=a.url, settle=a.settle, go_file=a.go_file)
     try:
         P = srv.port
         H = srv.host
@@ -405,12 +449,17 @@ def main():
                 suffix = f"-{int(time.time()) % 100000}"
             else:
                 admin_email, admin_pw = "ana@home.lan", "ana-pw"
-                people = [sign_in(H, P, stats, admin_email, srv.first_run_password(), admin_pw)]
+                temp = a.first_password if a.url else srv.first_run_password()
+                people = [sign_in(H, P, stats, admin_email, temp, admin_pw)]
                 suffix = ""
             admin = people[0]
             _, r = admin.json("POST", "/api/official/user/query/random/code", {"account": admin_email})
             st, _ = admin.json("POST", "/api/admin/elevate", {"password": challenge(md5h(admin_pw), r["randomCode"])})
             assert st == 200, f"elevate: {st}"
+            if a.url:
+                # Its own connection: http.client connections are not shared across threads.
+                srv.health = Session(H, P, Stats(), "health")
+                srv.health.cookie = admin.cookie
             for name in ["rui", "bia", "leo"][: a.people - 1]:
                 email = f"{name}{suffix}@home.lan"
                 _, created = admin.json("POST", "/api/admin/users", {"email": email})
@@ -466,20 +515,25 @@ def main():
     finally:
         srv.stop()
 
-    cpu_pct = 100 * (after["cpu_ticks"] - before["cpu_ticks"]) / srv.ticks / elapsed
+    cpu_pct = None if a.url else 100 * (after["cpu_ticks"] - before["cpu_ticks"]) / srv.ticks / elapsed
     total = sum(len(v) for k, v in stats.ms.items() if k != "seed")
     print(f"over {'HTTPS ' + (','.join(a.suite) or 'default suites') if a.tls else 'plain HTTP'}")
     print(f"{a.people} people browsing + {TABLETS} tablets syncing, {elapsed:.0f} s, "
           f"{total} requests ({total / elapsed:.1f}/s)")
-    print(f"libraries: {seeded} files uploaded in {seed_s:.1f} s, indexed by {index_s:.0f} s later")
+    print(f"libraries: {seeded} files uploaded in {seed_s:.1f} s, "
+          + (f"then {index_s:.0f} s to settle" if a.url and not a.go_file else f"indexed by {index_s:.0f} s later"))
     mode = "stress, no pauses" if THINK_SCALE == 0 else f"pauses x{THINK_SCALE:g}"
     print(f"({mode})")
     print(f"{'request':<18}{'count':>7}{'p50 ms':>9}{'p95 ms':>9}{'max ms':>9}{'404':>6}{'errors':>8}")
     for kind in ["list folder", "open note", "note page", "thumbnail", "download pdf", "search manifest", "tablet sync"]:
         xs = stats.ms.get(kind, [])
         print(f"{kind:<18}{len(xs):>7}{pct(xs, .5):>9.1f}{pct(xs, .95):>9.1f}{max(xs, default=0):>9.1f}{stats.missing.get(kind, 0):>6}{stats.errors.get(kind, 0):>8}")
-    print(f"server: RssAnon peak {peak['RssAnon']} KB (idle {before['RssAnon']}), VmRSS peak {peak['VmRSS']} KB, "
-          f"threads peak {peak['Threads']}, CPU {cpu_pct:.0f}% of one core")
+    if a.url:
+        print(f"server: RssAnon peak {peak['RssAnon']} KB (idle {before['RssAnon']}), VmRSS peak {peak['VmRSS']} KB; "
+              f"CPU and peak memory: the job's own accounting")
+    else:
+        print(f"server: RssAnon peak {peak['RssAnon']} KB (idle {before['RssAnon']}), VmRSS peak {peak['VmRSS']} KB, "
+              f"threads peak {peak['Threads']}, CPU {cpu_pct:.0f}% of one core")
     sys.exit(1 if stats.errors else 0)
 
 if __name__ == "__main__":

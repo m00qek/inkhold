@@ -44,6 +44,21 @@ machine, so the load generator doesn't share the Pi's one core:
 scripts/household_load.py --ssh pi --remote-binary inkhold-arm --seconds 300
 ```
 
+On the devlab's Pi 1 B+, the server runs as a job (`devlab-target`), which
+answers only the NUC, so the load comes from the NUC's `scratch/inkhold-builder`
+instance. From the laptop, with a release's armhf archive:
+
+```sh
+scripts/pi-load.sh inkhold-arm-linux-musleabihf.tar.gz --seconds 300
+```
+
+It submits the archive and a config as the job, signs in with the job's
+first-run password, and seeds the libraries from the builder. The evening
+starts once indexing is done, read from the job's CPU time (under 5% of the
+core for 3 s), and the script ends with the job's own accounting: its peak
+memory (the unpacked archive included, since on the Pi's read-only root files
+are RAM) and its CPU time.
+
 `--think 0` removes the pause between clicks (a stress test); `--tls CERT KEY`
 serves HTTPS, and `--suite` limits the cipher suites, to compare them.
 
