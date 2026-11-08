@@ -10,5 +10,5 @@
     "noEmit": true,
     "isolatedModules": true
   },
-  "include": ["vite.config.ts", "vitest.config.ts", "playwright.config.ts", "playwright.pwa.config.ts"]
+  "include": ["vite.config.ts", "vitest.config.ts", "playwright.config.ts", "playwright.pwa.config.ts", "playwright.smoke.config.ts"]
 }

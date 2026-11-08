@@ -14,7 +14,7 @@ SERVE_PORT := $(PORT)
 
 TARGET ?= native-linux-musl
 
-.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-lint web-test-e2e web-test-setup fmt fmt-fix commit-check commit-hook lan-ip clean docs docs-build
+.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-lint web-test-e2e smoke web-test-setup fmt fmt-fix commit-check commit-hook lan-ip clean docs docs-build
 
 help:
 	@echo "Inkhold"
@@ -29,6 +29,7 @@ help:
 	@echo "  make web-test       run the web suite (unit + e2e)"
 	@echo "  make web-test-unit  run the web unit tests (Vitest; needs Node only)"
 	@echo "  make web-test-e2e   run the web e2e tests (Playwright; needs Chromium)"
+	@echo "  make smoke          the built server + SPA together, unmocked (SERVER=, DIST= to pick builds)"
 	@echo "  make web-test-setup one-time web deps (npm install + Playwright Chromium)"
 	@echo "  make docs           preview the website and manuals at http://127.0.0.1:1111"
 	@echo "  make docs-build     build the website into docs/public"
@@ -251,13 +252,14 @@ test:
 # The server's memory footprint against its ceilings (scripts/footprint.py):
 # idle, per parked socket, and that threads do not grow with sockets. Builds
 # ReleaseSafe first, since Debug numbers mean nothing.
-# BIN= measures a binary already built (CI: the shipped x86_64 musl one).
+# SERVER= measures a binary already built (CI: the shipped x86_64 musl one).
+SERVER ?=
 footprint:
-ifeq ($(BIN),)
+ifeq ($(SERVER),)
 	zig build -Doptimize=ReleaseSafe
 	python3 scripts/footprint.py zig-out/bin/inkhold
 else
-	python3 scripts/footprint.py $(BIN)
+	python3 scripts/footprint.py $(SERVER)
 endif
 
 # The standalone parser suites. The root `test` above builds the note/spd
@@ -285,6 +287,14 @@ web-lint:
 # SHARD=1/4 runs one slice. E2E_PREBUILT=1 uses the wasm already in public/.
 web-test-e2e:
 	cd $(WEB) && npx playwright test $(if $(SHARD),--shard=$(SHARD))
+
+# The built server serving the built SPA, nothing mocked (webapp/tests/smoke):
+# first sign-in, an upload, a page painted by the wasm decoder. SERVER= and
+# DIST= pick builds already made; CI uses the x86_64 musl binary that ships.
+DIST ?= webapp/dist
+smoke:
+	cd $(WEB) && INKHOLD_BIN=$(abspath $(or $(SERVER),$(BIN))) INKHOLD_WEB=$(abspath $(DIST)) \
+	  npx playwright test -c playwright.smoke.config.ts
 
 # One-time: install web dev deps and the Playwright Chromium build (needs
 # network). Unit tests need only Node; e2e additionally needs this Chromium.

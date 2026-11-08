@@ -175,7 +175,7 @@ jobs:
       - name: Measure the server footprint
         run: |
           chmod +x out/inkhold
-          make footprint BIN=out/inkhold
+          make footprint SERVER=out/inkhold
 
   test-web-unit:
     needs: [build]
@@ -242,6 +242,56 @@ jobs:
         env:
           E2E_PREBUILT: "1"
         run: make web-test-e2e SHARD=${{ matrix.shard }}/4
+
+  # The shipped pieces together, nothing mocked: the x86_64 server serving the
+  # built SPA. First sign-in, an upload, a page painted by the wasm decoder.
+  smoke:
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('webapp/package-lock.json') }}
+
+      - name: Setup Web Tests
+        run: make web-test-setup
+
+      - name: Download the x86_64 server
+        uses: actions/download-artifact@v4
+        with:
+          name: server-x86_64
+          path: out
+
+      - name: Download the SPA
+        uses: actions/download-artifact@v4
+        with:
+          name: webapp-dist
+          path: webapp/dist
+
+      - name: Smoke test the server and the SPA
+        run: |
+          chmod +x out/inkhold
+          make smoke SERVER=out/inkhold
+
+      - name: Keep the trace of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-traces
+          path: webapp/test-results
+          retention-days: 7
 
   # ---- A release: built while the suites run, published once they pass ---------
   #
@@ -329,7 +379,7 @@ jobs:
   image:
     # GATED ON EVERY SUITE: a build that failed a test, or blew the memory
     # ceilings a Pi depends on, is not one to ship as `:latest`.
-    needs: [release, test-backend, test-parsers, footprint, test-web-unit, test-web-e2e]
+    needs: [release, test-backend, test-parsers, footprint, test-web-unit, test-web-e2e, smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -40,6 +40,7 @@ style lint, unit and end-to-end suites), in that order.
 | `make web-test-unit` | The browser app's unit tests (Vitest) |
 | `make web-lint` | Every size in the stylesheets is a design token |
 | `make web-test-e2e` | The browser app end to end, in Chromium, against a fake server; `SHARD=1/4` runs one slice |
+| `make smoke` | The built server serving the built browser app, nothing faked: first sign-in, an upload, a page painted. `SERVER=` and `DIST=` pick builds already made |
 
 In `webapp/`, `npm run typecheck` checks the types.
 
