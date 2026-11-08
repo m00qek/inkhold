@@ -1,0 +1,36 @@
+# Weekly, one pull request per ecosystem: CI tests each before it lands.
+# Actions are pinned to commit hashes (with the version in a comment);
+# Dependabot updates both.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /webapp
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      webapp:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /docs
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      docs:
+        patterns: ["*"]

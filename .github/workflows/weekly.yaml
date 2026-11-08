@@ -1,0 +1,136 @@
+name: Weekly
+
+# What a push never checks: rot. A fresh cache, WebKit (every iPhone browser),
+# the docs' links to the web, known-vulnerable dependencies, and the newest
+# runner. A failure opens an issue (or comments on the open one).
+on:
+  schedule:
+    - cron: "0 5 * * 1"   # Mondays, 05:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The Zig suites with nothing cached: what a new contributor's first build does.
+  fresh:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          use-cache: false
+
+      - name: Server tests
+        run: make test
+
+      - name: Parser tests
+        run: make parser-test
+
+  webkit:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Install the app and WebKit
+        run: npm --prefix webapp ci && (cd webapp && npx playwright install --with-deps webkit)
+
+      - name: Build the wasm modules
+        run: npm --prefix webapp run build:wasm
+
+      - name: Browser tests in WebKit, slice ${{ matrix.shard }} of 4
+        env:
+          E2E_BROWSER: webkit
+          E2E_PREBUILT: "1"
+        run: make web-test-e2e SHARD=${{ matrix.shard }}/4
+
+      - name: Tests that passed only on retry
+        if: always()
+        run: node webapp/scripts/flaky-report.mjs webapp/test-results/report.json
+
+  # Only links to the web: the site's own links are `zola check`'s, on every push.
+  links-online:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Check links to the web
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress --scheme https --scheme http
+            --exclude '^https?://(localhost|127\.0\.0\.1|192\.168\.)'
+            --exclude '^https://m00qek\.github\.io/inkhold'
+            "docs/content/**/*.md" "*.md"
+          fail: true
+
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: The browser app's dependencies
+        run: npm --prefix webapp audit --audit-level=high
+
+      - name: The docs tooling's dependencies
+        run: npm --prefix docs audit --audit-level=high
+
+  # Every target on the runner `ubuntu-latest` is about to become, so a change
+  # there shows up here before the pinned runners move.
+  cross-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-linux-musl, aarch64-linux-musl, arm-linux-musleabihf, x86-linux-musl]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      - name: Build ${{ matrix.target }}
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} $(make -s print-zig-cpu TARGET=${{ matrix.target }})
+
+  report:
+    needs: [fresh, webkit, links-online, audit, cross-build]
+    if: failure()
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open an issue, or comment on the open one
+        run: |
+          gh label create weekly --repo "$GITHUB_REPOSITORY" --color d4c5f9 \
+            --description "Found by the weekly check" 2>/dev/null || true
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --label weekly --state open --json number --jq '.[0].number')
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body "Failed again: $RUN"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --label weekly \
+              --title "Weekly check failed" --body "A job in the weekly check failed: $RUN"
+          fi

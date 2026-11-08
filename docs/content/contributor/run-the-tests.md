@@ -72,6 +72,17 @@ WebKit needs Debian or Ubuntu system libraries. On another distribution, run
 it inside a Debian or Ubuntu container, never by installing those libraries on
 your own machine.
 
+## What CI runs
+
+On every push and pull request: the suites above, side by side, the browser
+suite in four slices, and `make smoke`. A test that passed only on its retry is
+listed as a warning on the run: it still passes, but it is a flake to fix.
+
+Every Monday, the weekly check runs what a push doesn't: the Zig suites with
+nothing cached, the browser suite in WebKit, the docs' links to the web,
+`npm audit`, and a cross-build on the newest runner. A failure opens an issue
+labelled `weekly`.
+
 ## Long runs
 
 The whole end-to-end suite takes minutes. Run it with `--workers=4` on a

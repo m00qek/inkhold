@@ -11,7 +11,9 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
-  reporter: process.env.CI ? "github" : "list",
+  // CI also writes a JSON report: scripts/flaky-report.mjs lists the tests that
+  // passed only on their retry, so a flake is fixed rather than hidden.
+  reporter: process.env.CI ? [["github"], ["json", { outputFile: "test-results/report.json" }]] : "list",
   use: {
     baseURL: `http://localhost:${PORT}`,
     trace: "on-first-retry",

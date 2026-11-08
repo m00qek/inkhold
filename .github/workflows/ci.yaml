@@ -39,7 +39,7 @@ jobs:
   # run saves its own; the prefix restores the last one, and Zig's cache is
   # content-addressed, so unchanged code is simply reused.
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
       # "true" when this run releases: a version not yet tagged, on main.
@@ -48,7 +48,7 @@ jobs:
       build-release: ${{ (steps.version.outputs.pending == 'true' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || inputs.rehearse == true }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # On every run, pull requests too: a version that could never be
       # released (not 1.0.0-beta.N, or not newer than the last) fails here.
@@ -57,19 +57,19 @@ jobs:
         run: make release-status >> "$GITHUB_OUTPUT"
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: 'npm'
           cache-dependency-path: webapp/package-lock.json
 
       - name: Cache Zig build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
           key: ${{ runner.os }}-zig-build-${{ github.sha }}
@@ -90,7 +90,7 @@ jobs:
         run: make web-dist
 
       - name: Upload the wasm
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm
           path: webapp/public/*.wasm
@@ -98,7 +98,7 @@ jobs:
           retention-days: 1
 
       - name: Upload the SPA
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: webapp-dist
           path: webapp/dist
@@ -109,18 +109,18 @@ jobs:
   # `build`: Zig compiles the server as one unit, about 5 minutes in
   # ReleaseSafe however warm the cache, and the web suites need none of it.
   build-server:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
 
       - name: Cache Zig build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
           key: ${{ runner.os }}-zig-server-${{ github.sha }}
@@ -130,7 +130,7 @@ jobs:
         run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
 
       - name: Upload the x86_64 server
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: server-x86_64
           path: zig-out/bin/inkhold
@@ -139,18 +139,18 @@ jobs:
 
   # ---- The suites, side by side ----------------------------------------------
   test-backend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
 
       - name: Cache Zig build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
           key: ${{ runner.os }}-zig-backend-${{ github.sha }}
@@ -165,18 +165,18 @@ jobs:
         run: make test
 
   test-parsers:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
 
       - name: Cache Zig build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             parsers/note/.zig-cache
@@ -190,13 +190,13 @@ jobs:
   # The memory ceilings in scripts/footprint.py, on the binary that ships.
   footprint:
     needs: [build-server]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Download the x86_64 server
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: server-x86_64
           path: out
@@ -208,13 +208,13 @@ jobs:
 
   test-web-unit:
     needs: [build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: 'npm'
@@ -224,7 +224,7 @@ jobs:
         run: npm --prefix webapp ci
 
       - name: Download the wasm
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: wasm
           path: webapp/public
@@ -236,24 +236,24 @@ jobs:
   # the wasm already built (E2E_PREBUILT), so no slice compiles anything.
   test-web-e2e:
     needs: [build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: 'npm'
           cache-dependency-path: webapp/package-lock.json
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('webapp/package-lock.json') }}
@@ -262,7 +262,7 @@ jobs:
         run: make web-test-setup
 
       - name: Download the wasm
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: wasm
           path: webapp/public
@@ -272,24 +272,28 @@ jobs:
           E2E_PREBUILT: "1"
         run: make web-test-e2e SHARD=${{ matrix.shard }}/4
 
+      - name: Tests that passed only on retry
+        if: always()
+        run: node webapp/scripts/flaky-report.mjs webapp/test-results/report.json
+
   # The shipped pieces together, nothing mocked: the x86_64 server serving the
   # built SPA. First sign-in, an upload, a page painted by the wasm decoder.
   smoke:
     needs: [build, build-server]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: 'npm'
           cache-dependency-path: webapp/package-lock.json
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('webapp/package-lock.json') }}
@@ -298,13 +302,13 @@ jobs:
         run: make web-test-setup
 
       - name: Download the x86_64 server
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: server-x86_64
           path: out
 
       - name: Download the SPA
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: webapp-dist
           path: webapp/dist
@@ -316,7 +320,7 @@ jobs:
 
       - name: Keep the trace of a failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: smoke-traces
           path: webapp/test-results
@@ -330,7 +334,7 @@ jobs:
   release:
     needs: [build]
     if: needs.build.outputs.build-release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         include:
@@ -344,17 +348,17 @@ jobs:
             platform: linux/arm/v6
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.17.0
 
       # One cache per target: a shared one was saved by whichever target
       # finished first, so the other three compiled from cold every time.
       - name: Cache Zig build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .zig-cache
           key: ${{ runner.os }}-zig-release-${{ matrix.target }}-${{ github.sha }}
@@ -362,7 +366,7 @@ jobs:
 
       # Built once by `build` above; no Node on this runner at all.
       - name: Download the SPA
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: webapp-dist
           path: webapp/dist
@@ -371,7 +375,7 @@ jobs:
         run: make release-artifact TARGET=${{ matrix.target }} SKIP_WEB=1
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: inkhold-${{ matrix.target }}
           path: inkhold-${{ matrix.target }}.tar.gz
@@ -390,7 +394,7 @@ jobs:
             -Dtarget=${{ matrix.target }} $(make -s print-zig-cpu TARGET=${{ matrix.target }})
 
       - name: Upload the stripped binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: binary-${{ matrix.target }}
           path: zig-out/bin/inkhold
@@ -427,14 +431,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install qemu
         if: matrix.emulator
         run: sudo apt-get update -q && sudo apt-get install -y -q qemu-user-static
 
       - name: Download the archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: inkhold-${{ matrix.target }}
 
@@ -458,16 +462,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Download the SPA
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: webapp-dist
           path: docker/context/webapp/dist
 
       - name: Download the binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: binary-${{ matrix.target }}
           path: docker/context/${{ matrix.platform }}
@@ -492,7 +496,7 @@ jobs:
   publish:
     needs: [build, build-server, release, smoke-archive, smoke-image, test-backend, test-parsers, footprint, test-web-unit, test-web-e2e, smoke]
     if: needs.build.outputs.release == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Never two at once, and never cancelled halfway.
     concurrency:
       group: publish
@@ -506,22 +510,22 @@ jobs:
       VERSION: ${{ needs.build.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Download the SPA
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: webapp-dist
           path: docker/context/webapp/dist
 
       - name: Download the binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: /tmp/binaries
           pattern: binary-*
 
       - name: Download the archives
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           pattern: inkhold-*
@@ -544,15 +548,15 @@ jobs:
         run: sha256sum inkhold-*.tar.gz > SHA256SUMS && cat SHA256SUMS
 
       - name: Provenance for the archives
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/inkhold-*.tar.gz
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -567,7 +571,7 @@ jobs:
       # No QEMU: the Dockerfile is COPY-only, so nothing foreign is executed.
       - name: Push the image as the version and :next
         id: image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: docker
           file: docker/Dockerfile
@@ -581,7 +585,7 @@ jobs:
             ${{ steps.name.outputs.image }}:next
 
       - name: Provenance for the image
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-name: ${{ steps.name.outputs.image }}
           subject-digest: ${{ steps.image.outputs.digest }}
