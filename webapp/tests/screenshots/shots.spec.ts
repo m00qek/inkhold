@@ -165,6 +165,9 @@ for (const shot of SHOTS) {
       test("shot", async ({ page }) => {
         // The demo's real notebooks (src/api/demoNotes.ts).
         await page.addInitScript(() => localStorage.setItem("sn.demo-notes", "1"));
+        // A fixed clock, the morning after the fixtures' newest change (fakeFixtures.ts
+        // `NOW`): "deleted today", "1 year ago" and due dates read the same on every take.
+        await page.clock.setFixedTime(new Date(1_752_800_000_000 + 10 * 3_600_000));
         if (shot.admin) {
           await mockApi(page, { "user/me": { json: { success: true, email: "ana@household.lan", isAdmin: true, mustChangePassword: false } } });
         } else {
