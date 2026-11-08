@@ -39,11 +39,22 @@ During the beta, every version is `1.0.0-beta.N`, one more than the last.
    themselves without releasing, run Actions → Test → Run workflow with
    **Rehearse** ticked: it builds and smoke-tests everything, publishes
    nothing.
-2. Set `.version` in `build.zig.zon` to the next `1.0.0-beta.N`, which
-   `inkhold --version` reports. `make release-status` says whether it is
-   released yet, and refuses a version that could never be.
-3. Commit it as `chore(release): 1.0.0-beta.N` and push `main`.
-4. CI, in the same run:
+2. Prepare the release:
+
+   ```sh
+   make release VERSION=1.0.0-beta.N
+   ```
+
+   It refuses a version that could never be released, sets `.version` in
+   `build.zig.zon` (what `inkhold --version` reports), adds the version's
+   section to `CHANGELOG.md`, and prints the commits since the last release,
+   by type.
+3. Write that section for the people who run Inkhold, not for contributors:
+   what's new and fixed, and **Upgrade notes** first when there is something
+   to do before upgrading. It becomes the release's notes, and CI refuses a
+   release without it.
+4. Commit it as `chore(release): 1.0.0-beta.N` and push `main`.
+5. CI, in the same run:
    - runs the suites, the smoke test and the footprint check;
    - builds the four archives and runs each on its own architecture:
      aarch64 on an ARM runner, the Pi 1's ARMv6 emulated, x86 and x86_64
@@ -53,8 +64,8 @@ During the beta, every version is `1.0.0-beta.N`, one more than the last.
      with provenance, creates the release with the archives, `SHA256SUMS`,
      provenance and the version's section of `CHANGELOG.md`, and publishes
      it as a pre-release, which tags the commit `v1.0.0-beta.N`.
-5. Soak it: run `:next` on the hub and use it.
-6. Promote it:
+6. Soak it: run `:next` on the hub and use it.
+7. Promote it:
 
    ```sh
    make promote VERSION=1.0.0-beta.N
@@ -86,10 +97,13 @@ few minutes after the backport. No release is needed.
 
 To ship a bug fix without what `main` has gained since the last release:
 
-1. Fix it on `main`, then `make backport COMMIT=<sha>`.
-2. On `stable`, set `.version` to the next fix of the current release, for
-   example `1.0.0-beta.2.1` after `1.0.0-beta.2`, and commit it as
-   `chore(release): 1.0.0-beta.2.1`. Push `stable`.
+1. Fix it on `main`, then `make backport COMMIT=<sha>`. The push to `stable`
+   runs the full suites there, so the fix is tested beside the older code it
+   now sits with: wait for that run to pass.
+2. In a checkout of `stable`, `make release VERSION=1.0.0-beta.2.1`, the
+   next fix of the current release (here, after `1.0.0-beta.2`). Write its
+   `CHANGELOG.md` section, commit it as `chore(release): 1.0.0-beta.2.1` and
+   push `stable`.
 3. CI releases it as above, except that it moves only its own version tag,
    never `:next`, which stays `main`'s candidate.
 4. Soak it (`:1.0.0-beta.2.1`), then `make promote VERSION=1.0.0-beta.2.1`.

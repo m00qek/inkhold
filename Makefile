@@ -14,7 +14,7 @@ SERVE_PORT := $(PORT)
 
 TARGET ?= native-linux-musl
 
-.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-lint web-test-e2e smoke web-test-setup fmt fmt-fix release-status backport promote commit-check commit-hook lan-ip clean docs docs-build
+.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-lint web-test-e2e smoke web-test-setup fmt fmt-fix release release-status backport promote commit-check commit-hook lan-ip clean docs docs-build
 
 help:
 	@echo "Inkhold"
@@ -34,6 +34,7 @@ help:
 	@echo "  make docs           preview the website and manuals at http://127.0.0.1:1111"
 	@echo "  make docs-build     build the website into docs/public"
 	@echo "  make fmt            check formatting        make fmt-fix   reformat in place"
+	@echo "  make release        VERSION=1.0.0-beta.N: prepare the release commit (version, CHANGELOG)"
 	@echo "  make release-status the version in build.zig.zon, and whether it is released"
 	@echo "  make backport       COMMIT=<sha on main>: copy a fix onto stable"
 	@echo "  make promote        VERSION=1.0.0-beta.N: after the soak, :next becomes :latest"
@@ -309,6 +310,12 @@ web-test-setup:
 # :next, make VERSION the one people get (:latest, :beta, the download links).
 release-status:
 	@scripts/release-version.sh
+
+# release: prepare VERSION's release commit on this branch (build.zig.zon, the
+# CHANGELOG.md section, and the commits to write it from). Commits nothing.
+release:
+	@test -n "$(VERSION)" || { echo "make release VERSION=1.0.0-beta.N"; exit 1; }
+	@scripts/release-prepare.sh $(VERSION)
 
 # backport: copy COMMIT, already on main, onto stable: a docs fix reaches the
 # site's root, a code fix waits there for a fix release.

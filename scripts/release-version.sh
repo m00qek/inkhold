@@ -8,8 +8,9 @@
 # Which versions a branch may release, while the beta lasts:
 #   main     1.0.0-beta.N, N one past every release so far
 #   stable   1.0.0-beta.N.M, a fix of the release stable is based on
-# A version that could never be released fails here. 0.0.0 means "no release
-# yet". BRANCH defaults to the checked-out one.
+# A version that could never be released fails here, and so does a release
+# with no notes in CHANGELOG.md. 0.0.0 means "no release yet". BRANCH defaults
+# to the checked-out one.
 set -eu
 
 version=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
@@ -54,4 +55,11 @@ case $branch in
     fail "releases are made from main or stable, not $branch"
     ;;
 esac
+
+# Its notes: the version's section of CHANGELOG.md, which the release page
+# shows. (NOTES=skip: release-prepare.sh, before the section is written.)
+if [ "${NOTES:-}" != skip ]; then
+  notes=$(awk -v v="$version" '/^## / { on = ($2 == v); next } on && NF' CHANGELOG.md 2>/dev/null || true)
+  [ -n "$notes" ] || fail "CHANGELOG.md has no notes under '## $version': write them before releasing"
+fi
 echo "pending=true"

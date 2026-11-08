@@ -603,7 +603,8 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
 
-      # The notes are the version's section of CHANGELOG.md when there is one.
+      # The notes: the version's section of CHANGELOG.md (`build` refused the
+      # release already if it had none).
       - name: The release, as a draft
         env:
           GH_TOKEN: ${{ github.token }}
@@ -612,7 +613,6 @@ jobs:
           if [ -f CHANGELOG.md ]; then
             awk -v v="$VERSION" '/^## / { on = ($2 == v); next } on' CHANGELOG.md > "$notes"
           fi
-          [ -s "$notes" ] || echo "Inkhold $VERSION." > "$notes"
           gh release create "v$VERSION" dist/inkhold-*.tar.gz dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease \
             --title "Inkhold $VERSION" --notes-file "$notes"
