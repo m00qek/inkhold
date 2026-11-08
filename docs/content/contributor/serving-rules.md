@@ -10,7 +10,7 @@ extra:
 # Serving and caching
 
 How a page is planned and streamed, when a response may be cached as
-immutable, and the live channel. Why: [Serving decisions](@/contributor/serving-and-caching.md).
+immutable, and the live channel. Why: [How a request is served](@/contributor/concurrency-decisions.md).
 
 ## Pages
 

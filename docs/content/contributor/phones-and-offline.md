@@ -1,17 +1,74 @@
 ---
-title: "Phone and offline decisions"
-description: "Why layout is intrinsic first, and why offline means navigating, not reading."
+title: "How the app fits a phone, and works offline"
+description: "Why layout is decided by the room there is rather than the device, how a viewer's bar folds, and what the installed app keeps when there is no network."
 weight: 4090
 extra:
   reader: contributor
   type: explanation
 ---
 
-# Phone and offline decisions
+# How the app fits a phone, and works offline
 
-How the app adapts to phones and tablets, and what works offline. The rules themselves: [Phones and offline](@/contributor/phones-rules.md).
+The same app serves a desktop browser, an iPhone and a tablet, and installs on
+a phone's home screen. This page explains the two ideas behind that: layout
+decided by the room a component has rather than by the device it is on, and
+an offline mode that keeps the map but not the territory. The rules are in
+[Phones and offline](@/contributor/phones-rules.md).
 
-## Decisions
+## Layout follows the room, not the device
+
+A width breakpoint knows the window's width, which is the wrong question
+inside a narrow side panel or a split screen. So content sizes itself first
+(grids that fill, rows that wrap, sizes in rem), a component asks its own
+container how much room it has, and media queries only switch the page's
+shape: a phone below 700px, a tablet to 1099px, a desktop from 1100px. Touch
+is a separate question, asked with `pointer: coarse`, never inferred from
+width: a tablet in landscape has a desktop's room and a finger's targets.
+
+A viewer's bar is the clearest case. It is a container: under 60rem of bar
+its buttons drop their words, then its zones wrap, the title giving way first.
+On a phone it stops being a container so that its bottom row can be pinned to
+the screen, where a thumb is, and whatever no longer fits folds into one ⋯
+menu, in the bar's own order, with a long submenu (the Download menu) opening
+in place under a back row rather than burying the rest.
+
+```mermaid
+flowchart TD
+  bar["A viewer's bar"] -->|"60rem or more"| full["Words, zones, title"]
+  bar -->|"narrower"| compact["Glyphs; zones close up; title shrinks"]
+  compact -->|"narrower still"| wrap["Zones wrap"]
+  bar -->|"a phone"| phone["Top: ‹ title Find ⋯. Bottom, fixed: paging and the panel switches. Everything else behind ⋯"]
+```
+
+Panels on a phone are one sheet on the bottom row rather than a column beside
+the page, zoom is a pinch with the stepper kept in ⋯ as the one-finger way, a
+swipe turns the page, and the page sits above the bar and any open sheet
+because Fit measures the padded stage. Text size follows the system's, with
+every field floored at 16px so iOS never zooms the page on focus.
+
+## Offline: the map, not the territory
+
+The app installs as a PWA with a service worker. What it keeps is the app's
+own files and the listings a person browses with: the folder tree, the bin,
+the storage meter. That is names and counts, never a file. Without a network
+the app opens, shows the library as last seen, and says "needs a connection"
+when a notebook is opened, instead of a viewer that never fills. Signing out,
+or the server refusing the session, forgets the listings.
+
+```mermaid
+flowchart TD
+  sw["Service worker"] -->|"cache first"| app["The app's own files"]
+  sw -->|"network first, stored copy when offline"| lists["Listings: me, the tree, the bin, storage"]
+  sw -->|"never kept"| files["Pages, PDFs, images, text, to-dos, the decoders"]
+  files --> need["Opening one offline: 'needs a connection', and stay put"]
+```
+
+Keeping files would mean copies of people's notebooks on devices the household
+cannot see or wipe, and that was judged the wrong trade for a private cloud.
+An update installs beside the running version and waits for the person to
+choose Reload, so a half-updated app is never shown.
+
+## Trade-offs
 
 ### Intrinsic first
 

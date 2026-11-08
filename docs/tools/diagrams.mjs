@@ -35,7 +35,7 @@ function* files(dir, ext) {
 }
 
 // Bumped when the SVGs themselves change (sizing, theming), so cached ones are redrawn.
-const RENDER_VERSION = "4";
+const RENDER_VERSION = "5";
 
 /** Mermaid sizes its SVG `width="100%"` with a max-width: no size of its own, so as
  *  an <img> (the preview) it collapses. Give it its drawn size; CSS still shrinks it. */
@@ -47,10 +47,15 @@ function sized(svg) {
 }
 
 const FENCE = /^```mermaid[^\n]*\n([\s\S]*?)^```[ \t]*$/gm;
+/** Every mermaid block, by the hash of its source; `where` says which page holds it. */
+const where = new Map();
 function sources(contentDir) {
   const found = new Map();
   for (const f of files(contentDir, ".md")) {
-    for (const m of readFileSync(f, "utf8").matchAll(FENCE)) found.set(hashOf(m[1]), m[1].trim());
+    for (const m of readFileSync(f, "utf8").matchAll(FENCE)) {
+      found.set(hashOf(m[1]), m[1].trim());
+      where.set(hashOf(m[1]), f);
+    }
   }
   return found;
 }
@@ -159,9 +164,12 @@ async function render(contentDir, outDir) {
     const t = themes();
     for (const [h, source] of todo) {
       for (const [name, vars] of Object.entries(t)) {
-        const svg = await page.evaluate(
+        let svg;
+        try {
+          svg = await page.evaluate(
           async ({ id, source, vars }) => {
-            window.mermaid.initialize({ startOnLoad: false, theme: "base", themeVariables: vars, securityLevel: "strict" });
+            // Labels wrap at 320px, not Mermaid's 200: a sentence in a box reads as a line or two, not a column.
+            window.mermaid.initialize({ startOnLoad: false, theme: "base", themeVariables: vars, securityLevel: "strict", flowchart: { wrappingWidth: 320 } });
             const { svg } = await window.mermaid.render(id, source);
             // Mermaid's labels are HTML (`<br>` unclosed): parse and write it back as
             // well-formed XML, or an <img> (the preview) refuses the whole file.
@@ -170,7 +178,12 @@ async function render(contentDir, outDir) {
             return new XMLSerializer().serializeToString(holder.firstElementChild);
           },
           { id: `d${h}${name[0]}`, source, vars },
-        );
+          );
+        } catch (e) {
+          // Say which diagram, with its lines numbered: Mermaid's own error names only a line.
+          const numbered = source.split("\n").map((l, i) => `${String(i + 1).padStart(3)}  ${l}`).join("\n");
+          throw new Error(`${where.get(h)}: this diagram does not parse\n${numbered}\n${e.message.split("\n")[0]}`);
+        }
         writeFileSync(join(outDir, `${h}-${name}.svg`), sized(svg));
       }
       console.log(`diagrams: rendered ${h}`);

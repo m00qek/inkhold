@@ -1,6 +1,6 @@
 ---
 title: "The shape of the system"
-description: "Why the server stays small enough for a 2014 Raspberry Pi, and what that cost."
+description: "One program at home, three faces on one port, and a browser that does the heavy work: how the pieces fit, and what that shape costs."
 weight: 4010
 extra:
   reader: contributor
@@ -9,9 +9,73 @@ extra:
 
 # The shape of the system
 
-Why Inkhold is one small program that leaves the hard work to the browser, and what that cost.
+Inkhold is one program on a computer at home. It speaks to two kinds of
+client, the Supernote tablet and the browser, on one port, and it keeps
+everything on its own disk. The first thing to understand about it is where
+the work happens: the server stores and moves bytes, and the browser does
+everything that costs effort. That split is what lets a Raspberry Pi 1 from
+2014 serve a household, and it shapes almost every other decision in this
+manual.
 
-## Decisions
+## Three faces, one port
+
+The same port answers three kinds of caller, told apart by the scope their
+session carries. The tablet speaks the protocol of Supernote's own Private
+Cloud, which Inkhold learnt by watching a real tablet. The browser app speaks
+a JSON API of Inkhold's own. And the browser app's files themselves (HTML,
+scripts, the WebAssembly decoders) are served as static files. A caller with a
+tablet's session cannot call the browser's routes, or the other way round:
+crossing a scope is a 403.
+
+```mermaid
+flowchart TD
+  tablet["Supernote tablet: the Private Cloud protocol"] --> port["One port, one program"]
+  browser["Browser app: Inkhold's JSON API, and its own files"] --> port
+  port --> transport["Transport: accept, TLS, route, rate-limit"]
+  transport --> handlers["Handlers: one function per route"]
+  handlers --> services["Services: files, auth, sync, backup, the indexers, search"]
+  services --> db[("SQLite: one file, one writer")]
+  services --> store[("The data folder: blobs by content, derived files, thumbnails")]
+  worker["Deferred worker, lowest priority: indexing"] --> services
+```
+
+Inside, the server is layered, and an import only ever points down: the
+transport knows nothing of files, the file service knows nothing of HTTP.
+[Where things live](@/contributor/where-things-live.md) is the map.
+
+## The server moves bytes; the browser does the work
+
+When you open a notebook page in the browser, the server does not draw it.
+It looks up, in an index it built when the file arrived, where that page's
+layers sit inside the file, and streams those bytes out. The browser decodes
+them with a small WebAssembly decoder and paints the page. The same holds for
+a PDF (MuPDF runs in the browser), for search (the browser holds the index and
+answers every query), and for export (the PDF or image is made in the browser
+and downloaded, never uploaded).
+
+So a busy evening in a household, four people reading and searching and two
+tablets syncing, costs the server about 15% of a Pi 1's single core and a few
+megabytes of memory. The devices people already hold do the rest.
+
+## The budget
+
+The design target is the weakest machine a household might run it on: a
+Raspberry Pi 1 B+, one ARMv6 core, and a ceiling of about 50 MB of anonymous
+memory. If it runs there, it runs anywhere. Many choices that look unusual
+elsewhere in this manual (no server-side search, no thread per connection,
+indexing deferred to a background worker, 64 KB windows instead of whole
+files) come from that budget, and each is measured against it
+([Measure memory and speed on a Pi](@/contributor/measure-on-a-pi.md)).
+
+## A household, not a fleet
+
+Inkhold serves a handful of people and tablets. One SQLite file with one
+writer is enough, and it buys simplicity everywhere: one transaction covers a
+whole change, backups are a copy of one file plus the blobs, and there is
+nothing to coordinate between machines. It does not scale past a household,
+and that is by design.
+
+## Trade-offs
 
 ### One program, one port
 

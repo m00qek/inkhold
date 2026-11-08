@@ -9,7 +9,7 @@ extra:
     - { type: tutorial, reader: "", label: "Tutorials", says: "Lessons: start here." }
     - { type: how-to, reader: "", label: "How-to", says: "Steps for a task you have in mind." }
     - { type: reference, reader: "", label: "Reference", says: "Facts to look up." }
-    - { type: explanation, reader: "", label: "Explanation", says: "Why things are the way they are: our decisions." }
+    - { type: explanation, reader: "", label: "Explanation", says: "How it works, flow by flow, and the trade-offs behind each." }
 insert_anchor_links: right
 ---
 
