@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<article class="prose">
+  <h1>{{ section.title }}</h1>
+  {{ section.content | safe }}
+  <ul class="cards">
+    {%- for m in config.extra.manuals %}
+    {%- set s = get_section(path=m ~ "/_index.md") %}
+    <li>
+      <a href="{{ s.permalink }}"><b>{{ s.title }}</b></a>
+      <span>{{ s.description }}</span>
+    </li>
+    {%- endfor %}
+  </ul>
+</article>
+{% endblock content %}

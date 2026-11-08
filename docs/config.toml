@@ -1,0 +1,19 @@
+# The Inkhold website and its manuals. See content/contributor/documentation-rules.md.
+base_url = "https://m00qek.github.io/inkhold"
+title = "Inkhold"
+description = "A private cloud for your Supernote, on a computer you own."
+default_language = "en"
+compile_sass = false
+build_search_index = false
+# Pages are plain Markdown, never templates: they must read the same on GitHub,
+# and `{{` / `{%` in a page (a Mermaid hexagon is `A{{label}}`) would otherwise
+# run as Tera, break the build or vanish from the page.
+skip_content_templating = ["**/*.md"]
+
+[markdown]
+smart_punctuation = true
+external_links_no_referrer = true
+
+[extra]
+# The two manuals, in the order the navigation shows them.
+manuals = ["manual", "contributor"]

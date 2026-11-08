@@ -1,0 +1,294 @@
+/* The docs site, in the app's design language: its tokens (tokens.css, copied
+   from webapp/src/styles/00-tokens.css) and its fonts. Reading pages are set a
+   step larger than the app's dense UI, on the same paper and ink. */
+
+@font-face {
+  font-family: "Space Grotesk";
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/space-grotesk-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Grotesk";
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/space-grotesk-latin-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Mono";
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/space-mono-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Space Mono";
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/space-mono-latin-700.woff2") format("woff2");
+}
+
+:root {
+  --measure: 70ch;
+  --toc-w: 15rem;
+  color-scheme: light dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--desk);
+  color: var(--ink);
+  font: 1rem/1.6 var(--font-body);
+}
+a {
+  color: var(--accent);
+  text-underline-offset: 0.2em;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.skip {
+  position: absolute;
+  inset-inline-start: var(--sp-2);
+  inset-block-start: -10rem;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--sheet);
+}
+.skip:focus {
+  inset-block-start: var(--sp-2);
+}
+
+/* ---- the bar across the top: the brand, then the two manuals ---- */
+.masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2) var(--sp-6);
+  padding: var(--sp-4) var(--sp-6);
+  border-block-end: 1px solid var(--line);
+  background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
+}
+.brand {
+  font: 600 1.125rem var(--font-display);
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  text-decoration: none;
+  text-transform: uppercase;
+}
+.brand span {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: var(--fs-caption);
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+  text-transform: none;
+}
+.manuals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+}
+.manuals a {
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-family: var(--font-display);
+}
+.manuals a:hover,
+.manuals a[aria-current] {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 2px;
+}
+
+/* ---- the manual's pages beside the page ---- */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-6);
+  max-inline-size: calc(var(--measure) + var(--toc-w) + 6rem);
+  margin-inline: auto;
+  padding: var(--sp-6) var(--sp-4) var(--sp-8);
+}
+@media (min-width: 900px) {
+  .layout:has(> .toc) {
+    grid-template-columns: var(--toc-w) minmax(0, 1fr);
+  }
+}
+.toc {
+  font-size: 0.9375rem;
+}
+.toc ul {
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.toc a {
+  display: block;
+  padding: var(--sp-1) var(--sp-2);
+  border-inline-start: 2px solid transparent;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+.toc a:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+.toc a[aria-current="page"] {
+  border-inline-start-color: var(--accent);
+  color: var(--ink);
+  font-weight: 600;
+}
+.toc__head {
+  font-family: var(--font-display);
+  font-weight: 600;
+}
+
+/* ---- the page: ink on a sheet ---- */
+main {
+  min-inline-size: 0;
+}
+main:focus {
+  outline: none;
+}
+.prose {
+  max-inline-size: var(--measure);
+  padding: var(--sp-6) var(--sp-8) var(--sp-8);
+  background: var(--sheet);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+@media (max-width: 599px) {
+  .prose {
+    padding: var(--sp-4);
+  }
+}
+.prose h1,
+.prose h2,
+.prose h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.25;
+}
+.prose h1 {
+  margin: 0 0 var(--sp-4);
+  font-size: var(--fs-display);
+}
+.prose h2 {
+  margin: var(--sp-8) 0 var(--sp-3);
+  font-size: var(--fs-heading);
+}
+.prose h3 {
+  margin: var(--sp-6) 0 var(--sp-2);
+  font-size: 1.125rem;
+}
+.prose :is(p, ul, ol, table, pre, figure) {
+  margin: 0 0 var(--sp-4);
+}
+.prose li + li {
+  margin-block-start: var(--sp-1);
+}
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+.prose :not(pre) > code {
+  padding: 0.1em 0.3em;
+  border-radius: var(--radius);
+  background: var(--hover);
+}
+.prose pre {
+  overflow-x: auto;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--desk);
+  line-height: 1.5;
+}
+.prose table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+.prose :is(th, td) {
+  padding: var(--sp-2) var(--sp-3);
+  border-block-end: 1px solid var(--line);
+  text-align: start;
+  vertical-align: top;
+}
+.prose th {
+  font-family: var(--font-display);
+}
+
+/* "Contributor · Reference": the app's subtitle voice (mono, faint). */
+.kind {
+  margin: 0 0 var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+  color: var(--ink-faint);
+}
+
+/* A manual's pages, or the two manuals, as a list of cards. */
+.cards {
+  display: grid;
+  gap: var(--sp-3);
+  padding: 0;
+  list-style: none;
+}
+.cards li {
+  display: grid;
+  gap: var(--sp-1);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.cards li + li {
+  margin: 0;
+}
+.cards .kind {
+  margin: 0;
+}
+.cards span {
+  color: var(--ink-soft);
+}
+.empty {
+  color: var(--ink-faint);
+}
+
+/* A diagram, inlined at build in both themes; the page's theme picks one. */
+.diagram {
+  margin: 0 0 var(--sp-4);
+  overflow-x: auto;
+}
+.diagram svg,
+.diagram img {
+  display: block;
+  max-inline-size: 100%;
+  block-size: auto;
+  /* The SVG's own width and height set its shape; CSS only shrinks it. */
+  inline-size: auto;
+  margin-inline: auto;
+}
+.diagram__dark {
+  display: none;
+}
+@media (prefers-color-scheme: dark) {
+  .diagram__light {
+    display: none;
+  }
+  .diagram__dark {
+    display: block;
+  }
+}
+
+.colophon {
+  padding: var(--sp-4) var(--sp-6) var(--sp-8);
+  border-block-start: 1px solid var(--line);
+  font-size: var(--fs-caption);
+  color: var(--ink-faint);
+  text-align: center;
+}

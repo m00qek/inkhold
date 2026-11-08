@@ -1,0 +1,24 @@
+{# "Contributor · Reference": who the page is for, and what kind of page it is. #}
+{% component kind(extra) %}
+{%- if extra?.reader or extra?.type -%}
+<p class="kind">
+  {%- if extra?.reader %}{{ extra.reader | replace(from=", ", to=" and ") | capitalize }}{% endif -%}
+  {%- if extra?.reader and extra?.type %} · {% endif -%}
+  {%- if extra?.type %}{{ extra.type | replace(from="-", to=" ") | capitalize }}{% endif -%}
+</p>
+{%- endif -%}
+{% endcomponent kind %}
+
+{# The pages of one manual, in its order; `here` is the current path. #}
+{% component toc(section, here) %}
+<nav class="toc" aria-label="{{ section.title }}">
+  <a class="toc__head" href="{{ section.permalink }}"{% if here == section.path %} aria-current="page"{% endif %}>{{ section.title }}</a>
+  {%- if section.pages %}
+  <ul>
+    {%- for p in section.pages %}
+    <li><a href="{{ p.permalink }}"{% if here == p.path %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+    {%- endfor %}
+  </ul>
+  {%- endif %}
+</nav>
+{% endcomponent toc %}

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ section.title }} · {{ config.title }}{% endblock title %}
+{% block toc %}{{ <toc section={section} here={current_path} /> }}{% endblock toc %}
+{% block content %}
+<article class="prose">
+  <h1>{{ section.title }}</h1>
+  {{ section.content | safe }}
+  {%- if section.pages %}
+  <ul class="cards">
+    {%- for p in section.pages %}
+    <li><a href="{{ p.permalink }}"><b>{{ p.title }}</b></a>{{ <kind extra={p.extra} /> }}</li>
+    {%- endfor %}
+  </ul>
+  {%- else %}
+  <p class="empty">No pages yet.</p>
+  {%- endif %}
+</article>
+{% endblock content %}

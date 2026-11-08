@@ -1,0 +1,7 @@
+# Generated: see Makefile.
+/.tools/
+/node_modules/
+/public/
+/static/diagrams/
+/static/fonts/
+/static/tokens.css

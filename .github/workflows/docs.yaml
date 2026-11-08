@@ -5,9 +5,9 @@ name: Docs
 on:
   push:
     branches: [ "main" ]
-    paths: [ "docs/**", "**/*.md", ".github/workflows/docs.yaml" ]
+    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", ".github/workflows/docs.yaml" ]
   pull_request:
-    paths: [ "docs/**", "**/*.md", ".github/workflows/docs.yaml" ]
+    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", ".github/workflows/docs.yaml" ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,5 +25,27 @@ jobs:
       - name: Check links
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --offline --include-fragments --no-progress "docs/**/*.md" "*.md"
+          args: --offline --include-fragments --no-progress --exclude-path "docs/(node_modules|\.tools|public)" "docs/**/*.md" "*.md"
           fail: true
+
+  site:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Diagrams are drawn in a headless Chromium (docs/tools/diagrams.mjs).
+      - name: Install Chromium
+        working-directory: docs
+        run: npm ci --no-audit --no-fund && npx playwright-core install --with-deps --only-shell chromium
+
+      - name: Check the site
+        run: make -C docs check
+
+      - name: Build the site
+        run: make -C docs build

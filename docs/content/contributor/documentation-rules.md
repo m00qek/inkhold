@@ -1,7 +1,9 @@
 ---
 title: Documentation rules
-reader: contributor
-type: reference
+weight: 900
+extra:
+  reader: contributor
+  type: reference
 ---
 
 # Documentation rules
@@ -22,13 +24,16 @@ There are three readers:
 
 `operator` and `household` share the user manual; `contributor` has its own.
 
-Every page has exactly one reader and one type, written in its front matter:
+Every page has exactly one reader and one type, written in its front matter
+with its place in the manual:
 
 ```yaml
 ---
 title: Restore a deleted note
-reader: household
-type: how-to        # tutorial | how-to | reference | explanation
+weight: 30          # its place in the manual: lower comes first
+extra:
+  reader: household
+  type: how-to      # tutorial | how-to | reference | explanation
 ---
 ```
 
@@ -43,10 +48,27 @@ The quadrants are not filled evenly: one tutorial is fine.
 
 ## Where files go
 
-- Documentation lives in `docs/`. Outside it the repository keeps only a few
+- Documentation lives in `docs/`, a [Zola](https://www.getzola.org) site:
+  pages in `docs/content/`, the user manual under `manual/`, this manual
+  under `contributor/`. `make -C docs serve` previews it as you write;
+  `make -C docs build` builds it; `make -C docs check` checks it. Outside it the repository keeps only a few
   small Markdown files: `README.md` (the pitch, a short install, links to the
   site), `LICENSE`, `SECURITY.md` and `CONTRIBUTING.md` (each a few lines
   that point into `docs/`).
+- How a page becomes the site: Zola turns the Markdown into HTML with the
+  templates; the app's tokens and fonts are copied in; each diagram is drawn
+  to SVG beforehand and put in its page's place.
+
+```mermaid
+flowchart TD
+  md["content/**/*.md"] --> zola["zola build"]
+  tpl["templates/"] --> zola
+  app["webapp tokens + fonts"] -->|copied| zola
+  md -->|mermaid blocks| svg["tools/diagrams.mjs: SVG, light + dark"]
+  zola --> html["public/"]
+  svg -->|inlined| html
+```
+
 - One source for each fact. The README, the home page and the docs link to
   each other, never copy each other.
 
@@ -75,7 +97,13 @@ only their outcome. Each decision has the same shape:
 
 - Mermaid, in fenced ` ```mermaid ` blocks: GitHub renders them in the
   repository, and the website renders them to SVG at build time (no diagram
-  script in the browser), in the site's colours, light and dark.
+  script in the browser), in the site's colours, light and dark
+  (`docs/tools/diagrams.mjs`).
+- Pages are plain Markdown, never templates: Zola would otherwise run `{{`
+  and `{%` in a page as code (`skip_content_templating` in `config.toml`), and
+  a page must read the same on GitHub.
+- Top to bottom (`flowchart TD`), not left to right: a page is a narrow
+  column, and a wide diagram shrinks until its labels can't be read.
 - A diagram earns its place by showing a mechanism: what talks to what, in
   which order. Every diagram has a sentence before it saying what it shows.
 
@@ -89,7 +117,9 @@ only their outcome. Each decision has the same shape:
 ## Look
 
 The website and the docs follow the app's design language (`DESIGN.md`): its
-type, colours, spacing and voice. They need not match the app pixel for
+type, colours, spacing and voice. The site reads the app's own tokens and
+fonts (`webapp/src/styles/00-tokens.css`, `webapp/public/fonts/`), copied in
+at build, never forked. They need not match the app pixel for
 pixel, but they must agree with each other on every page.
 
 ## Releases
@@ -106,7 +136,7 @@ reference (from `--help`).
 ## Changes and CI
 
 - A change to behaviour updates its docs in the same commit, like its tests.
-- A docs-only change runs the docs CI (links today; diagrams and the site
-  build once the site exists), never the code CI. Docs are `docs/**` and
-  every `*.md`.
+- A docs-only change runs the docs CI (links, diagrams, the site's check and
+  build), never the code CI. Docs are `docs/**` and every `*.md`; a change
+  to the app's tokens or fonts runs both.
 - Pages pass the same accessibility check (axe) as the app.

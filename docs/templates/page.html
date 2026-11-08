@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} · {{ config.title }}{% endblock title %}
+{% block description %}{{ page.description or config.description }}{% endblock description %}
+{% block toc %}
+{%- set section = get_section(path=page.ancestors | last) %}
+{{ <toc section={section} here={current_path} /> }}
+{% endblock toc %}
+{% block content %}
+<article class="prose">
+  {{ <kind extra={page.extra} /> }}
+  {#- The page's own `# Title` heading is its h1. #}
+  {{ page.content | safe }}
+</article>
+{% endblock content %}
