@@ -27,10 +27,13 @@ interface Shot {
   element?: string;
   phone?: boolean;
   admin?: boolean;
+  /** Nobody signed in: the sign-in screen itself. */
+  anon?: boolean;
   open(page: Page): Promise<void>;
 }
 
 const SHOTS: Shot[] = [
+  { name: "sign-in", anon: true, open: async (p) => { await p.goto("/#/login"); await p.getByRole("button", { name: "Sign in" }).waitFor(); } },
   { name: "library", open: async (p) => { await p.goto("/#/folder/note"); await settle(p); } },
   { name: "reader", open: async (p) => { await p.goto("/#/note/191"); await settle(p); } },
   {
@@ -168,7 +171,9 @@ for (const shot of SHOTS) {
         // A fixed clock, the morning after the fixtures' newest change (fakeFixtures.ts
         // `NOW`): "deleted today", "1 year ago" and due dates read the same on every take.
         await page.clock.setFixedTime(new Date(1_752_800_000_000 + 10 * 3_600_000));
-        if (shot.admin) {
+        if (shot.anon) {
+          // Nothing mocked: the boot guard's /me fails and the sign-in screen shows.
+        } else if (shot.admin) {
           await mockApi(page, { "user/me": { json: { success: true, email: "ana@household.lan", isAdmin: true, mustChangePassword: false } } });
         } else {
           await signedIn(page);

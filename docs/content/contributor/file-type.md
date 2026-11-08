@@ -31,7 +31,7 @@ Then:
 
 1. Add the type's fixture to the fake API (row 7) and an e2e spec that opens
    it, the way `tests/e2e/txtViewer.spec.ts` does for `.txt`.
-2. If it needs a viewer, compose the shared services ([The browser app](@/contributor/browser-app.md))
+2. If it needs a viewer, compose the shared services ([The browser app](@/contributor/browser-app-rules.md))
    rather than copying one.
 3. Add it to the user manual's [File types](@/manual/file-types.md) page.
 4. [Run the tests](@/contributor/run-the-tests.md).

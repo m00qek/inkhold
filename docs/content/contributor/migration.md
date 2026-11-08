@@ -22,7 +22,7 @@ start. The rules behind each step are in [Database schema](@/contributor/databas
    at compile time.
 3. A column that stores a verdict ("not looked at yet" versus an answer) is
    nullable, `NULL` meaning not looked at: the background worker's jobs select
-   exactly those rows ([Indexing and derived data](@/contributor/indexing.md)).
+   exactly those rows ([Indexing and derived data](@/contributor/indexing-rules.md)).
 4. Test it in `backend/db/schema_test.zig`: a fresh database and one migrated
    from the previous version must end up identical, and a step that moves data
    needs a test with data in it.

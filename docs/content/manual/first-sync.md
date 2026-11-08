@@ -41,8 +41,13 @@ Keep that password: it is shown only once.
 ## 3. Sign in from a browser
 
 Find the computer's address on your network (`hostname -I` prints it), and
-open `http://<that address>:8089`. Sign in as `admin@home.lan` with the
-temporary password. Inkhold asks you to choose your own password; do that.
+open `http://<that address>:8089`.
+
+![The sign-in screen: Account and Password fields and a Sign in button.](screenshots/sign-in.png)
+
+Enter `admin@home.lan` as the **Account** and the temporary password as the
+**Password**, and choose **Sign in**. Inkhold asks you to choose your own
+password; do that.
 
 The library is empty: nothing has synced yet.
 

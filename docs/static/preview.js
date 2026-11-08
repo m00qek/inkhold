@@ -19,8 +19,9 @@
     figure.innerHTML = `<img class="diagram__light" alt="" src="${base}-light.svg"><img class="diagram__dark" alt="" src="${base}-dark.svg">`;
     code.closest("pre").replaceWith(figure);
   }
-  for (const img of document.querySelectorAll('.prose p > img[src^="screenshots/"]:only-child')) {
-    const name = img.getAttribute("src").replace(/^screenshots\//, "").replace(/\.png$/, "");
+  // Zola writes the image's address under the page's own URL; only the name matters.
+  for (const img of document.querySelectorAll('.prose p > img[src*="/screenshots/"]:only-child')) {
+    const name = img.getAttribute("src").replace(/^.*\/screenshots\//, "").replace(/\.png$/, "");
     const figure = document.createElement("figure");
     figure.className = "shot";
     const one = (theme) => `<img class="shot__${theme}" alt="${img.alt}" src="${new URL(`screenshots/${name}-${theme}.png`, root)}" loading="lazy">`;
