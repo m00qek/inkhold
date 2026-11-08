@@ -41,5 +41,5 @@ that feedback is the point of the beta.
 
 ## License
 
-[GPLv3](LICENSE). The understanding of Supernote's file formats derives from
+[AGPL-3.0](LICENSE). The understanding of Supernote's file formats derives from
 [supernote-tool](https://github.com/jya-dev/supernote-tool) (Apache-2.0).
