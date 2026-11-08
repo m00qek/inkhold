@@ -49,7 +49,8 @@ Enter `admin@home.lan` as the **Account** and the temporary password as the
 **Password**, and choose **Sign in**. Inkhold asks you to choose your own
 password; do that.
 
-The library is empty: nothing has synced yet.
+Inkhold then shows **Connect your Supernote**: the address to type on the
+tablet, and *Waiting for your Supernote to sync…*. Leave the page open.
 
 ## 4. Point the tablet at it
 
@@ -61,8 +62,9 @@ digest and to-do data, choose **Retain locally**.
 
 ## 5. Sync
 
-Tap sync in the tablet's top bar. Back in the browser, your folders and
-notebooks appear in the library as they arrive. Open one: its pages are drawn
+Tap sync in the tablet's top bar. Back in the browser, the page says *Your
+Supernote connected*; choose **Open the library**. Your folders and notebooks
+appear as they arrive. Open one: its pages are drawn
 by your browser, the same ink as on the tablet.
 
 ## What you have now
