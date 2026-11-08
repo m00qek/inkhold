@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { asSaved } from "./helpers/download";
 import { signedIn } from "./helpers/app";
 
 // To-Do against the fake API (`api/fakeTodo.ts`): Inbox "after snapshot" and a
@@ -274,7 +275,7 @@ test.describe("To-Do", () => {
     const saving = page.waitForEvent("download");
     await page.getByRole("menuitem", { name: /^Tasks/ }).click();
     const file = await saving;
-    expect(file.suggestedFilename()).toBe("Français.ics");
+    expect(file.suggestedFilename()).toBe(asSaved(file, "Français.ics"));
     const text = await (await file.createReadStream()).toArray().then((c) => Buffer.concat(c).toString("utf8"));
     expect(text.match(/BEGIN:VTODO/g)).toHaveLength(3);
 
@@ -283,7 +284,8 @@ test.describe("To-Do", () => {
     await expect(page.locator(".todo-pop .menu__section")).toHaveText(["All lists"]);
     const saving2 = page.waitForEvent("download");
     await page.getByRole("menuitem", { name: /^Plain text/ }).click();
-    expect((await saving2).suggestedFilename()).toBe("To-Do.txt");
+    const saved2 = await saving2;
+    expect(saved2.suggestedFilename()).toBe(asSaved(saved2, "To-Do.txt"));
 
     for (const where of ["", "/planned", "/completed"]) {
       await page.goto(`/#/todo${where}`);

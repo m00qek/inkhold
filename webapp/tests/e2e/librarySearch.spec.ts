@@ -1,6 +1,7 @@
 // Library search, the remembered sort order and the top-bar heights.
 
 import { test, expect, type Locator, type Page } from "@playwright/test";
+import { asSaved } from "./helpers/download";
 import { signedIn, cardButton, railSettled } from "./helpers/app";
 import { openCategory } from "./library.shared";
 
@@ -91,7 +92,7 @@ test.describe("library rail + gallery", () => {
         page.waitForEvent("download"),
         page.locator(".menu-portal").getByRole("menuitem", { name: /PDF document/ }).click(),
       ]);
-      expect(download.suggestedFilename()).toBe("Ideas & scratch.pdf");
+      expect(download.suggestedFilename()).toBe(asSaved(download, "Ideas & scratch.pdf"));
       await expect(page.getByRole("region", { name: "Reader" })).toBeHidden();
     });
   });

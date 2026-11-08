@@ -1,6 +1,7 @@
 // The library rail and gallery: folder meta, cards and listings.
 
 import { test, expect, type Page } from "@playwright/test";
+import { asSaved } from "./helpers/download";
 import { readFile } from "node:fs/promises";
 import { signedIn, contrastRatio, paintedColours, railSettled, freezeMotion } from "./helpers/app";
 import { openCategory } from "./library.shared";
@@ -251,7 +252,7 @@ test.describe("library rail + gallery", () => {
         page.locator(".menu-portal").getByRole("menuitem", { name: /PDF document/ }).click(),
       ]);
 
-      expect(download.suggestedFilename()).toBe("Ideas & scratch.pdf");
+      expect(download.suggestedFilename()).toBe(asSaved(download, "Ideas & scratch.pdf"));
 
       const path = await download.path();
       expect(path).not.toBeNull();

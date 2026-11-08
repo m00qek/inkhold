@@ -1,4 +1,5 @@
 import { test, expect, type Download, type Page } from "@playwright/test";
+import { asSaved } from "./helpers/download";
 import { readFile } from "node:fs/promises";
 import { cardButton, signedIn, freezeMotion } from "./helpers/app";
 
@@ -130,7 +131,7 @@ test.describe(".note layers panel (real decoder)", () => {
     await expect(oras).toHaveCount(2);
 
     const [oraCurrent] = await Promise.all([page.waitForEvent("download"), oras.nth(0).click()]);
-    expect(oraCurrent.suggestedFilename()).toBe("Layered field sketch_p1_current.ora");
+    expect(oraCurrent.suggestedFilename()).toBe(asSaved(oraCurrent, "Layered field sketch_p1_current.ora"));
     const currentBytes = (await bytesOf(oraCurrent)).toString("latin1");
     expect(currentBytes.startsWith("PK")).toBe(true); // a STORE-only zip
     expect(currentBytes).toContain("image/openraster");
@@ -139,14 +140,14 @@ test.describe(".note layers panel (real decoder)", () => {
 
     await exportBtn(page).click();
     const [oraOriginal] = await Promise.all([page.waitForEvent("download"), oras.nth(1).click()]);
-    expect(oraOriginal.suggestedFilename()).toBe("Layered field sketch_p1_original.ora");
+    expect(oraOriginal.suggestedFilename()).toBe(asSaved(oraOriginal, "Layered field sketch_p1_original.ora"));
     const originalBytes = (await bytesOf(oraOriginal)).toString("latin1");
     expect(originalBytes).toContain("<layer name='Layer 2' src='data/layer_2.png' opacity='1.00' visibility='hidden'");
     expect(originalBytes).toContain("data/layer_2.png"); // pixels ride along regardless
 
     await exportBtn(page).click();
     const [png] = await Promise.all([page.waitForEvent("download"), flats.nth(0).click()]);
-    expect(png.suggestedFilename()).toBe("Layered field sketch_p1_current.png");
+    expect(png.suggestedFilename()).toBe(asSaved(png, "Layered field sketch_p1_current.png"));
     const pngBytes = await bytesOf(png);
     expect([...pngBytes.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     expect(pngBytes.readUInt32BE(16)).toBe(1404);
@@ -163,7 +164,7 @@ test.describe(".note layers panel (real decoder)", () => {
     await expect(pdfs).toHaveCount(3); // current + original + whole notebook
 
     const [current] = await Promise.all([page.waitForEvent("download"), pdfs.nth(0).click()]);
-    expect(current.suggestedFilename()).toBe("Layered field sketch_p1_current.pdf");
+    expect(current.suggestedFilename()).toBe(asSaved(current, "Layered field sketch_p1_current.pdf"));
     const pdf = (await bytesOf(current)).toString("latin1");
     expect(pdf.startsWith("%PDF-")).toBe(true);
     expect(pdf.trimEnd().endsWith("%%EOF")).toBe(true);
@@ -173,7 +174,7 @@ test.describe(".note layers panel (real decoder)", () => {
 
     await exportBtn(page).click();
     const [original] = await Promise.all([page.waitForEvent("download"), pdfs.nth(1).click()]);
-    expect(original.suggestedFilename()).toBe("Layered field sketch_p1_original.pdf");
+    expect(original.suggestedFilename()).toBe(asSaved(original, "Layered field sketch_p1_original.pdf"));
   });
 
   test("a page without layers degrades: toggle disabled, no stack, composite paints", async ({ page }) => {

@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Download } from "@playwright/test";
+import { asSaved } from "./helpers/download";
 import { signedIn } from "./helpers/app";
 import { readFile } from "node:fs/promises";
 
@@ -99,7 +100,7 @@ test.describe("export menu", () => {
       groupItem(page, "Current view", "Flattened image").click(),
     ]);
 
-    expect(download.suggestedFilename()).toBe("Attention Is All You Need-p3.png");
+    expect(download.suggestedFilename()).toBe(asSaved(download, "Attention Is All You Need-p3.png"));
 
     const bytes = await bytesOf(download);
     expect([...bytes.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -118,7 +119,7 @@ test.describe("export menu", () => {
       groupItem(page, "Current view", "PDF document").click(),
     ]);
 
-    expect(download.suggestedFilename()).toBe("Attention Is All You Need-p1.pdf");
+    expect(download.suggestedFilename()).toBe(asSaved(download, "Attention Is All You Need-p1.pdf"));
 
     const pdf = (await bytesOf(download)).toString("latin1");
     expect(pdf.startsWith("%PDF-")).toBe(true);
@@ -166,7 +167,7 @@ test.describe("export menu", () => {
     await expect(page.locator(".toast")).toContainText(/page \d+ of 20/);
 
     const [download] = await Promise.all([page.waitForEvent("download"), clicked]);
-    expect(download.suggestedFilename()).toBe("Attention Is All You Need.pdf");
+    expect(download.suggestedFilename()).toBe(asSaved(download, "Attention Is All You Need.pdf"));
 
     const pdf = (await bytesOf(download)).toString("latin1");
     expect(pdf.startsWith("%PDF-")).toBe(true);
@@ -200,7 +201,7 @@ test.describe("export menu", () => {
       groupItem(page, "Whole notebook", "PDF document").click(),
     ]);
 
-    expect(download.suggestedFilename()).toBe("Field notes — unknown device.pdf");
+    expect(download.suggestedFilename()).toBe(asSaved(download, "Field notes — unknown device.pdf"));
 
     const pdf = (await bytesOf(download)).toString("latin1");
     expect(pdf).toContain("/Count 3");

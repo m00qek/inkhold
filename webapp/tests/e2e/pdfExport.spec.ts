@@ -1,6 +1,7 @@
 // The PDF export menu.
 
 import { test, expect, type Download, type Locator, type Page } from "@playwright/test";
+import { asSaved } from "./helpers/download";
 import { readFile } from "node:fs/promises";
 import { inflateSync } from "node:zlib";
 import { signedIn, freezeMotion } from "./helpers/app";
@@ -146,7 +147,7 @@ test.describe("PDF export menu", () => {
       page.waitForEvent("download"),
       pdfGroupItem(page, "Current view", "PDF document").click(),
     ]);
-    expect(download.suggestedFilename()).toBe("Appliance manual_p2_current.pdf");
+    expect(download.suggestedFilename()).toBe(asSaved(download, "Appliance manual_p2_current.pdf"));
 
     const bytes = await downloadBytes(download);
     expect(bytes.subarray(0, 5).toString("latin1")).toBe("%PDF-");
@@ -212,7 +213,7 @@ test.describe("PDF export menu", () => {
       page.waitForEvent("download"),
       pdfGroupItem(page, "Whole document", "PDF with annotations").click(),
     ]);
-    expect(download.suggestedFilename()).toBe("Appliance manual_annotated.pdf");
+    expect(download.suggestedFilename()).toBe(asSaved(download, "Appliance manual_annotated.pdf"));
 
     const bytes = await downloadBytes(download);
     expect(bytes.length).toBeGreaterThan(PDF_BYTES.length);
@@ -246,7 +247,7 @@ test.describe("PDF export menu", () => {
       pdfGroupItem(page, "Current view", "Flattened image").click(),
     ]);
 
-    expect(download.suggestedFilename()).toBe("Appliance manual_p2_current.png");
+    expect(download.suggestedFilename()).toBe(asSaved(download, "Appliance manual_p2_current.png"));
 
     const bytes = await downloadBytes(download);
     expect([...bytes.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -265,7 +266,7 @@ test.describe("PDF export menu", () => {
       page.waitForEvent("download"),
       pdfGroupItem(page, "Current view", "Flattened image").click(),
     ]);
-    expect(download.suggestedFilename()).toBe("Appliance manual_p1_current.png");
+    expect(download.suggestedFilename()).toBe(asSaved(download, "Appliance manual_p1_current.png"));
     const bytes = await downloadBytes(download);
     // No panel to agree with, so the export uses a flat 2x (144 dpi).
     expect(bytes.readUInt32BE(16)).toBe(400);
@@ -281,7 +282,7 @@ test.describe("PDF export menu", () => {
       page.waitForEvent("download"),
       pdfGroupItem(page, "Current view", "Layered image").click(),
     ]);
-    expect(download.suggestedFilename()).toBe("Appliance manual_p2_current.ora");
+    expect(download.suggestedFilename()).toBe(asSaved(download, "Appliance manual_p2_current.ora"));
 
     const bytes = await downloadBytes(download);
     const text = bytes.toString("latin1");
@@ -357,7 +358,7 @@ test.describe("PDF export menu", () => {
       page.waitForEvent("download"),
       pdfGroupItem(page, "Original view", "Flattened image").click(),
     ]);
-    expect(original.suggestedFilename()).toBe("Appliance manual_p2_original.png");
+    expect(original.suggestedFilename()).toBe(asSaved(original, "Appliance manual_p2_original.png"));
     const originalSeen = await page.evaluate(async (b64) => {
       const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
       const bmp = await createImageBitmap(new Blob([bin], { type: "image/png" }));
