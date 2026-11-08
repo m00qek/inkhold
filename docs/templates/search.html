@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Search · {{ config.title }}{% endblock title %}
+{#- This page has its own field; the bar's would be a second one. #}
+{% block masthead_search %}{% endblock masthead_search %}
+{% block content %}
+<article class="prose prose--index search-page">
+  <h1>Search</h1>
+  <form class="search search--page" role="search" action="{{ current_url }}">
+    <label class="sr-only" for="search-q">Search the docs</label>
+    <svg class="search__glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    <input id="search-q" name="q" type="search" autocomplete="off" spellcheck="false" placeholder="Search both manuals">
+  </form>
+  <p class="search-count" role="status" aria-live="polite"></p>
+  <ul class="rows rows--wide search-results"></ul>
+  <noscript><p>Search needs JavaScript. Every page is also listed in the <a href="{{ get_url(path='@/manual/_index.md') }}">User manual</a> and in <a href="{{ get_url(path='@/contributor/_index.md') }}">Contributing</a>.</p></noscript>
+</article>
+{#- Which pages are planned, so a result can carry the same ring as the lists. #}
+{#- One expression: a `set` inside a loop would not outlive the loop. #}
+{%- set site = get_section(path="_index.md") %}
+{%- set manual = get_section(path="manual/_index.md") %}
+{%- set contributor = get_section(path="contributor/_index.md") %}
+{%- set all = [...site.pages, ...manual.pages, ...contributor.pages] %}
+{%- set planned = [p.permalink for p in all if p.extra?.stub] %}
+<script type="application/json" id="search-data">{{ {"index": get_url(path="search_index.en.json"), "planned": planned} | json_encode | safe }}</script>
+<script src="{{ get_url(path='search.js') }}"></script>
+{% endblock content %}

@@ -58,7 +58,7 @@ try {
           const out = {};
           out.sideways = document.documentElement.scrollWidth > innerWidth;
           // Navigation targets (inline links in running text are exempt).
-          out.small = [...document.querySelectorAll(".masthead a, .theme, .toc a, .row, .cards a")]
+          out.small = [...document.querySelectorAll(".masthead a, .theme, .search input, .toc a, .onthis a, .row, .pager a, .colophon a")]
             .filter((e) => e.checkVisibility())
             .map((e) => [e, e.getBoundingClientRect()])
             .filter(([, r]) => r.height < minTarget || r.width < 24)
@@ -99,7 +99,20 @@ try {
       await ctx.close();
     }
   }
-  console.log(`check-site: ${urls.length} pages × ${WIDTHS.length} widths × 2 themes`);
+  // Search works: a query finds its page, and a nonsense one says so.
+  {
+    const page = await browser.newPage();
+    page.on("pageerror", (e) => fail("/search/", `script error: ${e.message}`));
+    await page.goto(`${BASE}/search/?q=restore+backup`);
+    await page.waitForFunction(() => document.querySelector(".search-count").textContent !== "");
+    const titles = await page.locator(".search-results .row b").allTextContents();
+    if (!titles.some((t) => t.includes("Restore from a backup"))) fail("/search/?q=restore+backup", `no "Restore from a backup" among ${JSON.stringify(titles)}`);
+    await page.goto(`${BASE}/search/?q=zzqx`);
+    await page.waitForFunction(() => document.querySelector(".search-count").textContent !== "");
+    if (!(await page.locator(".search-count").textContent()).startsWith("No page matches")) fail("/search/?q=zzqx", "no empty result message");
+    await page.close();
+  }
+  console.log(`check-site: ${urls.length} pages × ${WIDTHS.length} widths × 2 themes, and search`);
 } finally {
   await browser.close();
   server.close();

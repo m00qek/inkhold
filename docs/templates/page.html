@@ -14,5 +14,31 @@
   {#- The page's own `# Title` heading is its h1. #}
   {{ page.content | safe }}
   {%- if page.extra?.stub %}{{ <stub /> }}{% endif %}
+  {%- if page.ancestors | length > 1 and (page.lower or page.higher) %}
+  {#- In the manual's order (`weight`): `lower` is the page before, `higher` the one after. #}
+  <nav class="pager" aria-label="Previous and next page">
+    {%- if page.lower %}
+    <a class="pager__prev" href="{{ page.lower.permalink }}" rel="prev"><span>Previous</span><b>{{ page.lower.title }}</b></a>
+    {%- endif %}
+    {%- if page.higher %}
+    <a class="pager__next" href="{{ page.higher.permalink }}" rel="next"><span>Next</span><b>{{ page.higher.title }}</b></a>
+    {%- endif %}
+  </nav>
+  {%- endif %}
 </article>
 {% endblock content %}
+{% block aside %}
+{#- The page's own sections, on a wide screen, once there are enough to need it. #}
+{%- set heads = page.toc[0].children if page.toc | length == 1 else page.toc %}
+{%- if heads | length >= 3 %}
+<nav class="onthis" aria-label="On this page">
+  <h2 class="toc__kind">On this page</h2>
+  <ul>
+    {%- for h in heads %}
+    <li><a href="#{{ h.id }}">{{ h.title }}</a></li>
+    {%- endfor %}
+  </ul>
+</nav>
+{%- endif %}
+{% endblock aside %}
+{% block edit %} · <a href="{{ config.extra.repo }}/edit/{{ config.extra.branch }}/docs/content/{{ page.relative_path }}">Edit this page</a>{% endblock edit %}

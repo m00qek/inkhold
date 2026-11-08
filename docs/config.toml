@@ -4,7 +4,7 @@ title = "Inkhold"
 description = "A private cloud for your Supernote, on a computer you own."
 default_language = "en"
 compile_sass = false
-build_search_index = false
+build_search_index = true
 # Pages are plain Markdown, never templates: they must read the same on GitHub,
 # and `{{` / `{%` in a page (a Mermaid hexagon is `A{{label}}`) would otherwise
 # run as Tera, break the build or vanish from the page.
@@ -14,6 +14,16 @@ skip_content_templating = ["**/*.md"]
 smart_punctuation = true
 external_links_no_referrer = true
 
+[search]
+include_title = true
+include_description = true
+include_content = true
+# A plain JSON list; the search page scores it itself (static/search.js), no library.
+index_format = "fuse_json"
+
 [extra]
+# Where the source lives: the footer's links and each page's "Edit this page".
+repo = "https://github.com/m00qek/inkhold-beta"
+branch = "main"
 # The two manuals, in the order the navigation shows them.
 manuals = ["manual", "contributor"]

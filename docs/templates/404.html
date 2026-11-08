@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Page not found · {{ config.title }}{% endblock title %}
+{% block content %}
+<article class="prose">
+  <h1>Page not found</h1>
+  <p>No page lives at this address. It may have moved when the manuals were reorganised.</p>
+  <ul class="rows rows--wide">
+    <li><a class="row" href="{{ get_url(path='@/search.md') }}"><b>Search</b><span>Find the page by what it covers.</span></a></li>
+    <li><a class="row" href="{{ get_url(path='@/manual/_index.md') }}"><b>User manual</b><span>For the person who runs Inkhold, and everyone who uses it.</span></a></li>
+    <li><a class="row" href="{{ get_url(path='@/contributor/_index.md') }}"><b>Contributor manual</b><span>For anyone changing Inkhold's code.</span></a></li>
+  </ul>
+</article>
+{% endblock content %}

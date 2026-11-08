@@ -72,7 +72,7 @@ a {
 .masthead {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: center;
   gap: var(--sp-2) var(--sp-6);
   padding: var(--sp-4) var(--sp-6);
   border-block-end: 1px solid var(--line);
@@ -115,6 +115,71 @@ a {
   text-decoration: underline;
   text-decoration-color: var(--accent);
   text-decoration-thickness: 2px;
+}
+
+/* ---- search: the app's search box (03-main-topbar.css) ---- */
+.search {
+  position: relative;
+}
+.search--bar {
+  flex: 0 1 18rem;
+}
+.search__glyph {
+  position: absolute;
+  inset-inline-start: 12px;
+  inset-block-start: 50%;
+  inline-size: 16px;
+  block-size: 16px;
+  transform: translateY(-50%);
+  fill: none;
+  stroke: var(--ink-faint);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+.search input {
+  inline-size: 100%;
+  block-size: var(--hit-target);
+  padding: 0 var(--sp-3) 0 36px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9375rem;
+}
+.search input::placeholder {
+  color: var(--ink-faint);
+}
+/* Focus: the border turns accent and doubles, as in the app. */
+.search input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.search--page {
+  max-inline-size: var(--measure);
+  margin-block-end: var(--sp-3);
+}
+.search--page input {
+  block-size: var(--hit-target-touch);
+  font-size: 1rem;
+}
+.search-count {
+  color: var(--ink-soft);
+}
+.search-count:empty {
+  display: none;
+}
+.search-results mark {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--ink);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+/* The phone's way in: the glyph alone, a link to the search page. */
+.search-glyph {
+  display: none;
 }
 
 /* Light or dark: the app's quiet glyph button. */
@@ -197,6 +262,39 @@ a {
   color: var(--ink);
   font-weight: 600;
 }
+/* ---- the page's own sections, beside it on a wide screen ---- */
+.onthis {
+  display: none;
+  font-size: 0.875rem;
+}
+.onthis ul {
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.onthis a {
+  display: block;
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+.onthis a:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+@media (min-width: 1200px) {
+  .layout:has(> .onthis) {
+    grid-template-columns: var(--toc-w) minmax(0, 1fr) 13rem;
+    max-inline-size: calc(var(--measure) + var(--toc-w) + 13rem + 8rem);
+  }
+  .onthis {
+    display: block;
+    position: sticky;
+    inset-block-start: var(--sp-6);
+    align-self: start;
+  }
+}
+
 .toc__head {
   font-family: var(--font-display);
   font-weight: 600;
@@ -212,6 +310,55 @@ a {
 /* A planned page reads as such in the list, not as a finished one. */
 .toc a.is-stub:not([aria-current]) {
   color: var(--ink-faint);
+}
+
+/* A heading's own link: there on hover and focus, the app's faint ink. */
+.anchor {
+  margin-inline-start: var(--sp-2);
+  color: var(--ink-faint);
+  font-weight: 400;
+  text-decoration: none;
+  opacity: 0;
+}
+:is(h2, h3, h4):hover > .anchor,
+.anchor:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .anchor {
+    display: none;
+  }
+}
+
+/* Previous and next in the manual's order: two rows, the next one at the end. */
+.pager {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: var(--sp-3);
+  margin-block-start: var(--sp-8);
+  padding-block-start: var(--sp-4);
+  border-block-start: 1px solid var(--line);
+}
+.pager a {
+  display: grid;
+  gap: 2px;
+  min-block-size: var(--hit-target-touch);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius);
+  color: var(--ink);
+  text-decoration: none;
+}
+.pager a:hover {
+  background: var(--hover);
+}
+.pager span {
+  font: 400 var(--fs-eyebrow) var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+}
+.pager__next {
+  grid-column: -2;
+  text-align: end;
 }
 
 /* ---- the page: ink on a sheet ---- */
@@ -400,24 +547,34 @@ main:focus {
   inline-size: auto;
   margin-inline: auto;
 }
-.diagram__dark {
+/* One theme's drawing only: `.diagram > ` outranks `.diagram img` above, which
+   the preview's two <img> would otherwise both match. */
+.diagram > .diagram__dark {
   display: none;
 }
-:root[data-theme="dark"] .diagram__light {
+:root[data-theme="dark"] .diagram > .diagram__light {
   display: none;
 }
-:root[data-theme="dark"] .diagram__dark {
+:root[data-theme="dark"] .diagram > .diagram__dark {
   display: block;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .diagram__light {
+  :root:not([data-theme="light"]) .diagram > .diagram__light {
     display: none;
   }
-  :root:not([data-theme="light"]) .diagram__dark {
+  :root:not([data-theme="light"]) .diagram > .diagram__dark {
     display: block;
   }
 }
 
+.colophon p {
+  margin: 0 0 var(--sp-2);
+}
+.colophon a {
+  display: inline-block;
+  padding-block: var(--sp-1);
+  color: var(--ink-soft);
+}
 .colophon {
   padding: var(--sp-4) var(--sp-6) var(--sp-8);
   border-block-start: 1px solid var(--line);
@@ -431,7 +588,7 @@ main:focus {
   /* The brand and the toggle on one row, the links on their own under it. */
   .masthead {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     gap: var(--sp-2);
     padding: var(--sp-3) var(--sp-4);
   }
@@ -454,8 +611,34 @@ main:focus {
     align-items: center;
     min-block-size: var(--hit-target-touch);
   }
-  .theme {
+  .colophon a {
+    display: inline-flex;
+    align-items: center;
+    min-block-size: var(--hit-target-touch);
+  }
+  /* The field leaves; its glyph, beside the toggle, opens the search page. */
+  .search--bar {
+    display: none;
+  }
+  .search-glyph {
+    display: inline-grid;
+    place-items: center;
     grid-column: 2;
+    grid-row: 1;
+    inline-size: var(--hit-target-touch);
+    block-size: var(--hit-target-touch);
+    color: var(--ink-soft);
+  }
+  .search-glyph svg {
+    inline-size: 20px;
+    block-size: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+  }
+  .theme {
+    grid-column: 3;
     grid-row: 1;
     inline-size: var(--hit-target-touch);
     block-size: var(--hit-target-touch);

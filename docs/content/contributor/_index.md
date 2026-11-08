@@ -10,6 +10,7 @@ extra:
     - { type: how-to, reader: "", label: "How-to", says: "Steps for a task you have in mind." }
     - { type: reference, reader: "", label: "Reference", says: "Facts to look up." }
     - { type: explanation, reader: "", label: "Explanation", says: "Why things are the way they are: our decisions." }
+insert_anchor_links: right
 ---
 
 For anyone changing Inkhold's code: how to build and test it, and why it is

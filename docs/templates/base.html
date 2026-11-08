@@ -1,3 +1,5 @@
+{#- The 404 page has no path of its own. -#}
+{%- set here = current_path or "" -%}
 <!doctype html>
 <html lang="{{ lang }}">
 <head>
@@ -19,12 +21,23 @@
     <a class="brand" href="{{ get_url(path='@/_index.md') }}">Inkhold <span>docs</span></a>
     <nav class="manuals" aria-label="Manuals">
       {%- set get = get_page(path="get-inkhold.md", metadata_only=true) %}
-      <a href="{{ get.permalink }}"{% if current_path == get.path %} aria-current="true"{% endif %}>{{ get.title }}</a>
+      <a href="{{ get.permalink }}"{% if here == get.path %} aria-current="true"{% endif %}>{{ get.title }}</a>
       {%- for m in config.extra.manuals %}
       {%- set s = get_section(path=m ~ "/_index.md", metadata_only=true) %}
-      <a href="{{ s.permalink }}"{% if s.path in current_path %} aria-current="true"{% endif %}>{{ s.extra.short }}</a>
+      <a href="{{ s.permalink }}"{% if s.path in here %} aria-current="true"{% endif %}>{{ s.extra.short }}</a>
       {%- endfor %}
     </nav>
+    {% block masthead_search %}
+    {#- The bar's search: a field on a computer, the glyph alone on a phone (site.css). #}
+    <form class="search search--bar" role="search" action="{{ get_url(path='@/search.md') }}">
+      <label class="sr-only" for="bar-q">Search the docs</label>
+      <svg class="search__glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="bar-q" name="q" type="search" autocomplete="off" placeholder="Search">
+    </form>
+    <a class="search-glyph" href="{{ get_url(path='@/search.md') }}" aria-label="Search the docs">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    </a>
+    {% endblock masthead_search %}
     {#- The app's sun and moon (webapp/src/ui/icons.ts); the one shown is where a press takes you. #}
     <button class="theme" type="button" aria-label="Dark theme" aria-pressed="false" hidden>
       <svg class="theme__moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -36,8 +49,10 @@
     <main id="main" tabindex="-1">
       {% block content %}{% endblock content %}
     </main>
+    {% block aside %}{% endblock aside %}
   </div>
   <footer class="colophon">
+    <p><a href="{{ config.extra.repo }}">Inkhold on GitHub</a>{% block edit %}{% endblock edit %}</p>
     <p>Unofficial. Inkhold is an independent project, not affiliated with or endorsed by Ratta or Supernote.</p>
   </footer>
   <script src="{{ get_url(path='site.js') }}"></script>
