@@ -1,0 +1,2 @@
+# The source notebooks never ship: a .note keeps older page versions inside.
+*.note

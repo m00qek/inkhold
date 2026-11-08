@@ -13,6 +13,7 @@ export { fakeFileHash } from "./fakeHash";
 import { createBinFake } from "./binFake";
 import { LAYERED_NOTE_ID, layeredPageLayers, layeredPagePayload, withLayeredPageLayers } from "./layeredFixture";
 import { fakeFileHash } from "./fakeHash";
+import { demoMeta, demoNotesOn, demoPageBytes, demoPageText, demoSummaries, isDemoNote } from "./demoNotes";
 import { MARKED_PDF_ID, PDF_MARK_ID, PDF_MARK_SOURCE_PAGE, RECOGNIZED_FROM, fakeTextHash, pages, fakeText, fakePageLinks, note, UNSCALED_NOTE_ID, fakeWords, fakeSize, FAKE_UPLOAD_HEADROOM, uploadSteps, UPLOAD_ID_BASE, NOW, versionPageCount, baseVersions, CHILDREN, ALL_NOTES, noteSummary, pathTo, withItemCount } from "./fakeFixtures";
 
 /** Upload ids, per module; the counter only grows. */
@@ -55,7 +56,18 @@ function markMeta(): NoteMeta {
   };
 }
 
+/** The demo's real notebooks join the Note folder once, ahead of the fixtures (`demoNotes.ts`). */
+let demoNotesAdded = false;
+function addDemoNotes(): void {
+  if (demoNotesAdded || !demoNotesOn()) return;
+  demoNotesAdded = true;
+  const rows = demoSummaries(NOW);
+  CHILDREN.note = [...rows, ...(CHILDREN.note ?? [])];
+  for (const r of rows) ALL_NOTES[r.id] = r;
+}
+
 export function createFakeApi(opts: FakeApiOptions = {}): Api {
+  addDemoNotes();
   const latency = opts.latencyMs ?? 120;
   const syncVersion = opts.syncVersion ?? 1;
 
@@ -87,6 +99,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
     async getNoteMeta(id: Id): Promise<NoteMeta> {
       await delay(latency);
       if (id === PDF_MARK_ID) return markMeta();
+      if (isDemoNote(id)) return demoMeta(id);
       const summary = ALL_NOTES[id];
       if (!summary) throw new Error(`no such note: ${id}`);
       return {
@@ -112,6 +125,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     async getPageBytes(_id: Id, page: PageRef): Promise<ArrayBuffer> {
       await delay(latency);
+      if (isDemoNote(_id)) return demoPageBytes(_id, page);
       if (_id === PDF_MARK_ID) {
         const payload = layeredPagePayload(0);
         if (payload) return payload.slice().buffer as ArrayBuffer;
@@ -135,6 +149,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     async getPageText(id: Id, page: PageRef): Promise<PageText> {
       await delay(latency);
+      if (isDemoNote(id)) return demoPageText(id, page);
       const summary = ALL_NOTES[id];
       if (!summary) throw new Error(`no such note: ${id}`);
       // Unrecognized page: empty result, not an error, as the real endpoint.

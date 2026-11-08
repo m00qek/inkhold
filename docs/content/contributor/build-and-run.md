@@ -55,7 +55,7 @@ npm run demo
 ```
 
 Open the address it prints. You are signed in to a made-up household: folders,
-notebooks (three of them with real handwriting), PDFs, a recycle bin, to-dos
+notebooks (two with real handwriting), PDFs, a recycle bin, to-dos
 and an admin console, all served by an in-memory fake. Change a file under
 `webapp/src/` and the page reloads.
 

@@ -1,17 +1,123 @@
 {% extends "base.html" %}
+{% block title %}Inkhold: your Supernote, synced to a computer you own{% endblock title %}
+{% block description %}Inkhold takes the place of Supernote's Private Cloud: your tablet syncs to a computer in your home, and everyone in the house can read, search and recover their notes from a browser.{% endblock description %}
 {% block content %}
-<article class="prose">
-  <h1>{{ section.title }}</h1>
-  {{ section.content | safe }}
-  {#- The same rows a manual's index uses: one way to list pages everywhere. #}
-  <ul class="rows rows--wide">
-    {%- for m in config.extra.manuals %}
-    {%- set s = get_section(path=m ~ "/_index.md") %}
-    <li><a class="row" href="{{ s.permalink }}">
-      <b>{{ s.title }}</b>
-      <span>{{ s.description }}</span>
-    </a></li>
-    {%- endfor %}
-  </ul>
-</article>
+<div class="home">
+
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="hero__text">
+      <h1 id="hero-title">Your Supernote, synced to a computer you own.</h1>
+      <p class="hero__lead">Inkhold takes the place of Supernote's Private Cloud. Point your tablet at it and it syncs as it always has, but your notes stay in your home, and everyone in the house can read, search and recover them from a browser.</p>
+      <p class="hero__actions">
+        <a class="button button--primary" href="{{ get_url(path='@/get-inkhold.md') }}">Get Inkhold</a>
+        <a class="button" href="{{ get_url(path='@/manual/_index.md') }}">Read the user manual</a>
+      </p>
+      <p class="hero__small">Free and open source (GPLv3). In beta, tested end to end on a Supernote Nomad. Unofficial: not made by Ratta.</p>
+    </div>
+    <div class="hero__shots">
+      {{ <shot name="reader" alt="The Inkhold web app showing a handwritten notebook page: “Hey there! Welcome to Inkhold. I hope it keeps your notes safe and always at hand :)”, with the notebook's pages listed beside it." eager={true} /> }}
+      {{ <shot name="phone-library" alt="The library on a phone, the welcome notebook among the others." phone={true} eager={true} /> }}
+    </div>
+  </section>
+
+  <section class="feature" aria-labelledby="f-safe">
+    <div class="feature__text">
+      <h2 id="f-safe">Nothing you delete is gone at once</h2>
+      <p>Delete a notebook on the tablet and it waits in Inkhold's recycle bin for 30 days, a window the admin can change. Restore it and it is back on the tablet at the next sync.</p>
+      <p>Every saved version of a notebook is kept as well: open how a page looked last week, and bring that version back if you need it, the handwriting on an annotated PDF included.</p>
+      <p><a href="{{ get_url(path='@/manual/deleted-file.md') }}">Get back a deleted file</a> · <a href="{{ get_url(path='@/manual/earlier-version.md') }}">Go back to an earlier version</a></p>
+    </div>
+    <div class="feature__shots feature__shots--pair">
+      {{ <shot name="bin" alt="The recycle bin: deleted notebooks grouped by day, each with the days left before it is removed for good." /> }}
+      {{ <shot name="history" alt="A notebook's version history: three saved versions with their dates and how many pages changed." /> }}
+    </div>
+  </section>
+
+  <section class="feature feature--flip" aria-labelledby="f-backup">
+    <div class="feature__text">
+      <h2 id="f-backup">Backups that run themselves</h2>
+      <p>Inkhold backs itself up into a folder of plain files: a NAS share, a USB disk, your Dropbox. Each night adds only what changed, every snapshot is complete on its own, and a backup can be checked without restoring it.</p>
+      <p>In Docker, mount a folder at <code>/backup</code> and that is all. If backups stop, admins see it in the library and in the admin console.</p>
+<pre class="feature__code"><code>inkhold backup create /mnt/nas/inkhold --keep=7
+inkhold backup verify /mnt/nas/inkhold
+inkhold restore /mnt/nas/inkhold</code></pre>
+      <p><a href="{{ get_url(path='@/manual/back-up.md') }}">Back up automatically</a> · <a href="{{ get_url(path='@/manual/how-backups-work.md') }}">How backups work</a></p>
+    </div>
+    <div class="feature__shots">
+      {{ <shot name="admin-server" alt="The admin console's server panel: memory, disk used, the recycle bin's 30 days, and the last backup an hour ago, with the backup folder /mnt/nas/inkhold listed below." /> }}
+    </div>
+  </section>
+
+  <section class="feature" aria-labelledby="f-read">
+    <div class="feature__text">
+      <h2 id="f-read">Every page, in any browser</h2>
+      <p>Open a notebook and read it page by page; open a sketch and see each of its layers on its own. PDFs come with their contents and text you can select and copy, and text files open too.</p>
+      <p>Your browser draws the pages, not the server, so a small computer is enough to serve a whole household. Export any notebook as a PDF with searchable text, a PNG, or a layered image.</p>
+      <p><a href="{{ get_url(path='@/manual/read-a-note.md') }}">Read a note</a> · <a href="{{ get_url(path='@/manual/export.md') }}">Export a note</a></p>
+    </div>
+    <div class="feature__shots">
+      {{ <shot name="sketch-layers" alt="A sketch of an ink drop falling into a pool, drawn on three layers, with the layers panel listing Layer 3, Layer 2, Layer 1 and the reference layer, each with its preview, a button to hide it and its opacity." /> }}
+    </div>
+  </section>
+
+  <section class="feature feature--flip" aria-labelledby="f-search">
+    <div class="feature__text">
+      <h2 id="f-search">Search your handwriting</h2>
+      <p>Your Supernote already recognises your handwriting. Inkhold makes that text searchable across every notebook, with PDFs and text files alongside, and finds the word you meant even with a typo.</p>
+      <p>The search runs in your browser, and it tells you which notebooks it can't search yet, rather than letting a missing result look like an answer.</p>
+      <p><a href="{{ get_url(path='@/manual/find-a-note.md') }}">Find a note</a></p>
+    </div>
+    <div class="feature__shots">
+      {{ <shot name="search" alt="Searching for “desert” finds the handwritten poem Ozymandias, with the matching line quoted under it." /> }}
+    </div>
+  </section>
+
+  <section class="feature" aria-labelledby="f-todo">
+    <div class="feature__text">
+      <h2 id="f-todo">Your to-dos, on both sides</h2>
+      <p>The lists and tasks of the tablet's To-Do app appear in the browser, where you can add, tick off, date and move them. The tablet picks the changes up at its next sync, and a task written from a note links back to its page.</p>
+      <p>To-Do sync is new: it is off until you turn it on.</p>
+      <p><a href="{{ get_url(path='@/manual/todo.md') }}">Use To-Do in the browser</a> · <a href="{{ get_url(path='@/manual/todo-sync.md') }}">Turn on To-Do sync</a></p>
+    </div>
+    <div class="feature__shots">
+      {{ <shot name="todo" alt="The To-Do page: tasks grouped by list, with due dates, one overdue, and one task showing the handwriting it was written in." /> }}
+    </div>
+  </section>
+
+  <section class="feature feature--flip feature--phone" aria-labelledby="f-phone">
+    <div class="feature__text">
+      <h2 id="f-phone">On your phone, too</h2>
+      <p>On a phone, Inkhold is laid out for one hand: the library in two columns, the reader's controls at the bottom, a swipe to turn the page. Add it to your home screen and it opens like an app.</p>
+      <p><a href="{{ get_url(path='@/manual/phone.md') }}">Install Inkhold on your phone</a></p>
+    </div>
+    <div class="feature__shots feature__shots--phones">
+      {{ <shot name="phone-library" alt="The library on a phone: notebooks in two columns, with the tab bar at the bottom." phone={true} /> }}
+      {{ <shot name="phone-reader" alt="A notebook open on a phone, its page controls at the bottom." phone={true} /> }}
+    </div>
+  </section>
+
+  <section class="small" aria-labelledby="f-small">
+    <h2 id="f-small">Small enough for a Raspberry Pi from 2014</h2>
+    <dl class="facts">
+      <div><dt>One program</dt><dd>One file to run, one port, no database server and no extra services.</dd></div>
+      <div><dt>The browser does the work</dt><dd>Drawing pages, searching and exporting all happen on your device.</dd></div>
+      <div><dt>Measured on a Pi 1</dt><dd>About 15% of its single core through a busy household evening: four people and two tablets.</dd></div>
+      <div><dt>No lock-in</dt><dd>Your notebooks are kept exactly as the tablet wrote them, and back up to a folder of ordinary files. No subscription, no account you don't control.</dd></div>
+    </dl>
+  </section>
+
+  <section class="beta" aria-labelledby="f-beta">
+    <h2 id="f-beta">It's a beta</h2>
+    <p>Inkhold syncs your real notebooks, so it is tested against a real tablet: the Nomad, end to end. Other Supernote models very likely work the same way, but nobody has confirmed it yet; if you have one, trying it and reporting back helps the most.</p>
+    <p>Before you start, back up your tablet. And read <a href="{{ get_url(path='@/manual/limits.md') }}">what doesn't work yet</a>: Digest sync, the Supernote phone app, viewers for EPUB and Office files, and searching handwriting inside PDFs and <code>.mark</code> files.</p>
+    <ul class="rows rows--wide">
+      <li><a class="row" href="{{ get_url(path='@/get-inkhold.md') }}"><b>Get Inkhold</b><span>Docker, a release binary, or built from source.</span></a></li>
+      {%- for m in config.extra.manuals %}
+      {%- set s = get_section(path=m ~ "/_index.md") %}
+      <li><a class="row" href="{{ s.permalink }}"><b>{{ s.title }}</b><span>{{ s.description }}</span></a></li>
+      {%- endfor %}
+    </ul>
+  </section>
+
+</div>
 {% endblock content %}

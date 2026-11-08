@@ -1,0 +1,54 @@
+{
+  "id": "2",
+  "name": "ozymandias.note",
+  "pages": [
+    {
+      "index": 0,
+      "hash": "3a660a084cbfe836c7798d9f28659a15",
+      "width": 1872,
+      "height": 1404,
+      "textHash": "75f2af71d475b49127dfbcc693154f35",
+      "layers": [
+        {
+          "slot": "background",
+          "name": "Background Layer",
+          "visible": true,
+          "isCurrent": false
+        },
+        {
+          "slot": "main",
+          "name": "Main Layer",
+          "visible": true,
+          "isCurrent": true
+        }
+      ],
+      "hasInk": true
+    },
+    {
+      "index": 1,
+      "hash": "ef58051a99cf268e6466185c9c65a182",
+      "width": 1872,
+      "height": 1404,
+      "textHash": "4a8a51a32325b5a70c575caff06c837d",
+      "layers": [
+        {
+          "slot": "background",
+          "name": "Background Layer",
+          "visible": true,
+          "isCurrent": false
+        },
+        {
+          "slot": "main",
+          "name": "Main Layer",
+          "visible": true,
+          "isCurrent": true
+        }
+      ],
+      "hasInk": true
+    }
+  ],
+  "fileType": "note",
+  "fileHash": "c56bcedf4d38392321cc34d95a4b9a57",
+  "size": 3361843,
+  "pxPerMm": 11.83411979675293
+}

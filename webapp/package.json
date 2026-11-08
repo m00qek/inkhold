@@ -20,7 +20,8 @@
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
     "test:e2e": "playwright test",
-    "bench:search": "vitest run --config vitest.bench.config.ts"
+    "bench:search": "vitest run --config vitest.bench.config.ts",
+    "screenshots": "playwright test -c playwright.screenshots.config.ts"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.10.1",

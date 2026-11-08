@@ -4,6 +4,7 @@
 
 import type { DecodedPage, NoteRenderer, RenderRequest } from "./types";
 import { thumbTargetWidth } from "./types";
+import { isDemoPage } from "../api/demoNotes";
 import type { RenderSize, Theme } from "../core/types";
 
 // `native` is a ceiling, never an upscale; `thumb` is the shared tier target.
@@ -53,8 +54,14 @@ function makeCanvas(w: number, h: number): { canvas: OffscreenCanvas | HTMLCanva
 }
 
 export function createFakeRenderer(): NoteRenderer {
+  // The demo's real notebooks (api/demoNotes.ts) go to the real decoder.
+  let real: Promise<NoteRenderer> | null = null;
   return {
     async render(req: RenderRequest): Promise<DecodedPage> {
+      if (isDemoPage(req.page.hash)) {
+        real ??= import("./wasm").then((m) => m.createWasmRenderer());
+        return (await real).render(req);
+      }
       const { page, size } = req;
       const w = Math.min(outputWidth(size), page.width);
       const h = Math.round((w * page.height) / page.width);

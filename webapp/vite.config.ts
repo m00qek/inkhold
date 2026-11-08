@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from "vite";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { fakeFileHash } from "./src/api/fakeHash";
@@ -116,13 +116,36 @@ function demoFiles(): Plugin {
   };
 }
 
+/**
+ * Any dev server (the demo, the e2e and screenshot runs): `/demo-notes/` serves
+ * the demo notebooks' page payloads and text (`src/api/demoNotes.ts`). Never in
+ * a build: the Pi serves no demo data.
+ */
+function demoNotes(): Plugin {
+  const root = new URL("./demo/notes/", import.meta.url).pathname;
+  return {
+    name: "inkhold-demo-notes",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const m = /^\/demo-notes\/([a-z]+)\/(page-\d+\.(?:snpg|text\.json))(?:\?|$)/.exec(req.url ?? "");
+        if (!m) return next();
+        const path = join(root, m[1]!, m[2]!);
+        if (!existsSync(path)) return next();
+        res.setHeader("content-type", m[2]!.endsWith(".json") ? "application/json" : "application/octet-stream");
+        res.end(readFileSync(path));
+      });
+    },
+  };
+}
+
 // Same-origin static assets with hash routing, so relative paths and no SPA
 // fallback. Dev proxies to the local Zig server (override with VITE_API_TARGET).
 const apiTarget = process.env.VITE_API_TARGET ?? "http://127.0.0.1:8089";
 
 export default defineConfig({
   base: "./",
-  plugins: [inkholdServiceWorker(), demoFiles()],
+  plugins: [inkholdServiceWorker(), demoFiles(), demoNotes()],
   server: {
     port: 5180,
     proxy: {

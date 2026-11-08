@@ -1,0 +1,52 @@
+{
+  "id": "3",
+  "name": "welcome.note",
+  "pages": [
+    {
+      "index": 0,
+      "hash": "6ac3cfd076e70000d2ef9ab45b57c57d",
+      "width": 1404,
+      "height": 1872,
+      "layers": [
+        {
+          "slot": "background",
+          "name": "Background Layer",
+          "visible": true,
+          "isCurrent": false
+        },
+        {
+          "slot": "main",
+          "name": "Main Layer",
+          "visible": true,
+          "isCurrent": true
+        }
+      ],
+      "hasInk": true
+    },
+    {
+      "index": 1,
+      "hash": "f44f5721d6d60cc8df66086110352780",
+      "width": 1404,
+      "height": 1872,
+      "layers": [
+        {
+          "slot": "background",
+          "name": "Background Layer",
+          "visible": true,
+          "isCurrent": false
+        },
+        {
+          "slot": "main",
+          "name": "Main Layer",
+          "visible": true,
+          "isCurrent": true
+        }
+      ],
+      "hasInk": false
+    }
+  ],
+  "fileType": "note",
+  "fileHash": "7401f9642d5a66a428cb459ed671b325",
+  "size": 243940,
+  "pxPerMm": 11.83411979675293
+}
