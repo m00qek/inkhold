@@ -4,8 +4,8 @@
   "description": "Draws the docs' Mermaid diagrams (tools/diagrams.mjs) and checks the built site against its quality bar (tools/check-site.mjs).",
   "type": "module",
   "devDependencies": {
-    "@axe-core/playwright": "4.10.1",
+    "@axe-core/playwright": "4.14.0",
     "mermaid": "12.3.0",
-    "playwright-core": "1.61.1"
+    "playwright-core": "1.64.1"
   }
 }
