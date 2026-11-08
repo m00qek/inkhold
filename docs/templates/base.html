@@ -18,7 +18,11 @@
 <body>
   <a class="skip" href="#main">Skip to content</a>
   <header class="masthead">
-    <a class="brand" href="{{ get_url(path='@/_index.md') }}">Inkhold <span>docs</span></a>
+    {#- The app's own mark and wordmark (webapp/src/ui/chrome.ts). #}
+    <a class="brand" href="{{ get_url(path='@/_index.md') }}">
+      <svg class="brand__mark" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><g stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3.5H6.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2H9"/><path d="M15 3.5h2.5a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H15"/></g><path d="M12 8v8" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round"/></svg>
+      INKHOLD
+    </a>
     <nav class="manuals" aria-label="Manuals">
       {%- set get = get_page(path="get-inkhold.md", metadata_only=true) %}
       <a href="{{ get.permalink }}"{% if here == get.path %} aria-current="true"{% endif %}>{{ get.title }}</a>

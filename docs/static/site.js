@@ -31,11 +31,15 @@
 (() => {
   const NAMES = { PRE: "Code", TABLE: "Table", FIGURE: "Diagram" };
   const reach = () => {
+    // Numbered by kind: two regions with one name are indistinguishable.
+    const seen = {};
     for (const el of document.querySelectorAll(".prose pre, .prose table, .prose .diagram")) {
       if (el.scrollWidth > el.clientWidth + 1) {
+        const name = NAMES[el.tagName];
+        seen[name] = (seen[name] ?? 0) + 1;
         el.tabIndex = 0;
         el.setAttribute("role", "region");
-        el.setAttribute("aria-label", `${NAMES[el.tagName]}, scrolls sideways`);
+        el.setAttribute("aria-label", `${name} ${seen[name]}, scrolls sideways`);
       } else if (el.hasAttribute("tabindex")) {
         el.removeAttribute("tabindex");
         el.removeAttribute("role");

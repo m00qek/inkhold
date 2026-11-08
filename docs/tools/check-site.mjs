@@ -58,7 +58,7 @@ try {
           const out = {};
           out.sideways = document.documentElement.scrollWidth > innerWidth;
           // Navigation targets (inline links in running text are exempt).
-          out.small = [...document.querySelectorAll(".masthead a, .theme, .search input, .toc a, .onthis a, .row, .pager a, .colophon a")]
+          out.small = [...document.querySelectorAll(".masthead a, .theme, .search input, .toc a, .onthis a, .row, .pager a, .colophon a, .button")]
             .filter((e) => e.checkVisibility())
             .map((e) => [e, e.getBoundingClientRect()])
             .filter(([, r]) => r.height < minTarget || r.width < 24)
@@ -69,11 +69,20 @@ try {
           const ctx2d = document.createElement("canvas").getContext("2d");
           const perLine = [];
           for (const p of document.querySelectorAll(".prose > p:not([class])")) {
-            const cs = getComputedStyle(p);
-            ctx2d.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-            const text = p.textContent.replace(/\s+/g, " ").trim();
-            const lines = ctx2d.measureText(text).width / p.clientWidth;
-            if (lines >= 2) perLine.push(text.length / lines);
+            // Each run of text in its own font: inline code is wider than prose.
+            let width = 0;
+            let chars = 0;
+            const walk = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
+            while (walk.nextNode()) {
+              const node = walk.currentNode;
+              const text = node.data.replace(/\s+/g, " ");
+              const cs = getComputedStyle(node.parentElement);
+              ctx2d.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+              width += ctx2d.measureText(text).width;
+              chars += text.length;
+            }
+            const lines = width / p.clientWidth;
+            if (lines >= 2) perLine.push(chars / lines);
           }
           out.perLine = perLine.length ? Math.round(perLine.reduce((a, b) => a + b) / perLine.length) : null;
           out.height = document.documentElement.scrollHeight;

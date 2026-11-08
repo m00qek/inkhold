@@ -31,3 +31,16 @@
 {% component stub() %}
 <p class="stub" role="note">Planned, not written yet. What it will cover is above.</p>
 {% endcomponent stub %}
+
+{# A screenshot in both themes (`npm run screenshots` in webapp/): the page's
+   theme shows one; the other is lazy and hidden, so it is never fetched. #}
+{% component shot(name, alt, phone=false, eager=false) %}
+{#- Its real size (crops differ), so the page keeps its place while it loads. -#}
+{%- set size = get_image_metadata(path="screenshots/" ~ name ~ "-light.png") -%}
+{%- set w = size.width -%}
+{%- set h = size.height -%}
+<figure class="shot{% if phone %} shot--phone{% endif %}">
+  <img class="shot__light" src="{{ get_url(path='screenshots/' ~ name ~ '-light.png') }}" alt="{{ alt }}" width="{{ w }}" height="{{ h }}"{% if not eager %} loading="lazy"{% endif %} decoding="async">
+  <img class="shot__dark" src="{{ get_url(path='screenshots/' ~ name ~ '-dark.png') }}" alt="{{ alt }}" width="{{ w }}" height="{{ h }}" loading="lazy" decoding="async">
+</figure>
+{% endcomponent shot %}

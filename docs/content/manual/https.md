@@ -5,11 +5,44 @@ weight: 2030
 extra:
   reader: operator
   type: how-to
-  stub: true
 ---
 
 # Put it behind HTTPS
 
-Serve Inkhold over HTTPS, with its own certificate or behind a reverse proxy.
+Serve Inkhold over HTTPS, so the tablet and browsers can reach it safely from
+outside your home. Plain HTTP is fine inside a trusted home network.
 
-<!-- Not written yet. Source: README: TLS -->
+## Let Inkhold do it
+
+Inkhold speaks TLS 1.3 itself; you need no reverse proxy. Give it a
+certificate and its key in [config.zon](@/manual/configuration.md):
+
+```zig
+.tls = .{
+    .enabled = true,
+    .cert_path = "/etc/inkhold/cert.pem",
+    .key_path = "/etc/inkhold/key.pem",
+},
+```
+
+Restart Inkhold, and use `https://` in the tablet's server address and in the
+browser.
+
+Leave `cipher_suites` empty. Inkhold then picks what is cheap on its own
+processor: AES-GCM where the processor has AES instructions, ChaCha20 where it
+does not, as on every Raspberry Pi. On a Pi 1, AES costs about three times as
+much.
+
+To try it before you have a real certificate, `bash scripts/dev-cert.sh` in the
+repository makes a self-signed one.
+
+## Or behind a reverse proxy
+
+If nginx, Caddy or Traefik already handles HTTPS for you:
+
+- Set **`trusted_proxy`** to the proxy's address, so Inkhold's sign-in limits
+  apply to each visitor (read from `X-Real-IP` or the last `X-Forwarded-For`)
+  and not to the proxy.
+- Have the proxy mark the session cookie `Secure` (nginx:
+  `proxy_cookie_flags ~ secure`). Inkhold only does it when it handles TLS
+  itself.

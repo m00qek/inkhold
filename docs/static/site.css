@@ -78,24 +78,19 @@ a {
   border-block-end: 1px solid var(--line);
   background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
 }
+/* The app's wordmark: its mark, then INKHOLD in mono bold (02-app-shell-rail.css). */
 .brand {
   display: inline-flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--sp-2);
   padding-block: var(--sp-1);
-  font: 600 1.125rem var(--font-display);
-  letter-spacing: 0.08em;
+  font: 700 1.125rem var(--font-mono);
+  letter-spacing: 0.06em;
   color: var(--ink);
   text-decoration: none;
-  text-transform: uppercase;
 }
-.brand span {
-  font-family: var(--font-mono);
-  font-weight: 400;
-  font-size: var(--fs-caption);
-  letter-spacing: 0.04em;
-  color: var(--ink-faint);
-  text-transform: none;
+.brand__mark {
+  flex: none;
 }
 .manuals {
   flex: 1;
@@ -660,4 +655,233 @@ main:focus {
 /* In running text the ring is a word: the space after it is the gap. */
 .progress .ring {
   margin-inline-end: 0;
+}
+
+
+/* ================= the home page ================= */
+.layout:has(.home) {
+  max-inline-size: 76rem;
+}
+.home {
+  display: grid;
+  gap: var(--sp-8);
+}
+.home h1,
+.home h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+.home h2 {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-heading);
+}
+.home p {
+  margin: 0 0 var(--sp-3);
+  max-inline-size: 60ch;
+}
+.home code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+/* Buttons: the app's square, outlined control; the one that matters is filled with ink. */
+.button {
+  display: inline-flex;
+  align-items: center;
+  min-block-size: var(--hit-target-touch);
+  padding: 0 var(--sp-4);
+  border: 1px solid var(--ink-soft);
+  border-radius: var(--radius);
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-weight: 600;
+  text-decoration: none;
+}
+.button:hover {
+  background: var(--hover);
+}
+.button--primary {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--sheet);
+}
+.button--primary:hover {
+  background: color-mix(in srgb, var(--ink) 85%, var(--sheet));
+}
+
+/* ---- hero: what it is, then the welcome page itself, on a screen and a phone ---- */
+.hero {
+  display: grid;
+  gap: var(--sp-6);
+  align-items: center;
+  padding-block: var(--sp-6) var(--sp-4);
+}
+.hero h1 {
+  margin: 0 0 var(--sp-4);
+  font-size: clamp(2rem, 1.2rem + 3vw, 3.25rem);
+  max-inline-size: 16ch;
+}
+.hero__lead {
+  font-size: 1.125rem;
+  line-height: 1.55;
+}
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-block: var(--sp-6) var(--sp-4);
+}
+.hero__small {
+  color: var(--ink-soft);
+  font-size: 0.9375rem;
+}
+.hero__shots {
+  position: relative;
+  padding-inline-end: 9%;
+  padding-block-end: 6%;
+}
+/* The phone stands in front of the screen's corner. */
+.hero__shots .shot--phone {
+  position: absolute;
+  inset-inline-end: 0;
+  inset-block-end: 0;
+  inline-size: 24%;
+}
+@media (min-width: 1000px) {
+  .hero {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  }
+}
+
+/* ---- a screenshot: the app's sheet, framed like a window on the desk ---- */
+.shot {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  background: var(--sheet);
+  box-shadow:
+    0 2px 3px var(--shadow),
+    0 26px 50px -28px var(--shadow);
+}
+.shot img {
+  display: block;
+  inline-size: 100%;
+  block-size: auto;
+}
+.shot--phone {
+  border-radius: 18px;
+  border-width: 4px;
+  border-color: color-mix(in srgb, var(--ink) 80%, var(--desk));
+}
+/* One theme's picture: the hidden one, lazy, is never fetched. */
+.shot > .shot__dark {
+  display: none;
+}
+:root[data-theme="dark"] .shot > .shot__light {
+  display: none;
+}
+:root[data-theme="dark"] .shot > .shot__dark {
+  display: block;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .shot > .shot__light {
+    display: none;
+  }
+  :root:not([data-theme="light"]) .shot > .shot__dark {
+    display: block;
+  }
+}
+
+/* ---- features: the words on one side, the screen on the other, alternating ---- */
+.feature {
+  display: grid;
+  gap: var(--sp-6);
+  align-items: center;
+  padding-block-start: var(--sp-8);
+  border-block-start: 1px solid var(--line);
+}
+.feature__text a {
+  color: var(--accent);
+}
+.feature__code {
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3) var(--sp-4);
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+.feature__shots--pair {
+  display: grid;
+  gap: var(--sp-4);
+}
+.feature__shots--phones {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-4);
+  max-inline-size: 28rem;
+  margin-inline: auto;
+}
+@media (min-width: 1000px) {
+  .feature {
+    grid-template-columns: minmax(0, 4fr) minmax(0, 7fr);
+  }
+  .feature--flip > .feature__text {
+    order: 1;
+  }
+  .feature--flip {
+    grid-template-columns: minmax(0, 7fr) minmax(0, 4fr);
+  }
+  .feature--phone {
+    grid-template-columns: minmax(0, 6fr) minmax(0, 5fr);
+  }
+  /* The bin and its history: one over the other, the second set in. */
+  .feature__shots--pair > .shot:last-child {
+    inline-size: 82%;
+    margin-inline-start: auto;
+    margin-block-start: -18%;
+  }
+}
+
+/* ---- the numbers, as words: a definition list, not stat cards ---- */
+.small {
+  padding-block-start: var(--sp-8);
+  border-block-start: 1px solid var(--line);
+}
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: var(--sp-4) var(--sp-6);
+  margin: var(--sp-4) 0 0;
+}
+.facts dt {
+  font-family: var(--font-display);
+  font-weight: 600;
+}
+.facts dd {
+  margin: var(--sp-1) 0 0;
+  color: var(--ink-soft);
+}
+
+.beta {
+  padding: var(--sp-6) var(--sp-8);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+}
+.beta .rows {
+  margin-block-start: var(--sp-4);
+}
+@media (max-width: 699px) {
+  .beta {
+    padding: var(--sp-4);
+  }
+  .home {
+    padding-inline: var(--sp-4);
+  }
 }
