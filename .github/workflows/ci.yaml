@@ -24,13 +24,91 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---- The suites, side by side ----------------------------------------------
+  # ---- Built once ----------------------------------------------------------
   #
-  # Each its own runner: the slowest one, not their sum, is how long a run takes.
-  # Every Zig job keeps its `.zig-cache` between runs. The key changes with
+  # The three wasm modules, the SPA and the x86_64 musl server: every job below
+  # downloads them instead of compiling its own. This is the only web job with
+  # Zig, so its `.zig-cache` is the one that stays warm. The key changes with
   # every commit, so each run saves its own; the prefix restores the last one,
-  # and Zig's cache is content-addressed, so objects of unchanged code are
-  # simply reused.
+  # and Zig's cache is content-addressed, so unchanged code is simply reused.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # A tag names the version the server reports (`inkhold --version`, from
+      # build.zig.zon): a release whose binary says otherwise is refused.
+      - name: The tag matches build.zig.zon
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          want="v$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)"
+          if [ "$want" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME, but build.zig.zon says $want"
+            exit 1
+          fi
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Cache Zig build
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: ${{ runner.os }}-zig-build-${{ github.sha }}
+          restore-keys: ${{ runner.os }}-zig-build-
+
+      - name: Install Frontend Dependencies
+        run: npm --prefix webapp ci
+
+      # The only place `-DSQLITE_TEMP_STORE=3` is checked. Removing that flag
+      # changes nothing observable (measured — see `sqlite_core_wasm_flags`),
+      # so the module refuses to open an index without it and this step is what
+      # makes the refusal visible. A guard nobody runs is not a guard.
+      - name: Test the sqlite-core wasm ABI
+        run: zig build wasm-sqlite-core-test
+
+      # `npm run build` builds the wasm into public/ first, then the SPA.
+      - name: Build the wasm and the SPA
+        run: make web-dist
+
+      - name: Build the x86_64 server
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-musl
+
+      - name: Upload the wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: webapp/public/*.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload the SPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapp-dist
+          path: webapp/dist
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload the x86_64 server
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-x86_64
+          path: zig-out/bin/inkhold
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---- The suites, side by side ----------------------------------------------
   test-backend:
     runs-on: ubuntu-latest
     steps:
@@ -80,39 +158,31 @@ jobs:
       - name: Test Parsers
         run: make parser-test
 
+  # The memory ceilings in scripts/footprint.py, on the binary that ships.
   footprint:
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+      - name: Download the x86_64 server
+        uses: actions/download-artifact@v4
         with:
-          version: 0.17.0
+          name: server-x86_64
+          path: out
 
-      - name: Cache Zig build
-        uses: actions/cache@v4
-        with:
-          path: .zig-cache
-          key: ${{ runner.os }}-zig-footprint-${{ github.sha }}
-          restore-keys: ${{ runner.os }}-zig-footprint-
-
-      # The memory ceilings in scripts/footprint.py: idle RSS, the cost of a
-      # parked socket, and that threads follow requests rather than sockets.
       - name: Measure the server footprint
-        run: make footprint
+        run: |
+          chmod +x out/inkhold
+          make footprint BIN=out/inkhold
 
   test-web-unit:
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -121,33 +191,22 @@ jobs:
           cache: 'npm'
           cache-dependency-path: webapp/package-lock.json
 
-      # The three wasm modules are wasm32, the same in every job that builds
-      # them (and the MuPDF one is 441 C translation units).
-      - name: Cache Zig build
-        uses: actions/cache@v4
-        with:
-          path: .zig-cache
-          key: ${{ runner.os }}-zig-wasm-${{ github.sha }}
-          restore-keys: ${{ runner.os }}-zig-wasm-
-
       - name: Install Frontend Dependencies
         run: npm --prefix webapp ci
 
-      # The only place `-DSQLITE_TEMP_STORE=3` is checked. Removing that flag
-      # changes nothing observable (measured — see `sqlite_core_wasm_flags`),
-      # so the module refuses to open an index without it and this step is what
-      # makes the refusal visible. A guard nobody runs is not a guard.
-      - name: Test the sqlite-core wasm ABI
-        run: zig build wasm-sqlite-core-test
+      - name: Download the wasm
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm
+          path: webapp/public
 
       - name: Lint styles and unit tests
-        run: |
-          npm --prefix webapp run build:wasm
-          npm --prefix webapp run lint:styles
-          npm --prefix webapp run test:unit
+        run: make web-lint web-test-unit
 
-  # The browser suite, in four slices on four runners: one runner took 19 min.
+  # The browser suite in four slices on four runners, on the dev server with
+  # the wasm already built (E2E_PREBUILT), so no slice compiles anything.
   test-web-e2e:
+    needs: [build]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -156,11 +215,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -175,85 +229,27 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('webapp/package-lock.json') }}
 
-      # Restore only: test-web-unit saves the same wasm build.
-      - name: Restore Zig build
-        uses: actions/cache/restore@v4
-        with:
-          path: .zig-cache
-          key: ${{ runner.os }}-zig-wasm-${{ github.sha }}
-          restore-keys: ${{ runner.os }}-zig-wasm-
-
       - name: Setup Web Tests
         run: make web-test-setup
 
-      # Before the suite, not by the dev server: Playwright gives the server
-      # 60 s to answer, and a cold wasm build (MuPDF) takes minutes.
-      - name: Build the wasm modules
-        run: npm --prefix webapp run build:wasm
+      - name: Download the wasm
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm
+          path: webapp/public
 
       - name: Browser tests, slice ${{ matrix.shard }} of 4
-        working-directory: webapp
-        run: npx playwright test --shard=${{ matrix.shard }}/4
+        env:
+          E2E_PREBUILT: "1"
+        run: make web-test-e2e SHARD=${{ matrix.shard }}/4
 
   # ---- A release: built while the suites run, published once they pass ---------
   #
-  # Only for a version tag. The builds start with the suites, since nothing is
-  # published until `image` and `github-release`, which wait for every suite.
-  #
-  # `webapp/dist` is the same bytes for every architecture: built once, here.
-  webapp:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # The tag names the version the server reports (`inkhold --version`,
-      # from build.zig.zon): a release whose binary says otherwise is refused.
-      - name: The tag matches build.zig.zon
-        run: |
-          want="v$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)"
-          if [ "$want" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME, but build.zig.zon says $want"
-            exit 1
-          fi
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-          cache-dependency-path: webapp/package-lock.json
-
-      # `npm run build` runs `build:wasm` first: the same wasm as the tests.
-      - name: Restore Zig build
-        uses: actions/cache/restore@v4
-        with:
-          path: .zig-cache
-          key: ${{ runner.os }}-zig-wasm-${{ github.sha }}
-          restore-keys: ${{ runner.os }}-zig-wasm-
-
-      - name: Install Frontend Dependencies
-        run: npm --prefix webapp ci
-
-      - name: Build the SPA
-        run: make web-dist
-
-      - name: Upload the SPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: webapp-dist
-          path: webapp/dist
-          if-no-files-found: error
-          retention-days: 1
-
+  # Only for a version tag. Nothing is published until `image` and
+  # `github-release`, which wait for every suite.
   release:
-    needs: [webapp]
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -284,7 +280,7 @@ jobs:
           key: ${{ runner.os }}-zig-release-${{ matrix.target }}-${{ github.sha }}
           restore-keys: ${{ runner.os }}-zig-release-${{ matrix.target }}-
 
-      # Built once by `webapp` above; no Node on this runner at all.
+      # Built once by `build` above; no Node on this runner at all.
       - name: Download the SPA
         uses: actions/download-artifact@v4
         with:

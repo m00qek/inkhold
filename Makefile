@@ -14,7 +14,7 @@ SERVE_PORT := $(PORT)
 
 TARGET ?= native-linux-musl
 
-.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-test-e2e web-test-setup fmt fmt-fix commit-check commit-hook lan-ip clean docs docs-build
+.PHONY: help build release-artifact web-dist print-zig-cpu print-docker-arches docker-context docker-image docker-image-host run serve test parser-test test-all web-test web-test-unit web-lint web-test-e2e web-test-setup fmt fmt-fix commit-check commit-hook lan-ip clean docs docs-build
 
 help:
 	@echo "Inkhold"
@@ -251,9 +251,14 @@ test:
 # The server's memory footprint against its ceilings (scripts/footprint.py):
 # idle, per parked socket, and that threads do not grow with sockets. Builds
 # ReleaseSafe first, since Debug numbers mean nothing.
+# BIN= measures a binary already built (CI: the shipped x86_64 musl one).
 footprint:
+ifeq ($(BIN),)
 	zig build -Doptimize=ReleaseSafe
 	python3 scripts/footprint.py zig-out/bin/inkhold
+else
+	python3 scripts/footprint.py $(BIN)
+endif
 
 # The standalone parser suites. The root `test` above builds the note/spd
 # parsers as MODULES and runs their colocated unit tests, but the SPD suite and
@@ -274,8 +279,12 @@ web-test:
 web-test-unit:
 	cd $(WEB) && npm run test:unit
 
+web-lint:
+	cd $(WEB) && npm run lint:styles
+
+# SHARD=1/4 runs one slice. E2E_PREBUILT=1 uses the wasm already in public/.
 web-test-e2e:
-	cd $(WEB) && npm run test:e2e
+	cd $(WEB) && npx playwright test $(if $(SHARD),--shard=$(SHARD))
 
 # One-time: install web dev deps and the Playwright Chromium build (needs
 # network). Unit tests need only Node; e2e additionally needs this Chromium.

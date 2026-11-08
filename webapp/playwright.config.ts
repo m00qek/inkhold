@@ -24,7 +24,11 @@ export default defineConfig({
       ? [{ name: "webkit", use: { ...devices["Desktop Safari"] } }]
       : [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: `npm run dev -- --port ${PORT} --strictPort`,
+    // E2E_PREBUILT=1: the wasm modules are already in public/ (CI downloads
+    // them), so start Vite itself and skip `predev`, which would rebuild them.
+    command: process.env.E2E_PREBUILT === "1"
+      ? `npx vite --port ${PORT} --strictPort`
+      : `npm run dev -- --port ${PORT} --strictPort`,
     url: `http://localhost:${PORT}`,
     // Off by default: with a fixed port, another worktree's server would be
     // silently reused and the suite would pass against the wrong code.

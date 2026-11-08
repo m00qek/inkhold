@@ -21,8 +21,9 @@ make footprint
 Builds a ReleaseSafe server and runs `scripts/footprint.py`: it starts the
 server, holds idle connections, and reads the process's memory; then it seeds a
 library at two sizes and runs a backup beside the serving server. It fails when
-a number crosses its ceiling, and CI runs it. Ceilings are raised only with a
-note in the script saying what bought the bytes.
+a number crosses its ceiling. CI runs it on the x86_64 musl binary that ships
+(`make footprint BIN=path` measures a binary already built). Ceilings are
+raised only with a note in the script saying what bought the bytes.
 
 The numbers are measured on x86_64 as a stand-in for the Pi: the structure
 they pin (threads don't grow with connections) is the same there.

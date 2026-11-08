@@ -38,10 +38,10 @@ style lint, unit and end-to-end suites), in that order.
 | `make test` | The server's unit and HTTP tests (`zig build test`) |
 | `make parser-test` | The `.note` and `.spd` parsers' own suites, which the root suite cannot see |
 | `make web-test-unit` | The browser app's unit tests (Vitest) |
-| `make web-test-e2e` | The browser app end to end, in Chromium, against a fake server |
+| `make web-lint` | Every size in the stylesheets is a design token |
+| `make web-test-e2e` | The browser app end to end, in Chromium, against a fake server; `SHARD=1/4` runs one slice |
 
-In `webapp/`, `npm run typecheck` and `npm run lint:styles` check the types and
-that every size in the stylesheets is a design token.
+In `webapp/`, `npm run typecheck` checks the types.
 
 ## The gate
 
