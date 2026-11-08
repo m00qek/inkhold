@@ -1,0 +1,112 @@
+---
+title: Documentation rules
+reader: contributor
+type: reference
+---
+
+# Documentation rules
+
+The rules every page in `docs/`, the README and the website follow. The docs
+are organised by [Diátaxis](https://diataxis.fr): split first by reader, then
+by what the reader needs at that moment.
+
+## Readers and types
+
+There are three readers:
+
+| Reader | Who | Comes for |
+|---|---|---|
+| `operator` | The person who runs the server | Install, upgrade, configure, back up, restore |
+| `household` | Anyone who uses it, on the tablet or in a browser | Sync, find, read, recover, To-Do |
+| `contributor` | Anyone changing the code | Build, test, understand how and why it works |
+
+`operator` and `household` share the user manual; `contributor` has its own.
+
+Every page has exactly one reader and one type, written in its front matter:
+
+```yaml
+---
+title: Restore a deleted note
+reader: household
+type: how-to        # tutorial | how-to | reference | explanation
+---
+```
+
+- **Tutorial**: a lesson that leads a newcomer to a first success. Few pages.
+- **How-to**: the steps for one task the reader already has in mind. Most
+  pages of the user manual.
+- **Reference**: facts to look up: settings, commands, file types, limits.
+- **Explanation**: why things are the way they are.
+
+A page that starts to drift into another type links to that page instead.
+The quadrants are not filled evenly: one tutorial is fine.
+
+## Where files go
+
+- Documentation lives in `docs/`. Outside it the repository keeps only a few
+  small Markdown files: `README.md` (the pitch, a short install, links to the
+  site), `LICENSE`, `SECURITY.md` and `CONTRIBUTING.md` (each a few lines
+  that point into `docs/`).
+- One source for each fact. The README, the home page and the docs link to
+  each other, never copy each other.
+
+## Explanation pages carry our decisions
+
+For contributors, explanation pages record the architectural decisions, not
+only their outcome. Each decision has the same shape:
+
+1. **Problem**: what forced a choice.
+2. **Decision**: what we chose.
+3. **Cost**: what we gave up.
+4. **Revisit when**: what would make us choose again.
+
+## Words
+
+- The app's labels exactly as on screen, in bold: **Move to bin**, not
+  "delete".
+- The app's voice: sentence case, second person, plain verbs, present tense.
+  No "simply", "just" or "easily".
+- Say plainly what does not work. The limits have their own page, linked from
+  the home page.
+- Unofficial on every page: Inkhold is not Ratta's or Supernote's, and never
+  borrows their logos or look.
+
+## Diagrams
+
+- Mermaid, in fenced ` ```mermaid ` blocks: GitHub renders them in the
+  repository, and the website renders them to SVG at build time (no diagram
+  script in the browser), in the site's colours, light and dark.
+- A diagram earns its place by showing a mechanism: what talks to what, in
+  which order. Every diagram has a sentence before it saying what it shows.
+
+## Screenshots
+
+- From the desktop web app, in the demo library (`npm run demo`), taken by a
+  script, never by hand: they never go stale and never show anyone's notes.
+- The home page also shows the phone version.
+- Every screenshot has alt text that says what matters in it.
+
+## Look
+
+The website and the docs follow the app's design language (`DESIGN.md`): its
+type, colours, spacing and voice. They need not match the app pixel for
+pixel, but they must agree with each other on every page.
+
+## Releases
+
+The docs describe the latest release. Anything only on `pre-release` is marked
+as **Unreleased** until it ships.
+
+## Generated, not written
+
+Whatever can drift is generated: screenshots (from the demo), the
+`config.zon` reference (from `config.example.zon`), the command-line
+reference (from `--help`).
+
+## Changes and CI
+
+- A change to behaviour updates its docs in the same commit, like its tests.
+- A docs-only change runs the docs CI (links today; diagrams and the site
+  build once the site exists), never the code CI. Docs are `docs/**` and
+  every `*.md`.
+- Pages pass the same accessibility check (axe) as the app.

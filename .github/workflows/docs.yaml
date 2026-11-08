@@ -1,0 +1,29 @@
+name: Docs
+
+# Only for documentation; code changes run `ci.yaml`
+# (docs/contributor/documentation-rules.md).
+on:
+  push:
+    branches: [ "main" ]
+    paths: [ "docs/**", "**/*.md", ".github/workflows/docs.yaml" ]
+  pull_request:
+    paths: [ "docs/**", "**/*.md", ".github/workflows/docs.yaml" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Offline: links between our own files and anchors. The web is not
+      # checked here, so a site being down never fails a docs change.
+      - name: Check links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --include-fragments --no-progress "docs/**/*.md" "*.md"
+          fail: true
