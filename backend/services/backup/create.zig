@@ -1,7 +1,7 @@
 //! `inkhold backup create`: one consistent snapshot of a live install, taken
 //! beside a running server.
 //!
-//! The order is what makes it consistent (DESIGN.md §2.6):
+//! The order is what makes it consistent (docs/content/contributor/storage.md (Backups)):
 //!   1. copy every blob the live database names that the backup lacks;
 //!   2. `VACUUM INTO` a private copy of the database;
 //!   3. copy any blob that copy names and the backup still lacks (an upload
@@ -77,8 +77,8 @@ pub const CreateError = error{
 
 /// Page cache for each of the backup's connections. It reads every page about
 /// once, so a big cache only costs memory: at 1000 KiB a 16,000-blob library
-/// took the backup to 4.8 MB on a Pi 1 (over the 4 MB budget, DESIGN.md
-/// §2.6); at 256 KiB it is 1.9 MB on x86_64, flat however big the library,
+/// took the backup to 4.8 MB on a Pi 1 (over the 4 MB budget,
+/// docs/content/contributor/storage.md (Backups)); at 256 KiB it is 1.9 MB on x86_64, flat however big the library,
 /// and no slower.
 pub const cache_kib = 256;
 

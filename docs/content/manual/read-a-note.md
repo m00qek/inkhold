@@ -1,6 +1,6 @@
 ---
 title: "Read a note"
-description: "Open a note in the browser: its layers, find in the note, zoom, page through."
+description: "Open a notebook in the browser: its layers, find in it, zoom, page through."
 weight: 2130
 extra:
   reader: household

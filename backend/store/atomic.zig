@@ -1,7 +1,7 @@
 //! What the blob, thumbnail and derived stores share: a `tmp/` staging
 //! directory beside the published files, random temp names, the crash sweep,
 //! and reading a small file whole. Publishing itself is the store's rename;
-//! the invariant (DESIGN.md §2.1) is that nothing is renamed into place before
+//! the invariant (docs/content/contributor/storage.md (Invariants)) is that nothing is renamed into place before
 //! it is fsynced, and a crash can only leave a temp file for `sweepTmp`.
 
 const std = @import("std");

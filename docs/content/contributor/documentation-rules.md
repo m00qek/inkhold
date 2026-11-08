@@ -120,7 +120,7 @@ only their outcome. Each decision has the same shape:
 
 ## Look
 
-The website and the docs follow the app's design language (`DESIGN.md`): its
+The website and the docs follow the app's [design language](@/contributor/design-language.md): its
 type, colours, spacing and voice. The site reads the app's own tokens and
 fonts (`webapp/src/styles/00-tokens.css`, `webapp/public/fonts/`), copied in
 at build, never forked. They need not match the app pixel for

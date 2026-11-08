@@ -76,8 +76,8 @@ pub fn putList(db: sqlite.Db, user_id: u64, l: List) sqlite.Error!void {
         \\  last_modified = excluded.last_modified, deleted = excluded.deleted,
         \\  web_changed_at = NULL;
     , &.{
-        .{ .int = @intCast(user_id) }, .{ .text = l.id },             .{ .text = l.title },
-        .{ .int = l.create_time },     .{ .int = l.last_modified },   .{ .int = @intFromBool(l.deleted) },
+        .{ .int = @intCast(user_id) }, .{ .text = l.id },           .{ .text = l.title },
+        .{ .int = l.create_time },     .{ .int = l.last_modified }, .{ .int = @intFromBool(l.deleted) },
     });
 }
 
@@ -140,12 +140,12 @@ pub fn putTask(db: sqlite.Db, user_id: u64, t: Task) sqlite.Error!void {
         \\  planner_sort_time = excluded.planner_sort_time, deleted = excluded.deleted,
         \\  web_changed_at = NULL;
     , &.{
-        .{ .int = @intCast(user_id) },     .{ .text = t.id },                    .{ .text_opt = t.list_id },
-        .{ .text = t.title },              .{ .text_opt = t.detail },            .{ .text = t.status },
-        .{ .text_opt = t.importance },     .{ .text_opt = t.recurrence },        .{ .text_opt = t.links },
-        .{ .int = @intFromBool(t.reminder_on) }, .{ .int = t.due_time },         .{ .int = t.completed_time },
-        .{ .int = t.last_modified },       .{ .int = t.sort },                   .{ .int = t.sort_completed },
-        .{ .int = t.sort_time },           .{ .int = t.planner_sort },           .{ .int = t.planner_sort_time },
+        .{ .int = @intCast(user_id) },           .{ .text = t.id },             .{ .text_opt = t.list_id },
+        .{ .text = t.title },                    .{ .text_opt = t.detail },     .{ .text = t.status },
+        .{ .text_opt = t.importance },           .{ .text_opt = t.recurrence }, .{ .text_opt = t.links },
+        .{ .int = @intFromBool(t.reminder_on) }, .{ .int = t.due_time },        .{ .int = t.completed_time },
+        .{ .int = t.last_modified },             .{ .int = t.sort },            .{ .int = t.sort_completed },
+        .{ .int = t.sort_time },                 .{ .int = t.planner_sort },    .{ .int = t.planner_sort_time },
         .{ .int = @intFromBool(t.deleted) },
     });
 }
@@ -246,8 +246,10 @@ test "a task comes back exactly as the tablet sent it, and a resend replaces it"
 
     // The July capture's task: Inbox (no list), not yet done.
     const sent: Task = .{
-        .id = "f4c4cf48bfe1726d83037156c02350e4", .title = "buy groceries",
-        .last_modified = 1784901382926, .sort_time = 1784901382926,
+        .id = "f4c4cf48bfe1726d83037156c02350e4",
+        .title = "buy groceries",
+        .last_modified = 1784901382926,
+        .sort_time = 1784901382926,
     };
     try putTask(db, 1, sent);
     try putTask(db, 1, sent); // a retried insert is no error

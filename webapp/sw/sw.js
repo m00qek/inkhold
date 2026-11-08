@@ -8,7 +8,7 @@
 //   network first and the stored copy is used only when the network fails.
 //
 // Never the files: a note's pages, a PDF, an image, a transcript, a to-do
-// list. Opening those needs the network (DESIGN.md §11.10).
+// list. Opening those needs the network (docs/content/contributor/phones-rules.md).
 //
 // A new build installs beside the old one and WAITS: the page offers a
 // reload, and only then does the new one take over (`pwa/register.ts`).

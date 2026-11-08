@@ -216,7 +216,7 @@ pub const routes = [_]router.Route{
     // Household-wide totals only, never per-person activity.
     .{ .method = .GET, .path = "/api/admin/health", .scopes = &.{.controlplane}, .require_admin = true, .handler = admin.health },
 
-    // --- Backups: what `inkhold backup` last did (DESIGN.md §2.6) ---
+    // --- Backups: what `inkhold backup` last did (docs/content/contributor/storage.md (Backups)) ---
     // The library's notice: any signed-in caller may ask, only an admin hears
     // anything but `none`, and without elevation, or it would hide behind a prompt.
     // The signed-in person's To-Do (`handlers/todo.zig`); reaches the tablet at its next sync.

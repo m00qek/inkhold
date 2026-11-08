@@ -1,16 +1,17 @@
 ---
-title: "Set quotas and the bin's retention"
-description: "Give each person a storage quota, and choose how long the bin keeps files."
+title: "Set allotments and the bin's window"
+description: "Give each person a storage allotment, and choose how long the bin keeps what they delete."
 weight: 2050
 extra:
   reader: operator
   type: how-to
 ---
 
-# Set quotas and the bin's retention
+# Set allotments and the bin's window
 
 Give each person a storage allotment, and choose how long the recycle bin keeps
 what they delete. Both are in the [admin console](@/manual/household-members.md).
+The config and the command line call an allotment a quota.
 
 ## A person's allotment
 

@@ -13,10 +13,11 @@ Where your notebooks are kept, who can see them, and what leaves your home.
 
 ## Where it lives
 
-On the server's disk, in two places its [settings](@/manual/configuration.md)
-name: a database (accounts, folders, names, versions, the search index) and a
-data folder holding every file exactly as the tablet wrote it, named by its
-content. Nothing is kept anywhere else.
+On the server's disk, in two places: a database (accounts, folders, names,
+versions) and a data folder holding every file exactly as the tablet wrote it,
+along with the text Inkhold reads out of each file for search. Nothing is kept
+anywhere else. Whoever runs the server chooses the two places
+([config.zon settings](@/manual/configuration.md)).
 
 ## What leaves your home
 
@@ -39,12 +40,11 @@ app itself. They stay in that browser, for that person.
 
 ## Passwords
 
-The tablet's sign-in needs the server to be able to check a password in a
-particular form, so Inkhold cannot store only a one-way hash, as most services
-do. It stores that form **encrypted**, with a key kept outside the database
-(`cred.key`). A copy of the database alone reveals no password; the key and the
-database together would. Keep `cred.key` apart from your backups unless you
-choose to include it, and as private as the server.
+Your password never leaves your browser or tablet: only proof of it does.
 
-Your password itself never leaves your browser or tablet: only proof of it
-does.
+The tablet's way of signing in needs the server to keep a form of your
+password it can check against, so Inkhold cannot keep only a one-way hash,
+as most websites do. It keeps that form **encrypted**, with a key stored apart
+from the database. A copy of the database alone reveals no password. Whoever
+runs the server keeps that key safe: [Back up automatically](@/manual/back-up.md)
+says how.

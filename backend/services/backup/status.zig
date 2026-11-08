@@ -2,7 +2,7 @@
 //! The backup process records every `create` and `verify`, good or failed,
 //! into `backup_runs` (one row per directory); the server reads it to show
 //! admins a notice. Households never read cron mail: this is how a backup
-//! that stopped working gets noticed (DESIGN.md §2.6).
+//! that stopped working gets noticed (docs/content/contributor/storage.md (Backups)).
 //!
 //! The rules, as agreed:
 //!   - any directory whose last `create` or `verify` failed: `failed`, always,

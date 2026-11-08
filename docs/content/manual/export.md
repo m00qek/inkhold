@@ -1,6 +1,6 @@
 ---
 title: "Export a note"
-description: "Save a note as a PDF with searchable text, a flat PNG, or a layered .ora."
+description: "Save a notebook, or one page, as a PDF with searchable text, a flat PNG, or a layered .ora."
 weight: 2170
 extra:
   reader: household

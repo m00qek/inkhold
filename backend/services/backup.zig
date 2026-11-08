@@ -1,7 +1,7 @@
 //! Backups a household can keep with the tools it already has: a folder of
 //! plain files on a NAS share, a USB disk or a Dropbox folder. A separate
 //! process from the server, run by hand or by cron; it never needs the server
-//! stopped. Design and rules: DESIGN.md §2.6.
+//! stopped. Design and rules: docs/content/contributor/storage.md (Backups).
 //!
 //! Every snapshot is complete on its own. Blobs are content-addressed and
 //! never change, so all snapshots share one `blobs/` store and each names the

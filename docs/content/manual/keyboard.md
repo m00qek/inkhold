@@ -17,7 +17,7 @@ extra:
 | <kbd>Home</kbd> <kbd>End</kbd> | First and last page |
 | <kbd>Ctrl</kbd>+<kbd>F</kbd> (<kbd>⌘</kbd>+<kbd>F</kbd> on a Mac) | Find in this note or file |
 | <kbd>Enter</kbd>, <kbd>Shift</kbd>+<kbd>Enter</kbd> | In Find: the next and previous match |
-| <kbd>Esc</kbd> | Close Find; again, close the notebook |
+| <kbd>Esc</kbd> | One thing at a time: a text selection in a PDF, then Find, then the notebook |
 
 ## To-Do
 

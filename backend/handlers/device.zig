@@ -68,8 +68,9 @@ const UnbindReq = struct { equipmentNo: []const u8 };
 const UserCheckReq = struct { email: ?[]const u8 = null };
 
 /// The tablet stores `userId` and `uniqueMachineId` at sign-in and drops its
-/// file-sync records when either differs next time (DESIGN.md §4): the
-/// library id is what tells it that it now talks to another library.
+/// file-sync records when either differs next time
+/// (docs/content/contributor/device-protocol.md): the library id is what
+/// tells it that it now talks to another library.
 const CheckExistsVO = struct {
     success: bool = true,
     userId: u64,
@@ -295,7 +296,6 @@ pub fn summaryGroup(ctx: *Context, req: *Request, params: Params) anyerror!void 
 
 const digest_unsupported = "DIGEST_SYNC_UNSUPPORTED";
 const digest_unsupported_msg = "Digest sync is not supported by this server yet";
-
 
 test {
     _ = device_files;

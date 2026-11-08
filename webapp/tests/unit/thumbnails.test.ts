@@ -23,7 +23,7 @@ describe("strategyFor", () => {
   });
 });
 
-describe("the two dispatch points agree (DESIGN.md §11.5, rows 4 and 5)", () => {
+describe("the two dispatch points agree (docs/content/contributor/file-type.md, rows 4 and 5)", () => {
   // Catches `strategyFor` returning a strategy for a type `FACADE_THUMB_TYPES` omits
   // (it happened for `.txt` and `.pdf`). The vocabulary is derived, not restated.
   const VOCABULARY = [

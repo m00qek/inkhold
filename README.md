@@ -363,23 +363,15 @@ so when it terminates TLS itself.
 
 ## For developers
 
-[`DESIGN.md`](DESIGN.md) holds the invariants, the reverse-engineered device
-protocol and the reasoning behind the architecture; the file formats are
-specified in `parsers/note/note-format.md` and `parsers/spd/spd-format.md`. The
-layout:
-
-```
-backend/    the Zig server — one binary, device sync + browser API + static host
-webapp/     the browser app (TypeScript, zero runtime deps); wasm/ = page decoders
-parsers/    the .note and .spd format parsers (own build + tests + specs)
-```
-
-Build & test:
+The contributor manual, in [`docs/content/contributor/`](docs/content/contributor/),
+holds how to build, test and change Inkhold, and the reasoning behind it: the
+invariants, the reverse-engineered device protocol, the architecture's
+decisions. `make docs` previews it as a site. The file formats are specified in
+`parsers/note/note-format.md` and `parsers/spd/spd-format.md`.
 
 ```sh
+make serve                        # build everything and start a server
 make test-all                     # backend + frontend (unit + e2e) + parser suites
-zig build test                    # backend + note unit tests
-zig build -Doptimize=ReleaseSafe  # the release server binary
 ```
 
 ## License

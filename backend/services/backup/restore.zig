@@ -8,7 +8,7 @@
 //! restore leaves no database and can simply be run again.
 //!
 //! Preparing the database:
-//!   - Every device is signed out (DESIGN.md §2.6): the restored server is
+//!   - Every device is signed out (docs/content/contributor/storage.md (Backups)): the restored server is
 //!     older than the tablets, and a tablet that resumed syncing against it
 //!     might delete what it holds that the server lacks.
 //!   - Half-finished uploads are dropped; their chunks were never backed up.

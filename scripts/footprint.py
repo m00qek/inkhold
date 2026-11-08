@@ -29,7 +29,7 @@ HELD_SOCKETS = 64
 HELD_THREADS_MAX = 12          # main + 4 workers + poller + deferred worker, plus slack
 TOTAL_ANON_MAX_KB = 16_000     # idle + 64 sockets, under the ~50 MB budget with room for work
 
-# ---- backup ceilings (DESIGN.md §2.6) ------------------------------------------
+# ---- backup ceilings (docs/content/contributor/storage.md (Backups)) ------------------------------------------
 # `inkhold backup create` runs beside the server. Its memory must not depend on
 # the library's size, and the server must not notice it.
 BACKUP_ANON_MAX_KB = 4_096     # the 4 MB target: SQLite cache 256 KB/connection, ~420 KB scratch

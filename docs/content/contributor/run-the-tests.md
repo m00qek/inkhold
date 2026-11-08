@@ -27,7 +27,8 @@ make web-test-setup
 make test-all
 ```
 
-That is the four suites below, in order.
+That is `make test`, `make parser-test` and `make web-test` (the browser app's
+style lint, unit and end-to-end suites), in that order.
 
 ## One suite at a time
 
@@ -41,6 +42,14 @@ That is the four suites below, in order.
 
 In `webapp/`, `npm run typecheck` and `npm run lint:styles` check the types and
 that every size in the stylesheets is a design token.
+
+## The gate
+
+The gate is `make fmt`, `make test` and `make parser-test`, and a commit lands
+only when `make test`'s summary line reads `N/N tests passed`. The sample
+notebooks the tests embed (`sample.note`, `sample-2.note`, `layers_edited.note`)
+are named modules supplied by `build.zig` from `parsers/note/tests/fixtures/`,
+so `@embedFile("sample.note")` is the same spelling from any directory.
 
 ## Read the result, not the tail
 

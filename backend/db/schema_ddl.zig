@@ -336,7 +336,7 @@ pub const ddl_v16 =
 ;
 
 /// v17: what `inkhold backup` last did, one row per backup directory, read by
-/// the admin console's backup notice (DESIGN.md §2.6). Written by the backup
+/// the admin console's backup notice (docs/content/contributor/storage.md (Backups)). Written by the backup
 /// process beside the server; `restore` empties it, or a restored server would
 /// report the snapshot day's backups as its own.
 pub const ddl_v17 =
@@ -355,8 +355,8 @@ pub const ddl_v17 =
 
 /// v18: the library's identity, a random id made once per library. Tablets
 /// get it as `uniqueMachineId` from `check/exists/server` at sign-in and drop
-/// their file-sync records when it differs from the one they stored (DESIGN.md
-/// §4). `restore` gives the restored library a new one, so a tablet that held
+/// their file-sync records when it differs from the one they stored
+/// (docs/content/contributor/device-protocol.md). `restore` gives the restored library a new one, so a tablet that held
 /// newer files starts fresh instead of deleting what the server lacks.
 pub const ddl_v18 =
     \\CREATE TABLE library (

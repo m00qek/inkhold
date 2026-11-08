@@ -2,7 +2,7 @@
 //! v18. Tablets compare it at every private-cloud sign-in (`uniqueMachineId`
 //! from `check/exists/server`) and drop their file-sync records when it
 //! changed, so a tablet moved to another library, or back to a restored one,
-//! syncs from scratch instead of deleting what the server lacks (DESIGN.md §4).
+//! syncs from scratch instead of deleting what the server lacks (docs/content/contributor/device-protocol.md).
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");

@@ -23,7 +23,8 @@ Choose **To-Do** in the library's left rail. **Inbox**, **Planned**, **All** and
   **Move up**, **Move down** and **Delete**. Or drag it by its handle.
 - **A task written on a notebook page** shows the handwriting it was written
   in: choose it to open that page.
-- **Download** saves a list as a calendar file (`.ics`) or as plain text.
+- **Download** saves the list: **Tasks**, a calendar file (`.ics`) other apps
+  import, or **Plain text**.
 
 Until the tablet has synced a change you made, the page says it is waiting for
 the tablet.

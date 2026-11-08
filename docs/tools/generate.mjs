@@ -4,6 +4,7 @@
 //   manual/configuration.md   each setting with its real default (backend/config.zig) and its
 //                             comment (config.example.zon); fails when the two disagree on the set
 //   manual/command-line.md    from backend/cli.zig's help text
+//   contributor/http-api.md   from backend/routes.zig's route table
 //
 // Each page keeps its own front matter; the body below it is replaced.
 //   node tools/generate.mjs           write them
@@ -140,10 +141,59 @@ docker exec inkhold /inkhold --config=/etc/inkhold/config.zon users list
 `;
 }
 
+function httpApi() {
+  const src = readFileSync(join(repo, "backend/routes.zig"), "utf8");
+  const table = src.slice(src.indexOf("pub const routes = [_]router.Route{"));
+  const groups = [];
+  let group = { title: "General", rows: [] };
+  for (const line of table.split("\n")) {
+    const head = line.match(/^\s*\/\/ --- (.+?) ---\s*$/);
+    if (head) {
+      if (group.rows.length) groups.push(group);
+      group = { title: head[1].replace(/\s*\(DESIGN\.md[^)]*\)/, "").replace(/\s*\([^)]*\)$/, ""), rows: [] };
+      continue;
+    }
+    // Each field on its own: their order varies from route to route.
+    const method = line.match(/\.method = \.(\w+)/);
+    if (!method) continue;
+    const path = line.match(/\.path = "([^"]+)"/);
+    const scope = line.match(/\.scopes = &\.\{([^}]*)\}/);
+    const handler = line.match(/\.handler = ([\w.]+)/);
+    if (!path || !scope || !handler) throw new Error(`routes.zig: can't read the route: ${line.trim()}`);
+    const r = [null, method[1], path[1], scope[1], handler[1]];
+    const scopes = r[3].split(",").map((x) => x.trim().replace(/^\./, "")).filter(Boolean);
+    const flags = [];
+    if (/\.require_admin = true/.test(line)) flags.push("elevated admin");
+    if (/\.read_only = true/.test(line)) flags.push("read-only");
+    if (/\.manual_db_lock = true/.test(line)) flags.push("streams");
+    if (/\.held = true/.test(line)) flags.push("held stream");
+    const rl = line.match(/\.rate_limit = \.\{ \.max = (\d+), \.window_s = (\d+), \.by = \.(\w+) \}/);
+    if (rl) flags.push(`${rl[1]} per ${rl[2]} s by ${rl[3]}`);
+    group.rows.push(`| ${r[1]} | \`${r[2]}\` | ${scopes.join(", ")} | \`${r[4]}\` | ${flags.join("; ")} |`);
+  }
+  if (group.rows.length) groups.push(group);
+  const count = groups.reduce((n, g) => n + g.rows.length, 0);
+  const declared = (table.match(/\.method = \./g) ?? []).length;
+  if (count !== declared) throw new Error(`routes.zig: read ${count} of ${declared} routes`);
+  return `# HTTP API
+
+Every route Inkhold serves, ${count} of them, in the order of the route table.
+**Who** is the caller's scope: \`public\` needs no session, \`device\` is a
+tablet, \`controlplane\` the browser app, \`pending\` a first sign-in that
+must still change its password. A caller outside a route's scopes gets 403.
+**Read-only** routes run on a pooled reader, **streams** take the database lock
+only around their own reads and writes ([Threads and locks](@/contributor/threads-and-locks.md)).
+The device routes' behaviour is in [Device protocol](@/contributor/device-protocol.md).
+
+${NOTE("backend/routes.zig")}
+${groups.map((g) => `## ${g.title}\n\n| Method | Path | Who | Handler | Notes |\n|---|---|---|---|---|\n${g.rows.join("\n")}\n`).join("\n")}`;
+}
+
 let stale = 0;
 for (const [page, body] of [
   ["content/manual/configuration.md", configuration()],
   ["content/manual/command-line.md", commandLine()],
+  ["content/contributor/http-api.md", httpApi()],
 ]) {
   const path = join(docs, page);
   const next = withBody(path, body);

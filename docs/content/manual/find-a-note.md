@@ -16,8 +16,8 @@ of PDFs and text files, and your to-dos.
    **Search** in the bar at the bottom.
 2. Results appear as you type, best first. Each says how many pages matched
    and quotes the line it found.
-3. Open a result: it opens on the first page that matched, with the matches
-   marked. **Find in this note** steps through the rest.
+3. Open a result: it opens on the page the quoted line comes from, with the
+   matches marked. **Find in this note** steps through the rest.
 
 ## What it finds
 

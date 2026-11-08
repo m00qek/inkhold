@@ -37,6 +37,9 @@ mkdir inkhold && tar -xzf inkhold-*.tar.gz -C inkhold
 
 ## 3. Install it
 
+These are the same commands as [Install the binary](@/manual/install-binary.md),
+which is the page to keep when they change.
+
 ```sh
 sudo install -m 755 inkhold/inkhold /usr/local/bin/inkhold
 sudo mkdir -p /usr/local/share/inkhold /etc/inkhold

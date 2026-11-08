@@ -3,7 +3,7 @@
 //! owns the connection.
 //!
 //! What the Nomad does with it (decompiled, firmware Chauvet.E103.2606141001;
-//! DESIGN.md §4): while the channel is up, the launcher uploads each local
+//! docs/content/contributor/device-protocol.md): while the channel is up, the launcher uploads each local
 //! change as it happens and runs a full sync on connect. The server pushes
 //! `ServerMessage` events (`{"code":"200","data":[...]}`); the tablet answers
 //! each with a `ClientMessage` "Received", acked. A `ratta_ping` event gets a
