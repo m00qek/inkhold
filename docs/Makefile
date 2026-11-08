@@ -35,9 +35,10 @@ ZOLA_DIR := .tools/zola-$(ZOLA_VERSION)
 ZOLA     := $(ZOLA_DIR)/zola
 ZOLA_URL := https://github.com/getzola/zola/releases/download/v$(ZOLA_VERSION)/zola-v$(ZOLA_VERSION)-$(ZOLA_TARGET).tar.gz
 
-# The app's design tokens and fonts, copied in, never forked.
+# The app's design tokens, fonts and icon, copied in, never forked.
 APP_TOKENS := ../webapp/src/styles/00-tokens.css
 APP_FONTS  := $(wildcard ../webapp/public/fonts/*.woff2)
+APP_ICONS  := icon.svg apple-touch-icon.png
 
 TEST_PORT := 1112
 
@@ -68,15 +69,18 @@ generate:
 	node tools/generate.mjs
 
 clean:
-	rm -rf public .test-site static/diagrams static/fonts static/tokens.css
+	rm -rf public .test-site static/diagrams static/fonts static/tokens.css $(addprefix static/,$(APP_ICONS))
 
-assets: static/tokens.css $(patsubst ../webapp/public/fonts/%,static/fonts/%,$(APP_FONTS))
+assets: static/tokens.css $(patsubst ../webapp/public/fonts/%,static/fonts/%,$(APP_FONTS)) $(addprefix static/,$(APP_ICONS))
 
 static/tokens.css: $(APP_TOKENS)
 	cp $< $@
 
 static/fonts/%.woff2: ../webapp/public/fonts/%.woff2
 	@mkdir -p $(@D)
+	cp $< $@
+
+static/icon.svg static/apple-touch-icon.png: static/%: ../webapp/public/%
 	cp $< $@
 
 diagrams: node_modules/.package-lock.json
