@@ -5,9 +5,9 @@ name: Docs
 on:
   push:
     branches: [ "main", "pre-release" ]
-    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", ".github/workflows/docs.yaml" ]
+    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/cli.zig", ".github/workflows/docs.yaml" ]
   pull_request:
-    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", ".github/workflows/docs.yaml" ]
+    paths: [ "docs/**", "**/*.md", "webapp/src/styles/00-tokens.css", "webapp/public/fonts/**", "config.example.zon", "backend/cli.zig", ".github/workflows/docs.yaml" ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -43,6 +43,10 @@ jobs:
       - name: Install Chromium
         working-directory: docs
         run: npm ci --no-audit --no-fund && npx playwright-core install --with-deps --only-shell chromium
+
+      # The generated reference pages match their sources (config.example.zon, cli.zig).
+      - name: Generated pages are current
+        run: node docs/tools/generate.mjs --check
 
       - name: Check the site
         run: make -C docs check

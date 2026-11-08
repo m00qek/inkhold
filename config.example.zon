@@ -1,69 +1,78 @@
-// Inkhold server config. Copy to config.zon and edit.
-// All fields are optional; omitted ones use the defaults shown here.
+// Inkhold's settings. Copy to config.zon and edit. Every setting is optional:
+// one left out takes the value shown here. The comment above each one is what
+// the docs' "config.zon settings" page shows, so keep them for the person who
+// runs the server.
 .{
+    // The address to listen on. The default accepts this computer only: use
+    // "0.0.0.0" for every network it is on, or one of its addresses.
     .host = "127.0.0.1",
+
+    // The port for everything: the tablet's sync, the browser app and HTTPS.
     .port = 8089,
 
-    // SQLite database file (created if absent). ":memory:" for an ephemeral db.
+    // The database file, created on the first start.
     .db_path = "inkhold.db",
 
-    // 32-byte credential-encryption key, held OUTSIDE the db (ideally outside the
-    // backup path too) so a stolen inkhold.db yields no recoverable credentials.
-    // Generated + persisted 0600 on first run if absent. BACK THIS UP: losing it
-    // makes every stored credential unrecoverable → forced resets. See docs/design/auth.md.
+    // The key that encrypts stored credentials, created on the first start.
+    // Kept apart from the database, so a stolen database reveals nothing. Back
+    // it up somewhere else: without it, everyone has to reset their password.
     .cred_key_path = "cred.key",
 
-    // Directory for the content-addressed blob store and render cache.
+    // Where your notebooks and everything derived from them are stored.
     .data_dir = "data",
 
-    // Path to the built web SPA (dist/) to serve as static files. Empty disables
-    // static serving (404 on any non-API route). When set, this same process
-    // serves the browser UI alongside the device sync API — one port for everything.
+    // The browser app's files. Empty serves no browser app, only the tablet's
+    // sync.
     .web_dir = "webapp/dist",
 
-    // Email/login of the auto-created first-run administrator.
+    // The email of the first account, created on the first start with a
+    // temporary password. It must be an email address, and it applies on the
+    // first start only.
     .admin_email = "admin@home.lan",
 
-    // Open sockets at once: parked keep-alives, requests in flight and held
-    // streams. A parked socket costs ~34 KB and no thread (a browser parks ~6
-    // per tab), so this is a file-descriptor budget more than a memory one.
+    // How many connections may be open at once. An idle one costs about 34 KB
+    // and no thread, and a browser keeps about 6 per tab.
     .max_connections = 192,
 
-    // Threads serving requests. Everything past `db_lock` is serialised anyway,
-    // so a few are plenty; memory follows this number, not the socket count.
+    // Threads answering requests. Memory grows with this number; a few are
+    // plenty for a household.
     .workers = 4,
 
-    // Threads for held streams (the live-update channel), beyond the workers.
+    // Threads for the live updates that browsers and tablets listen to, beyond
+    // the workers.
     .max_held = 24,
 
-    // A keep-alive socket idle this long is closed; the browser reopens one on
-    // the next click. Generous, because under TLS a reopen is a handshake.
+    // Seconds an idle connection stays open. Generous, because over HTTPS
+    // reopening one costs a handshake.
     .idle_timeout_s = 300,
 
-    // Behind ONE reverse proxy that terminates TLS, its address. Requests from
-    // that peer are rate-limited by the client in `X-Real-IP` (else the last
-    // `X-Forwarded-For` hop) instead of by the proxy, which would otherwise
-    // give every client a single shared bucket. Empty trusts no such header.
+    // The address of a reverse proxy that handles HTTPS in front of Inkhold.
+    // Requests from it are rate-limited by each visitor's address (from
+    // X-Real-IP, or the last X-Forwarded-For) instead of all as one. Empty
+    // trusts no such header.
     .trusted_proxy = "",
 
-    // Admins see a notice in the library when the newest successful
-    // `inkhold backup create` (any directory) is older than this.
+    // Admins see a notice in the library when the newest successful backup is
+    // older than this many hours.
     .backup_warn_after_hours = 48,
 
-    // Sync the tablet's To-Do lists and tasks. Experimental, so off: while off,
-    // the tablet's To-Do app shows a sync error and nothing is touched. Before
-    // turning it on, copy the tablet first and, when a tablet asks how to treat
-    // its digest and to-do data at sign-in, choose "Retain locally".
+    // Sync the tablet's To-Do lists and tasks. New, so off: while off, the
+    // tablet's To-Do app shows a sync error and nothing is touched. Copy the
+    // tablet first, and when it asks how to treat its digest and to-do data,
+    // choose "Retain locally".
     .todo_sync = false,
 
     .tls = .{
-        // Terminate TLS in-process. When false, plaintext HTTP is served.
+        // Serve HTTPS (TLS 1.3) directly, with no reverse proxy. When false,
+        // plain HTTP.
         .enabled = false,
+        // The certificate, as a PEM file.
         .cert_path = "certs/cert.pem",
+        // Its private key, as a PEM file.
         .key_path = "certs/key.pem",
-        // Allowed TLS 1.3 cipher suites, preferred first. Empty = library default.
-        // Names match tls.zig's CipherSuite enum, e.g.:
-        //   "AES_256_GCM_SHA384", "AES_128_GCM_SHA256", "CHACHA20_POLY1305_SHA256"
+        // The cipher suites allowed, preferred first. Leave it empty: Inkhold
+        // then picks what is cheap on its own processor. Names such as
+        // "AES_256_GCM_SHA384", "AES_128_GCM_SHA256", "CHACHA20_POLY1305_SHA256".
         .cipher_suites = .{},
     },
 }

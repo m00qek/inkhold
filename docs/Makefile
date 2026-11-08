@@ -5,6 +5,7 @@
 #   check   links and anchors, offline
 #   test    the built site against the quality bar: every page, four widths,
 #           light and dark (tools/check-site.mjs; the docs CI runs check and test)
+#   generate  rewrite the generated reference pages (config, command line)
 #   clean   drop everything generated
 #
 # Zola is downloaded once, pinned and checksummed, into .tools/: the same
@@ -40,24 +41,27 @@ APP_FONTS  := $(wildcard ../webapp/public/fonts/*.woff2)
 
 TEST_PORT := 1112
 
-.PHONY: serve build check test clean assets diagrams
+.PHONY: serve build check test clean assets diagrams generate
 
-serve: $(ZOLA) assets diagrams
+serve: $(ZOLA) assets diagrams generate
 	@trap 'kill 0' INT TERM EXIT; \
 	node tools/diagrams.mjs watch content static/diagrams & \
 	$(ZOLA) serve --interface 127.0.0.1 --port 1111
 
-build: $(ZOLA) assets diagrams
+build: $(ZOLA) assets diagrams generate
 	$(ZOLA) build
 	node tools/diagrams.mjs inline public static/diagrams
 
-check: $(ZOLA) assets diagrams
+check: $(ZOLA) assets diagrams generate
 	$(ZOLA) check --skip-external-links
 
-test: $(ZOLA) assets diagrams
+test: $(ZOLA) assets diagrams generate
 	$(ZOLA) build --base-url http://127.0.0.1:$(TEST_PORT) --output-dir .test-site --force
 	node tools/diagrams.mjs inline .test-site static/diagrams
 	node tools/check-site.mjs .test-site $(TEST_PORT)
+
+generate:
+	node tools/generate.mjs
 
 clean:
 	rm -rf public .test-site static/diagrams static/fonts static/tokens.css
