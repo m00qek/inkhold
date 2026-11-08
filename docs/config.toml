@@ -27,3 +27,5 @@ repo = "https://github.com/m00qek/inkhold"
 branch = "main"
 # The two manuals, in the order the navigation shows them.
 manuals = ["manual", "contributor"]
+# The current release's docs, which the banner on /next/ points back to.
+release_docs = "https://m00qek.github.io/inkhold/"

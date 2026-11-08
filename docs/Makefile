@@ -48,9 +48,13 @@ serve: $(ZOLA) assets diagrams generate
 	node tools/diagrams.mjs watch content static/diagrams & \
 	$(ZOLA) serve --interface 127.0.0.1 --port 1111
 
+# OUT= and BASE_URL= build elsewhere, for another address: docs.yaml builds
+# main's docs into /next/ of the site (with DOCS_CHANNEL=next for its banner).
+OUT ?= public
+BASE_URL ?=
 build: $(ZOLA) assets diagrams generate
-	$(ZOLA) build
-	node tools/diagrams.mjs inline public static/diagrams
+	$(ZOLA) build $(if $(BASE_URL),--base-url $(BASE_URL)) --output-dir $(OUT) --force
+	node tools/diagrams.mjs inline $(OUT) static/diagrams
 
 check: $(ZOLA) assets diagrams generate
 	$(ZOLA) check --skip-external-links

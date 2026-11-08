@@ -22,7 +22,7 @@ flowchart TD
   pub -->|yes| next["ghcr :1.0.0-beta.2 and :next, a GitHub pre-release, the tag v1.0.0-beta.2"]
   pub -->|no| none["Nothing published, no tag: fix it on main"]
   next --> soak["Soak: the hub runs :next"]
-  soak --> promote["make promote: :latest, :beta, the download links"]
+  soak --> promote["make promote: :latest, :beta, the download links, the docs"]
 ```
 
 During the beta, every version is `1.0.0-beta.N`, one more than the last.
@@ -53,9 +53,9 @@ During the beta, every version is `1.0.0-beta.N`, one more than the last.
    make promote VERSION=1.0.0-beta.N
    ```
 
-   `:latest` and `:beta` then point at the same image, and the release
-   becomes the latest one, which the docs' download links follow. Nothing is
-   rebuilt.
+   `:latest` and `:beta` then point at the same image, the release becomes
+   the latest one, which the docs' download links follow, and the docs site's
+   root is rebuilt from its tag. Nothing else is rebuilt.
 
 If a job fails, nothing is published and nothing is tagged. Fix it on `main`:
 the version is still unreleased, so the next run tries again. After a

@@ -2,7 +2,8 @@ name: Promote
 
 # After a release has been soaked on `:next`: make it the one people get.
 # No rebuild: `:latest` and `:beta` point at the same image digest, and the
-# release becomes GitHub's latest, which the docs' download links follow.
+# release becomes GitHub's latest, which the docs' download links follow, and
+# the docs site's root is rebuilt from it.
 # `make promote VERSION=1.0.0-beta.N` starts it
 # (docs/content/contributor/release.md).
 on:
@@ -64,3 +65,12 @@ jobs:
 
       - name: Make it the latest release
         run: gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest
+
+  # The site's root now shows this release.
+  docs:
+    needs: [promote]
+    uses: ./.github/workflows/docs.yaml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write

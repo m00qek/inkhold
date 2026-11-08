@@ -1,5 +1,7 @@
 {#- The 404 page has no path of its own. -#}
 {%- set here = current_path or "" -%}
+{#- "next": main's docs under /next/, ahead of the release (docs.yaml). -#}
+{%- set channel = get_env(name="DOCS_CHANNEL", default="") -%}
 <!doctype html>
 <html lang="{{ lang }}">
 <head>
@@ -14,9 +16,15 @@
   </script>
   <link rel="stylesheet" href="{{ get_url(path='tokens.css') }}">
   <link rel="stylesheet" href="{{ get_url(path='site.css') }}">
+  {%- if channel == "next" %}
+  <meta name="robots" content="noindex">
+  {%- endif %}
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
+  {%- if channel == "next" %}
+  <aside class="channel" aria-label="Which release these pages describe"><p>These pages describe the next release, not out yet. <a href="{{ config.extra.release_docs }}">The docs for the current release</a></p></aside>
+  {%- endif %}
   <header class="masthead">
     {#- The app's own mark and wordmark (webapp/src/ui/chrome.ts). #}
     <a class="brand" href="{{ get_url(path='@/_index.md') }}">

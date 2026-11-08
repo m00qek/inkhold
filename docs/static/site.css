@@ -70,6 +70,23 @@ a {
   inset-block-start: var(--sp-2);
 }
 
+/* ---- /next/ only: these pages run ahead of the release ---- */
+.channel {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-4);
+  border-block-end: 1px solid var(--line);
+  background: color-mix(in srgb, var(--accent) 12%, var(--sheet));
+  color: var(--ink);
+  text-align: center;
+}
+.channel p {
+  margin: 0;
+}
+.channel a {
+  color: inherit;
+  font-weight: 600;
+}
+
 /* ---- the bar across the top: the brand, then the two manuals ---- */
 .masthead {
   display: flex;

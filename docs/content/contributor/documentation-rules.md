@@ -151,9 +151,10 @@ meets all of these. `make -C docs test` checks them
 
 ## Releases
 
-The site is published from `main`, but people install the latest release.
-Anything on `main` that no release has yet is marked **Unreleased** until the
-next one ships.
+The site's root shows the latest release, the one people install, built from
+its tag. `main`'s docs are published under `/next/`, with a banner saying they
+run ahead of the release. So a page describes `main` as it is, with no
+"Unreleased" marks.
 
 ## Generated, not written
 
@@ -167,7 +168,8 @@ reference (from `--help`).
 - A docs-only change runs the docs CI (links, diagrams, the site's check and
   build), never the code CI. Docs are `docs/**` and every `*.md`; a change
   to the app's tokens or fonts runs both.
-- On `main`, a docs run that passes publishes the site to
-  <https://m00qek.github.io/inkhold/>. To republish without a change:
-  Actions → Docs → Run workflow.
+- On `main`, a docs run that passes publishes the site: the latest release at
+  <https://m00qek.github.io/inkhold/>, `main` at
+  <https://m00qek.github.io/inkhold/next/>. Promoting a release republishes
+  it. To republish without a change: Actions → Docs → Run workflow.
 - Pages meet the quality bar above.
