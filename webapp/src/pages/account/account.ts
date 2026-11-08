@@ -163,7 +163,8 @@ export function createAccountPage(host: AccountHost): AccountPage {
   const thisBrowserRow = row("This browser");
 
   // A disclosure: `aria-expanded` plus `.is-open`.
-  const passwordToggle = button("Change", () => togglePasswordForm(passwordForm.node.hidden), {
+  // `hidden` may also be "until-found"; anything but `false` is hidden, so open it.
+  const passwordToggle = button("Change", () => togglePasswordForm(passwordForm.node.hidden !== false), {
     ariaLabel: "Change your password",
   });
   // A lone button's fill can't read as pressed, so a chevron carries the state.
