@@ -12,6 +12,7 @@ const device_files = @import("device/files.zig");
 const device_upload = @import("device/upload.zig");
 const device_socket = @import("device/socket.zig");
 const device_todo = @import("device/todo.zig");
+const device_digest = @import("device/digest.zig");
 
 // ---- the file API and OSS download (`device/files.zig`) ----
 pub const listFolder = device_files.listFolder;
@@ -273,33 +274,27 @@ pub fn syncEnd(ctx: *Context, req: *Request, params: Params) anyerror!void {
     try json.respond(ctx.gpa, req, .ok, SyncEndVO{ .equipmentNo = eno }, null);
 }
 
-/// The Digest app's listings (`file/query/summary/*`, decompiled
-/// `KnowledgeApiService`): REFUSED until Inkhold stores digests. They used to
-/// present the files table as Digest data, folders as collections; a full
-/// sync then imported every folder into the tablet's Digest app as a
-/// collection (seen on hardware). `success: false` at 200 makes the app's
-/// `getServiceIdMapFromServer` throw before it compares or imports anything.
-pub fn summaryHash(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    _ = params;
-    return fail(ctx, req, .ok, digest_unsupported, digest_unsupported_msg);
-}
-
-pub fn summaryById(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    _ = params;
-    return fail(ctx, req, .ok, digest_unsupported, digest_unsupported_msg);
-}
-
-pub fn summaryGroup(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    _ = params;
-    return fail(ctx, req, .ok, digest_unsupported, digest_unsupported_msg);
-}
-
-const digest_unsupported = "DIGEST_SYNC_UNSUPPORTED";
-const digest_unsupported_msg = "Digest sync is not supported by this server yet";
+// The Digest app's sync: `device/digest.zig`, refused unless `digest_sync`.
+pub const digestAdd = device_digest.add;
+pub const digestUpdate = device_digest.update;
+pub const digestDelete = device_digest.delete;
+pub const digestHash = device_digest.hash;
+pub const digestById = device_digest.byIds;
+pub const digestQuery = device_digest.query;
+pub const digestDownload = device_digest.download;
+pub const digestGroupAdd = device_digest.groupAdd;
+pub const digestGroupUpdate = device_digest.groupUpdate;
+pub const digestGroupDelete = device_digest.groupDelete;
+pub const digestGroupQuery = device_digest.groupQuery;
+pub const digestTagAdd = device_digest.tagAdd;
+pub const digestTagUpdate = device_digest.tagUpdate;
+pub const digestTagDelete = device_digest.tagDelete;
+pub const digestTagQuery = device_digest.tagQuery;
 
 test {
     _ = device_files;
     _ = device_upload;
     _ = device_socket;
     _ = device_todo;
+    _ = device_digest;
 }

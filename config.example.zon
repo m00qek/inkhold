@@ -62,6 +62,12 @@
     // choose "Retain locally".
     .todo_sync = false,
 
+    // Sync the tablet's digests: excerpts, their categories and annotations.
+    // New, so off: while off, the tablet's Digest app shows a sync error and
+    // nothing is touched. Copy the tablet first, and when it asks how to
+    // treat its digest and to-do data, choose "Retain locally".
+    .digest_sync = false,
+
     .history = .{
         // How many earlier versions of each file are kept. 0 keeps none.
         .keep = 5,

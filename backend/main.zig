@@ -101,6 +101,7 @@ test {
     _ = @import("test/http/history_raw_test.zig");
     _ = @import("test/http/device_read_test.zig");
     _ = @import("test/http/device_todo_test.zig");
+    _ = @import("test/http/device_digest_test.zig");
     _ = @import("test/http/todo_web_test.zig");
     _ = @import("test/http/device_list_test.zig");
     _ = @import("test/http/device_upload_test.zig");

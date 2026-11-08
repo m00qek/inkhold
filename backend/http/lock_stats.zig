@@ -10,7 +10,7 @@ const std = @import("std");
 const router = @import("router.zig");
 
 /// One slot per route index plus a shared overflow slot.
-pub const max_routes = 112;
+pub const max_routes = 128;
 
 /// Below this, timings are bucketed exactly (the log-linear scheme needs a
 /// leading bit).
@@ -366,6 +366,7 @@ test "report: names only the routes that ran, and carries their lock policy" {
 }
 
 test "the table stays inside the RSS budget it is allowed to spend" {
-    // Must stay a rounding error against the ~50 MB RSS target.
-    try testing.expect(@sizeOf(LockStats) < 128 * 1024);
+    // Must stay a rounding error against the ~50 MB RSS target: about 1 KB a
+    // route (its 256 buckets). 160 KB since the Digest routes (2026-11).
+    try testing.expect(@sizeOf(LockStats) < 160 * 1024);
 }

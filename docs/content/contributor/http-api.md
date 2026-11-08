@@ -9,7 +9,7 @@ extra:
 
 # HTTP API
 
-Every route Inkhold serves, 109 of them, in the order of the route table.
+Every route Inkhold serves, 121 of them, in the order of the route table.
 **Who** is the caller's scope: `public` needs no session, `device` is a
 tablet, `controlplane` the browser app, `pending` a first sign-in that
 must still change its password. A caller outside a route's scopes gets 403.
@@ -50,9 +50,21 @@ The device routes' behaviour is in [Device protocol](@/contributor/device-protoc
 | POST | `/api/file/2/users/get_space_usage` | device | `device.getSpaceUsage` | read-only |
 | POST | `/api/file/2/files/synchronous/start` | device | `device.syncStart` |  |
 | POST | `/api/file/2/files/synchronous/end` | device | `device.syncEnd` |  |
-| POST | `/api/file/query/summary/hash` | device | `device.summaryHash` | read-only |
-| POST | `/api/file/query/summary/id` | device | `device.summaryById` | read-only |
-| POST | `/api/file/query/summary/group` | device | `device.summaryGroup` | read-only |
+| POST | `/api/file/query/summary/hash` | device | `device.digestHash` | read-only |
+| POST | `/api/file/query/summary/id` | device | `device.digestById` | read-only |
+| POST | `/api/file/query/summary` | device | `device.digestQuery` | read-only |
+| POST | `/api/file/add/summary` | device | `device.digestAdd` |  |
+| PUT | `/api/file/update/summary` | device | `device.digestUpdate` |  |
+| DELETE | `/api/file/delete/summary` | device | `device.digestDelete` |  |
+| POST | `/api/file/download/summary` | device | `device.digestDownload` | read-only |
+| POST | `/api/file/query/summary/group` | device | `device.digestGroupQuery` | read-only |
+| POST | `/api/file/add/summary/group` | device | `device.digestGroupAdd` |  |
+| PUT | `/api/file/update/summary/group` | device | `device.digestGroupUpdate` |  |
+| DELETE | `/api/file/delete/summary/group` | device | `device.digestGroupDelete` |  |
+| GET | `/api/file/query/summary/tag` | device | `device.digestTagQuery` | read-only |
+| POST | `/api/file/add/summary/tag` | device | `device.digestTagAdd` |  |
+| PUT | `/api/file/update/summary/tag` | device | `device.digestTagUpdate` |  |
+| DELETE | `/api/file/delete/summary/tag` | device | `device.digestTagDelete` |  |
 | POST | `/api/file/2/files/list_folder` | device | `device.listFolder` | streams |
 | POST | `/api/file/3/files/query/by/path_v3` | device | `device.queryByPathV3` | read-only |
 | POST | `/api/file/3/files/query_v3` | device | `device.queryV3` | read-only |

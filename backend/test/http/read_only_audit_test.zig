@@ -96,6 +96,9 @@ fn readOnlyProbes(a: std.mem.Allocator, note_id: u64) ![]const ReadOnlyProbe {
         .{ .route = "/api/file/2/users/get_space_usage", .path = "/api/file/2/users/get_space_usage", .method = "POST", .body = "{}", .face = .device },
         .{ .route = "/api/file/query/summary/hash", .path = "/api/file/query/summary/hash", .method = "POST", .body = "{\"page\":0,\"size\":50}", .face = .device },
         .{ .route = "/api/file/query/summary/group", .path = "/api/file/query/summary/group", .method = "POST", .body = "{\"page\":0,\"size\":50}", .face = .device },
+        .{ .route = "/api/file/query/summary", .path = "/api/file/query/summary", .method = "POST", .body = "{\"page\":1,\"size\":1000}", .face = .device },
+        .{ .route = "/api/file/query/summary/tag", .path = "/api/file/query/summary/tag", .method = "GET", .face = .device },
+        .{ .route = "/api/file/download/summary", .path = "/api/file/download/summary", .method = "POST", .body = "{\"id\":1}", .face = .device },
         .{ .route = "/api/file/3/files/query/by/path_v3", .path = "/api/file/3/files/query/by/path_v3", .method = "POST", .body = "{\"path\":\"/audit.note\"}", .face = .device },
         // The manifest never calls `indexRowEnsuring`, so it heals nothing.
         .{ .route = "/api/controlplane/search-index/manifest", .path = "/api/controlplane/search-index/manifest", .method = "GET", .face = .web },

@@ -48,9 +48,24 @@ pub const routes = [_]router.Route{
     .{ .method = .POST, .path = "/api/file/2/users/get_space_usage", .scopes = &.{.device}, .handler = device.getSpaceUsage, .read_only = true },
     .{ .method = .POST, .path = "/api/file/2/files/synchronous/start", .scopes = &.{.device}, .handler = device.syncStart },
     .{ .method = .POST, .path = "/api/file/2/files/synchronous/end", .scopes = &.{.device}, .handler = device.syncEnd },
-    .{ .method = .POST, .path = "/api/file/query/summary/hash", .scopes = &.{.device}, .handler = device.summaryHash, .read_only = true },
-    .{ .method = .POST, .path = "/api/file/query/summary/id", .scopes = &.{.device}, .handler = device.summaryById, .read_only = true },
-    .{ .method = .POST, .path = "/api/file/query/summary/group", .scopes = &.{.device}, .handler = device.summaryGroup, .read_only = true },
+    // The Digest app's sync (`handlers/device/digest.zig`): refused unless
+    // `digest_sync`. The manifest and the categories are always answered
+    // whole; deletes never fail.
+    .{ .method = .POST, .path = "/api/file/query/summary/hash", .scopes = &.{.device}, .handler = device.digestHash, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/query/summary/id", .scopes = &.{.device}, .handler = device.digestById, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/query/summary", .scopes = &.{.device}, .handler = device.digestQuery, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/add/summary", .scopes = &.{.device}, .handler = device.digestAdd },
+    .{ .method = .PUT, .path = "/api/file/update/summary", .scopes = &.{.device}, .handler = device.digestUpdate },
+    .{ .method = .DELETE, .path = "/api/file/delete/summary", .scopes = &.{.device}, .handler = device.digestDelete },
+    .{ .method = .POST, .path = "/api/file/download/summary", .scopes = &.{.device}, .handler = device.digestDownload, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/query/summary/group", .scopes = &.{.device}, .handler = device.digestGroupQuery, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/add/summary/group", .scopes = &.{.device}, .handler = device.digestGroupAdd },
+    .{ .method = .PUT, .path = "/api/file/update/summary/group", .scopes = &.{.device}, .handler = device.digestGroupUpdate },
+    .{ .method = .DELETE, .path = "/api/file/delete/summary/group", .scopes = &.{.device}, .handler = device.digestGroupDelete },
+    .{ .method = .GET, .path = "/api/file/query/summary/tag", .scopes = &.{.device}, .handler = device.digestTagQuery, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/add/summary/tag", .scopes = &.{.device}, .handler = device.digestTagAdd },
+    .{ .method = .PUT, .path = "/api/file/update/summary/tag", .scopes = &.{.device}, .handler = device.digestTagUpdate },
+    .{ .method = .DELETE, .path = "/api/file/delete/summary/tag", .scopes = &.{.device}, .handler = device.digestTagDelete },
     // /oss/get is `.public`: the device sends no x-access-token on the download GET;
     // it is authorized by the `?t=` token download_v3 mints, so a tokenless GET is
     // 403, never 401 (a 401 logs the device out). list_folder locks the DB only
