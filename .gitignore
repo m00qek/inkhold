@@ -9,8 +9,6 @@ __pycache__/
 # --- TLS material & secrets (NEVER commit) ---
 certs/
 cred.key
-test-server.key
-test-server.key.pub
 *.pem
 
 # --- runtime state: blob store, render cache, databases + ALL their backups ---
@@ -33,7 +31,6 @@ config.zon
 serve-run.zon
 
 # --- capture / reverse-engineering scratch (not source) ---
-mitm/
 
 # --- frontend (webapp): dev deps + build/test output ---
 node_modules/
@@ -47,7 +44,8 @@ test-results/
 webapp/public/*.wasm
 
 # --- release artefacts ---
-release/
+release-tmp/
+inkhold-*.tar.gz
 
 # --- server instance state: the whole server/ tree is local (db, blobs, keys,
 # mitm logs, and the instance's own serve.zon). Nothing under it is committed;
