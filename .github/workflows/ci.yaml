@@ -182,6 +182,11 @@ jobs:
       - name: Setup Web Tests
         run: make web-test-setup
 
+      # Before the suite, not by the dev server: Playwright gives the server
+      # 60 s to answer, and a cold wasm build (MuPDF) takes minutes.
+      - name: Build the wasm modules
+        run: npm --prefix webapp run build:wasm
+
       - name: Browser tests, slice ${{ matrix.shard }} of 4
         working-directory: webapp
         run: npx playwright test --shard=${{ matrix.shard }}/4
