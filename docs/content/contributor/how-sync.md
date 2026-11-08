@@ -86,10 +86,11 @@ answers.
 The To-Do and Digest apps sync by a protocol of their own over the same
 socket, and both are destructive when answered wrongly: told "no lists", the
 To-Do app deletes every list it had synced; shown collections, the Digest app
-imports them. So neither is ever answered with a guess. Digest is refused
-outright, which stops its sync before it compares anything. To-Do is served
-only when the household turns it on, and then the server stores lists and
-tasks exactly as the app sends them and lets the app decide every merge. The
+imports them, and deletes every synced digest the server does not list. So
+neither is ever answered with a guess. Each is served only when the household
+turns it on, and refused before then, which stops the app's sync before it
+compares anything. Once on, the server stores lists, tasks and digests exactly
+as the apps send them and lets the apps decide every merge. The
 library id does not protect to-dos; a prompt at sign-in does, and it is why
 every page about restoring says to choose **Retain locally**.
 

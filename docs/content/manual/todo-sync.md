@@ -30,4 +30,4 @@ error, on purpose, and nothing is touched.
 **To-Do** appears in the library's left rail, with the tablet's lists and
 tasks in it.
 
-Digest sync is not implemented: see [What doesn't work yet](@/manual/limits.md).
+Digests sync the same way, behind their own switch: [Turn on Digest sync](@/manual/digest-sync.md).
