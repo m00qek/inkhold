@@ -348,6 +348,8 @@ fn uploadNote(f: *Fixture, obuf: []u8, reqbuf: []u8, tok: *const [32]u8, bytes: 
         defer p.deinit();
         try std.testing.expect(p.value.success);
         try std.testing.expect(std.mem.endsWith(u8, p.value.fullUploadUrl, p.value.innerName));
+        // The Digest app rewrites only `/api/oss/` URLs onto its configured address.
+        try std.testing.expect(std.mem.indexOf(u8, p.value.fullUploadUrl, "/api/oss/put/") != null);
         @memcpy(&inner, p.value.innerName[0..16]);
     }
     const boundary = "----DigestNoteBoundary";
@@ -356,7 +358,7 @@ fn uploadNote(f: *Fixture, obuf: []u8, reqbuf: []u8, tok: *const [32]u8, bytes: 
     var ctbuf: [96]u8 = undefined;
     const ct = try std.fmt.bufPrint(&ctbuf, "multipart/form-data; boundary={s}", .{boundary});
     var pbuf: [48]u8 = undefined;
-    const path = try std.fmt.bufPrint(&pbuf, "/oss/put/{s}", .{&inner});
+    const path = try std.fmt.bufPrint(&pbuf, "/api/oss/put/{s}", .{&inner});
     const req = try buildRequest(reqbuf, "POST", path, &.{
         .{ .name = "content-type", .value = ct },
         .{ .name = "x-access-token", .value = tok },
@@ -389,7 +391,7 @@ fn fetchNote(f: *Fixture, obuf: []u8, reqbuf: []u8, tok: *const [32]u8, id: u64)
         var p = try std.json.parseFromSlice(struct { success: bool, url: []const u8 = "" }, gpa, resp.body, .{ .ignore_unknown_fields = true });
         defer p.deinit();
         if (!p.value.success) return resp;
-        const at = std.mem.indexOf(u8, p.value.url, "/oss/summary/").?;
+        const at = std.mem.indexOf(u8, p.value.url, "/api/oss/summary/").?;
         const rest = p.value.url[at..];
         @memcpy(path_buf[0..rest.len], rest);
         break :blk path_buf[0..rest.len];

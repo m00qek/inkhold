@@ -55,7 +55,7 @@ test "handle() drives requests through the db_lock path without deadlocking" {
     }
 }
 
-test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the raw-file routes, the thumbnail route, the SSE route, the device socket route, the device list_folder route and the web upload route" {
+test "manual_db_lock is set on EXACTLY the /oss and /api/oss byte routes, the page route, the raw-file routes, the thumbnail route, the SSE route, the device socket route, the device list_folder route and the web upload route" {
     // `manual_db_lock` opts a route out of the whole-handler DB lock; a handler
     // that then touches the DB without `ctx.db_lock` is a silent data race.
     // Adding a route here means auditing its DB touches: each must lock only
@@ -63,6 +63,7 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
     const expected = [_][]const u8{
         "/oss/get/:id",
         "/oss/put/:innerName",
+        "/api/oss/put/:innerName",
         "/note/:id/page/:n",
         "/note/:id/template/:hash",
         "/file/:id",
@@ -83,7 +84,7 @@ test "manual_db_lock is set on EXACTLY the two /oss routes, the page route, the 
         "/api/controlplane/search-index/stream",
         "/api/controlplane/text/:md5",
         // A digest's handwritten note: streamed bytes, like `/oss/get/:id`.
-        "/oss/summary/:id",
+        "/api/oss/summary/:id",
     };
     var found: usize = 0;
     for (app.routes) |r| {

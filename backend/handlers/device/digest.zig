@@ -367,7 +367,7 @@ pub fn download(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const tokens = ctx.download_tokens orelse return serverError(ctx, req);
     const tok = tokens.mint(ctx.io, id | token_kind_digest, user_id, nowMs(ctx)) catch return serverError(ctx, req);
     const scheme = if (ctx.config.tls.enabled) "https" else "http";
-    const url = try std.fmt.allocPrint(a, "{s}://{s}/oss/summary/{d}?t={s}", .{ scheme, host, id, &tok });
+    const url = try std.fmt.allocPrint(a, "{s}://{s}/api/oss/summary/{d}?t={s}", .{ scheme, host, id, &tok });
     try json.respond(ctx.gpa, req, .ok, struct { success: bool = true, url: []const u8 }{ .url = url }, null);
 }
 
@@ -376,7 +376,7 @@ pub fn download(ctx: *Context, req: *Request, params: Params) anyerror!void {
 /// a digest's note (`download_tokens` matches the id exactly).
 const token_kind_digest: u64 = 1 << 62;
 
-/// GET /oss/summary/:id?t=<token>: a digest's handwritten note. `.public`,
+/// GET /api/oss/summary/:id?t=<token>: a digest's handwritten note. `.public`,
 /// authorized by the token `download` minted; any failure is 403 (a 401 logs
 /// the device out).
 pub fn serveNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
@@ -420,8 +420,9 @@ pub fn serveNote(ctx: *Context, req: *Request, params: Params) anyerror!void {
 }
 
 /// POST /api/file/upload/apply/summary: a place to upload a handwritten note.
-/// The app then POSTs it (multipart) to the returned URL, the same
-/// `/oss/put` files use, and names the upload in its add or update.
+/// The app then POSTs it (multipart) to the returned URL, `/oss/put` under
+/// `/api/`, and names the upload in its add or update. The prefix matters: the
+/// app's `replaceHost` moves only `/api/oss/` URLs onto its configured address.
 pub fn uploadApply(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
     if (!ctx.config.digest_sync) return refuse(ctx, req);
@@ -442,7 +443,7 @@ pub fn uploadApply(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();
     const scheme = if (ctx.config.tls.enabled) "https" else "http";
-    const url = try std.fmt.allocPrint(arena.allocator(), "{s}://{s}/oss/put/{s}", .{ scheme, host, &inner });
+    const url = try std.fmt.allocPrint(arena.allocator(), "{s}://{s}/api/oss/put/{s}", .{ scheme, host, &inner });
     try json.respond(ctx.gpa, req, .ok, struct {
         success: bool = true,
         innerName: []const u8,

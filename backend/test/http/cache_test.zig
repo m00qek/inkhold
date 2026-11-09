@@ -121,7 +121,7 @@ const non_immutable_routes = [_][]const u8{
     "/api/file/delete/summary/tag",
     "/api/file/download/summary",
     "/api/file/upload/apply/summary",
-    "/oss/summary/:id",
+    "/api/oss/summary/:id",
     "/api/file/schedule/group",
     "/api/file/schedule/group/:id",
     "/api/file/schedule/group/all",
@@ -144,6 +144,7 @@ const non_immutable_routes = [_][]const u8{
     "/note/:id/page/:n/text",
     "/oss/get/:id",
     "/oss/put/:innerName",
+    "/api/oss/put/:innerName",
 };
 
 test "cache policy: every route is classified, and only the byte routes may be immutable" {

@@ -87,12 +87,17 @@ pub const routes = [_]router.Route{
     // The /oss byte routes stream multi-MB bodies and lock the DB only around their
     // own DB calls. Set `manual_db_lock` only on a handler audited to do that.
     .{ .method = .GET, .path = "/oss/get/:id", .scopes = &.{.public}, .handler = device.ossGet, .manual_db_lock = true },
-    // A digest's handwritten note, by the token `download/summary` mints.
-    .{ .method = .GET, .path = "/oss/summary/:id", .scopes = &.{.public}, .handler = device.digestServeNote, .manual_db_lock = true },
+    // A digest's handwritten note, by the token `download/summary` mints. Under
+    // /api/oss/ because the Digest app rewrites only such URLs onto the address
+    // it was given; any other keeps our scheme, and behind TLS that is a 301.
+    .{ .method = .GET, .path = "/api/oss/summary/:id", .scopes = &.{.public}, .handler = device.digestServeNote, .manual_db_lock = true },
     // apply reserves an upload and returns an /oss/put URL; finish commits it. The
     // device sends x-access-token to all three.
     .{ .method = .POST, .path = "/api/file/3/files/upload/apply", .scopes = &.{.device}, .handler = device.uploadApply },
     .{ .method = .POST, .path = "/oss/put/:innerName", .scopes = &.{.device}, .handler = device.ossPut, .manual_db_lock = true },
+    // The same, for the Digest app's notes (`upload/apply/summary`): /api/oss/ for
+    // the reason above.
+    .{ .method = .POST, .path = "/api/oss/put/:innerName", .scopes = &.{.device}, .handler = device.ossPut, .manual_db_lock = true },
     .{ .method = .POST, .path = "/api/file/2/files/upload/finish", .scopes = &.{.device}, .handler = device.uploadFinish },
     // The tablet's auto-sync channel (Socket.IO 2 over a websocket). `.public`: the
     // device token arrives in the query, and the handler checks it. Held for as

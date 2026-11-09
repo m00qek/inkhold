@@ -203,12 +203,16 @@ trusting it.
   start and end character), `source_size` and `unique_identifier`;
   `sourcePath` is the file's path in the tablet's own tree.
 - A handwritten note is a `.mark` file. The app asks `upload/apply/summary`
-  for a place, POSTs it multipart to `/oss/put` (a session whose path is
+  for a place, POSTs it multipart to `/api/oss/put` (a session whose path is
   `digest:`, which `upload/finish` refuses), and names the upload in its add
   or update; the server claims the blob then. A digest holds a blob reference
   exactly when `handwrite_inner_name` is set, and releases it when the note is
   replaced or the digest purged. `download/summary` gives a token URL for
-  `/oss/summary/:id`; its token is minted for `id | 2^62`, so it never fetches
-  a file.
+  `/api/oss/summary/:id`; its token is minted for `id | 2^62`, so it never
+  fetches a file.
+- Both byte URLs sit under `/api/oss/` because the app moves only such URLs
+  onto the address it was given (`replaceHost`). Any other keeps the scheme
+  the server wrote, `http` behind a TLS proxy, and the proxy's 301 fails the
+  sync.
 - Digest sync is behind `config.digest_sync`, off by default. Not yet tested
   on a tablet.
