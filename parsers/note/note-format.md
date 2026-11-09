@@ -178,6 +178,12 @@ Known X-series signatures and their firmware, newest last. All **I** except
 | `SN_FILE_VER_20200008` | C.237 | | `SN_FILE_VER_20230015` | Chauvet 3.14.27 |
 | `SN_FILE_VER_20210009` | C.291 | | `SN_FILE_VER_20260016` | Chauvet 3.29.42 |
 
+The Note app's own library (`libratta_sn_process.so`, firmware
+Chauvet.E103.2610191001, 2026-11-09) also names `SN_FILE_VER_20200002`,
+`20200003`, `20200004` and `20220012`, with upgrade steps between them, and
+none newer than `20260016`: that firmware still writes `20260016` (**C**, 22
+notes on a Nomad).
+
 Only `SN_FILE_ASA_20190529` is known for the original family (**I**).
 
 An unknown but pattern-matching signature is safely treated as "latest": no
@@ -330,6 +336,23 @@ For a layered page, `supernote-tool` takes the page's effective `PROTOCOL` from
     **The file signature is the reliable discriminator**: `version >= 20230015`
     selects the X2 colour table. Treat `LAYERPROTOCOL` as informational until a
     file proves otherwise.
+
+### 4.5 Keys present but not read
+
+Real files carry these keys, and Inkhold reads none of them (**C** that they
+occur: every key in 22 notes from a Nomad, firmware Chauvet.E103.2610191001;
+**I** for any meaning beyond the name).
+
+| Where | Keys |
+|---|---|
+| Header | `APP_VERSION`, `DEVICE_DPI`, `SOFT_DPI`, `FILE_PARSE_TYPE`, `IS_OLD_APPLY_EQUIPMENT`, `ANTIALIASING_CONVERT`, `FINALOPERATION_LAYER`, `MODULE_LABEL`, `STYLEUSAGETYPE`, `PDFSTYLELIST`, `RATTA_ETMD` |
+| Page | `RECOGNTYPE`, `RECOGNLANGUAGE`, `RECOGNFILESTATUS`, `PAGETEXTBOX`, `DISABLE`, `IDTABLE` |
+
+**`PAGETEXTBOX` is the one that could hold searchable text.** The Note app's
+library also names `TEXTBOX` and `TEXTBOX_TRAILS`, so a page's typed text
+boxes probably hang from it. Every page seen so far has `PAGETEXTBOX:0`, so
+the block's layout is unknown and Inkhold does not search text typed into a
+text box. Supporting it needs a note with one.
 
 ---
 

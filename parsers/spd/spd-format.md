@@ -14,6 +14,12 @@ disagreed with the files, the files win and it is called out.
 
 All ten files are **WAL-mode** SQLite databases (see below).
 
+Atelier 1.1.82 is still current on firmware Chauvet.E103.2610191001
+(2026-11-09). Its library refuses a file whose `fmt_ver` it does not know
+(`layer_stack_db_fmt_ver_mistmach`); Inkhold records `fmt_ver` but does not
+check it, so a file with a new `fmt_ver` would be read as version 2. Check
+the format again before trusting a new one.
+
 ## Container
 
 A `.spd` is a SQLite 3 database, opened **read-only, in memory** (it is

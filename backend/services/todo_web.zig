@@ -3,7 +3,11 @@
 //! its next sync takes each change. The tablet merges by time: a newer
 //! `last_modified` wins a row, a newer `sort_time` wins its order. So every
 //! edit here stamps the server's clock, never the browser's: a browser with a
-//! wrong clock can neither win nor lose an edit it did not make.
+//! wrong clock can neither win nor lose an edit it did not make. And never
+//! less than the row's own time plus one: a tablet whose clock runs ahead
+//! stamps its edits in our future, and an edit here stamped behind that (or
+//! level with it: the tablet takes only a strictly newer row) would be
+//! silently overwritten at its next sync (decompiled `TaskSync.syncTask`).
 //!
 //! Every edit also sets the row's `web_changed_at` and the account's
 //! (`todo_sync_state`), which is how "Waiting for the tablet" is told: a change
@@ -121,7 +125,7 @@ pub fn renameList(db: sqlite.Db, user_id: u64, id: []const u8, title: []const u8
     try db.exec("BEGIN IMMEDIATE;");
     errdefer db.exec("ROLLBACK;") catch {};
     try db.runCached(
-        \\UPDATE todo_lists SET title = ?3, last_modified = ?4, web_changed_at = ?4
+        \\UPDATE todo_lists SET title = ?3, last_modified = MAX(?4, last_modified + 1), web_changed_at = ?4
         \\WHERE user_id = ?1 AND list_id = ?2;
     , &.{ .{ .int = @intCast(user_id) }, .{ .text = id }, .{ .text = title }, .{ .int = now } });
     const found = db.changes() > 0;
@@ -189,7 +193,7 @@ pub fn updateTask(db: sqlite.Db, user_id: u64, id: []const u8, p: Patch, now: i6
         r.finalize();
     }
     const base: []const sqlite.Bind = &.{ .{ .int = uid }, .{ .text = id }, .{ .int = now } };
-    try db.runCached("UPDATE todo_tasks SET last_modified = ?3, web_changed_at = ?3 WHERE user_id = ?1 AND task_id = ?2;", base);
+    try db.runCached("UPDATE todo_tasks SET last_modified = MAX(?3, last_modified + 1), web_changed_at = ?3 WHERE user_id = ?1 AND task_id = ?2;", base);
     if (p.title) |t| try db.runCached("UPDATE todo_tasks SET title = ?3 WHERE user_id = ?1 AND task_id = ?2;", &.{ .{ .int = uid }, .{ .text = id }, .{ .text = t } });
     if (p.due) |d| try db.runCached("UPDATE todo_tasks SET due_time = ?3 WHERE user_id = ?1 AND task_id = ?2;", &.{ .{ .int = uid }, .{ .text = id }, .{ .int = d } });
     if (p.done) |d| {
@@ -201,7 +205,7 @@ pub fn updateTask(db: sqlite.Db, user_id: u64, id: []const u8, p: Patch, now: i6
     }
     // Moved: on top of the new list, like a new task there.
     if (p.move_to) |w| try db.runCached(
-        "UPDATE todo_tasks SET list_id = ?3, sort = 0, sort_time = ?4 WHERE user_id = ?1 AND task_id = ?2;",
+        "UPDATE todo_tasks SET list_id = ?3, sort = 0, sort_time = MAX(?4, sort_time + 1) WHERE user_id = ?1 AND task_id = ?2;",
         &.{ .{ .int = uid }, .{ .text = id }, .{ .text_opt = switch (w) {
             .inbox => null,
             .list => |l| l,
@@ -225,15 +229,24 @@ pub fn reorder(db: sqlite.Db, user_id: u64, list_id: ?[]const u8, ids: []const [
     try db.exec("BEGIN IMMEDIATE;");
     errdefer db.exec("ROLLBACK;") catch {};
     const uid: i64 = @intCast(user_id);
+    // One sort time for the list, past every one it already has (see the top).
+    const stamp: i64 = blk: {
+        var r = (try db.rowCached(
+            "SELECT MAX(sort_time) FROM todo_tasks WHERE user_id = ?1 AND list_id IS ?2 AND status <> 'completed';",
+            &.{ .{ .int = uid }, .{ .text_opt = list_id } },
+        )) orelse break :blk now;
+        defer r.finalize();
+        break :blk if (r.isNull(0)) now else @max(now, r.int(0) + 1);
+    };
     // Everything after the given ids, in their current order.
     try db.runCached(
-        \\UPDATE todo_tasks SET sort = sort + ?3, sort_time = ?4, web_changed_at = ?4
+        \\UPDATE todo_tasks SET sort = sort + ?3, sort_time = ?4, web_changed_at = ?5
         \\WHERE user_id = ?1 AND list_id IS ?2 AND status <> 'completed';
-    , &.{ .{ .int = uid }, .{ .text_opt = list_id }, .{ .int = @intCast(ids.len) }, .{ .int = now } });
+    , &.{ .{ .int = uid }, .{ .text_opt = list_id }, .{ .int = @intCast(ids.len) }, .{ .int = stamp }, .{ .int = now } });
     for (ids, 0..) |id, i| try db.runCached(
-        \\UPDATE todo_tasks SET sort = ?4, sort_time = ?5, web_changed_at = ?5
+        \\UPDATE todo_tasks SET sort = ?4, sort_time = ?5, web_changed_at = ?6
         \\WHERE user_id = ?1 AND task_id = ?2 AND list_id IS ?3 AND status <> 'completed';
-    , &.{ .{ .int = uid }, .{ .text = id }, .{ .text_opt = list_id }, .{ .int = @intCast(i) }, .{ .int = now } });
+    , &.{ .{ .int = uid }, .{ .text = id }, .{ .text_opt = list_id }, .{ .int = @intCast(i) }, .{ .int = stamp }, .{ .int = now } });
     try touch(db, user_id, now);
     try db.exec("COMMIT;");
 }
@@ -381,6 +394,43 @@ test "reorder: positions become sort, one sort time for the list, others after, 
     try testing.expectEqual(@as(i64, 100), find(s, "b").?.t.sort_time);
     try testing.expectEqual(@as(i64, 13), find(s, "d").?.t.sort_time); // completed: left alone (its creation time)
     try testing.expect(find(s, "c").?.waiting);
+}
+
+test "a tablet clock ahead of ours: every edit still stamps past the row, so the tablet takes it" {
+    var db = try testDb();
+    defer db.close();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The tablet's rows carry its clock: 5000, while ours reads 100.
+    try todo.putList(db, 1, .{ .id = "l", .title = "L", .create_time = 5000, .last_modified = 5000 });
+    try todo.putTask(db, 1, .{ .id = "t1", .list_id = "l", .title = "x", .status = "needsAction", .last_modified = 5000, .sort_time = 5000 });
+    try todo.putTask(db, 1, .{ .id = "t2", .list_id = "l", .title = "y", .status = "needsAction", .last_modified = 5000, .sort_time = 7000 });
+
+    try updateTask(db, 1, "t1", .{ .title = "x2" }, 100);
+    var s = try snapshot(db, a, 1);
+    try testing.expectEqual(@as(i64, 5001), find(s, "t1").?.t.last_modified);
+    // Still waiting: `web_changed_at` keeps our own clock.
+    try todo.markTabletListed(db, 1, 99);
+    try testing.expect(find(try snapshot(db, a, 1), "t1").?.waiting);
+
+    try testing.expect(try renameList(db, 1, "l", "L2", 100));
+    s = try snapshot(db, a, 1);
+    try testing.expectEqual(@as(i64, 5001), s.lists[0].l.last_modified);
+
+    // One sort time for the list, past its newest (7000).
+    try reorder(db, 1, "l", &.{ "t2", "t1" }, 100);
+    s = try snapshot(db, a, 1);
+    try testing.expectEqual(@as(i64, 7001), find(s, "t1").?.t.sort_time);
+    try testing.expectEqual(@as(i64, 7001), find(s, "t2").?.t.sort_time);
+
+    try updateTask(db, 1, "t1", .{ .move_to = .inbox }, 100);
+    try testing.expectEqual(@as(i64, 7002), find(try snapshot(db, a, 1), "t1").?.t.sort_time);
+
+    // With our clock ahead, ours wins as before.
+    try updateTask(db, 1, "t2", .{ .title = "y2" }, 9000);
+    try testing.expectEqual(@as(i64, 9000), find(try snapshot(db, a, 1), "t2").?.t.last_modified);
 }
 
 test "lists: renamed and deleted with their tasks; the snapshot keeps creation order" {
