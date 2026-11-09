@@ -14,6 +14,12 @@ here was learnt from a real tablet, a Nomad, by watching it and by reading the
 decompiled apps; where a fact is an assumption rather than an observation, it
 says so. The routes themselves are in the [HTTP API](@/contributor/http-api.md).
 
+Every rule by which the tablet deletes, overwrites or resets its own data was
+last checked against firmware Chauvet.E103.2610191001 (2026-11-09): the
+launcher's file sync 1.01.086, Settings 1.01.385 and To-Do 1.00.466. A
+firmware update can change any of it, so read the new apps again before
+trusting it.
+
 ## What the tablet can and cannot be told
 
 - **A failure is an HTTP 200 with a coded body**, for example
@@ -34,9 +40,20 @@ says so. The routes themselves are in the [HTTP API](@/contributor/http-api.md).
   name. Copy is how the tablet resolves a conflict: it makes
   `<name>_CONFLICT_<timestamp>.note` beside the original.
 - Without `create_folder_v2`, empty folders never sync.
-- A sync walks the tree with `list_folder`, folder by folder, and compares each
-  file's md5. Inkhold computes paths in SQL with a recursive query over folders
-  only; materialising the whole library was three to five times slower.
+- **A full sync is one call:** `list_folder` on `/` with `recursive: true`,
+  with no paging. The tablet compares each file's md5 against that one answer.
+  Inkhold computes paths in SQL with a recursive query over folders only;
+  materialising the whole library was three to five times slower.
+- **That answer must be the whole tree, every time.** A synced file missing
+  from it is deleted on the tablet, so there is no cap, no paging and no
+  partial answer: the tree is read in one snapshot under the database lock,
+  and any failure is a 500, which aborts the tablet's sync before it compares
+  anything. Never answer it with error code `E0304` or `E0318`: the launcher
+  treats those two as success, reads no entries, and would delete every synced
+  file.
+- Only entries under `/NOTE/Note`, `/NOTE/MyStyle`, `/DOCUMENT/Document`,
+  `/EXPORT`, `/SCREENSHOT` and `/INBOX` count, compared case-sensitively;
+  anything else in the answer is ignored.
 - `query/summary/*` is not file sync. It is the Digest app's protocol, found in
   the decompiled `KnowledgeApiService`.
 - **The tablet's sync records survive signing out.** It keeps one record per
@@ -121,13 +138,22 @@ says so. The routes themselves are in the [HTTP API](@/contributor/http-api.md).
   stored and the incoming `nextSyncToken` never narrows it. A row leaves only
   by an explicit delete, which always succeeds (one failed delete aborts the
   app's whole sync), or with its account. Deleting a list takes its tasks.
+- **How the app merges** (decompiled `TaskSync`): a row present on both sides
+  goes to whichever `lastModified` is strictly newer, and an equal one changes
+  nothing; a task's order and planner order merge the same way by `sortTime`
+  and `planerSortTime`. A row the server marks deleted is deleted on the
+  tablet, which then deletes it on the server too. Lists page by `pageToken`
+  and tasks by `nextPageToken`, 200 a page; any non-200 or `success: false`
+  aborts before the merge.
 - To-Do sync is behind `config.todo_sync`, off by default; while off, every
   call is refused.
 - The browser edits the same rows (`services/todo_web.zig`,
   `/api/controlplane/todo`, `webapp/src/pages/todo/`) the way the tablet's app
-  does: the server stamps the times, a new or moved task goes on top (sort 0,
-  the newest sort time), and a reorder is a set of positions plus one sort
-  time. "Waiting for the tablet" is schema v21: a browser edit marks the row and
+  does: the server stamps the times, never below the row's own time plus one,
+  so an edit still wins against a tablet whose clock runs ahead (an older or
+  equal stamp would be silently overwritten); a new or moved task goes on top
+  (sort 0, the newest sort time); and a reorder is a set of positions plus one
+  sort time. "Waiting for the tablet" is schema v21: a browser edit marks the row and
   the account, and the tablet's next task listing clears the mark.
 - A task lassoed from a notebook page shows its handwriting in the browser
   (`webapp/src/pages/todo/todoInk.ts`). The task's page is fetched and drawn
@@ -150,6 +176,8 @@ says so. The routes themselves are in the [HTTP API](@/contributor/http-api.md).
 - Tested on a Nomad, 2026-11-05: creating, completing, renaming, moving and
   deleting tasks and lists all synced. After a restore to a snapshot older than
   one synced task, Retain kept that task on the tablet and uploaded it again.
-  Not yet verified: whether a tablet that was unregistered first
-  (`hasUnregister`) skips the prompt and keeps its marks.
+  A tablet whose account was unregistered and registered again (a changed
+  `soldOutCount` at sign-in) skips the prompt, and Settings does the Retain
+  itself (`SwitchCloudHelper.clearSyncState`); Inkhold never sends a
+  `soldOutCount`, so that path does not arise.
 - Digest stays refused.
