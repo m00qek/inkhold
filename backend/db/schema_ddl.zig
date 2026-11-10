@@ -516,6 +516,17 @@ pub const ddl_v23 =
     \\CREATE INDEX digest_tags_user ON digest_tags(user_id, id);
 ;
 
+// v24: categories stored without an id get one. The Digest app's category
+// picker crashes on a category whose id is null, and on Nov 2026 hardware 12
+// such categories existed: imported from folders by a pre-Digest Inkhold, then
+// uploaded with no `uniqueIdentifier`. A fresh `md5_hash` makes the app see the
+// server's copy as changed, so its next sync copies the id onto the tablet
+// (`KnowledgeBaseSyncWorker.updateLocalKnowledgeBaseFromServer`).
+pub const ddl_v24 =
+    \\UPDATE digests SET uid = lower(hex(randomblob(16))), md5_hash = lower(hex(randomblob(16)))
+    \\WHERE is_group = 1 AND deleted = 0 AND (uid IS NULL OR uid = '');
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

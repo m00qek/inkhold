@@ -166,11 +166,11 @@ pub fn addGroup(db: sqlite.Db, user_id: u64, g: Digest, now_ms: i64) sqlite.Erro
     return @intCast(db.lastInsertRowId());
 }
 
-/// Replaces a live category's name, description and md5. False when there is
-/// no such live category.
+/// Replaces a live category's name, description and md5. A stored id is kept;
+/// an empty one takes `g.uid`. False when there is no such live category.
 pub fn putGroup(db: sqlite.Db, user_id: u64, id: u64, g: Digest, now_ms: i64) sqlite.Error!bool {
     try db.runCached(
-        \\UPDATE digests SET uid = COALESCE(?3, uid), name = ?4, description = ?5, md5_hash = ?6,
+        \\UPDATE digests SET uid = COALESCE(NULLIF(uid, ''), ?3), name = ?4, description = ?5, md5_hash = ?6,
         \\  last_modified_time = ?7, updated_at = ?8
         \\WHERE user_id = ?1 AND id = ?2 AND is_group = 1 AND deleted = 0;
     , &.{

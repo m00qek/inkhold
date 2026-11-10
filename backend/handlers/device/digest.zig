@@ -463,7 +463,9 @@ pub fn groupAdd(ctx: *Context, req: *Request, params: Params) anyerror!void {
     if (!ctx.config.digest_sync) return refuse(ctx, req);
     var parsed = json.readBody(GroupWire, ctx.gpa, req) catch return badBody(ctx, req);
     defer parsed.deinit();
-    const g = groupOf(parsed.value) orelse return badBody(ctx, req);
+    var g = groupOf(parsed.value) orelse return badBody(ctx, req);
+    var heal: Heal = undefined;
+    heal.apply(ctx, &g);
     const id = digest.addGroup(ctx.db, ctx.caller.?.user_id, g, nowMs(ctx)) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, IdVO{ .id = id }, null);
 }
@@ -475,7 +477,9 @@ pub fn groupUpdate(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var parsed = json.readBody(GroupWire, ctx.gpa, req) catch return badBody(ctx, req);
     defer parsed.deinit();
     const id = idOf(parsed.value.id) orelse return badBody(ctx, req);
-    const g = groupOf(parsed.value) orelse return badBody(ctx, req);
+    var g = groupOf(parsed.value) orelse return badBody(ctx, req);
+    var heal: Heal = undefined;
+    heal.apply(ctx, &g);
     const found = digest.putGroup(ctx.db, ctx.caller.?.user_id, id, g, nowMs(ctx)) catch return serverError(ctx, req);
     if (!found) return notFound(ctx, req);
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
@@ -611,6 +615,30 @@ fn digestOf(a: std.mem.Allocator, w: DigestWire) ?digest.Digest {
         .last_modified_time = w.lastModifiedTime orelse 0,
     };
 }
+
+/// A category the app sends with no id (or `""`, which is its built-in
+/// Uncategorized) gets one, and an `md5Hash` the tablet does not have: the
+/// app then sees the server's copy as changed and its next sync copies the id
+/// onto the tablet. Its category picker crashes on a null id (schema v24).
+const Heal = struct {
+    uid: [32]u8,
+    md5: [32]u8,
+
+    fn apply(self: *Heal, ctx: *Context, g: *digest.Digest) void {
+        if (g.uid) |u| if (u.len != 0) return;
+        var raw: [16]u8 = undefined;
+        ctx.io.random(&raw);
+        self.uid = std.fmt.bytesToHex(raw, .lower);
+        var h = std.crypto.hash.Md5.init(.{});
+        h.update(&self.uid);
+        h.update(g.md5_hash);
+        var digest_bytes: [std.crypto.hash.Md5.digest_length]u8 = undefined;
+        h.final(&digest_bytes);
+        self.md5 = std.fmt.bytesToHex(digest_bytes, .lower);
+        g.uid = &self.uid;
+        g.md5_hash = &self.md5;
+    }
+};
 
 fn groupOf(w: GroupWire) ?digest.Digest {
     inline for (.{ w.uniqueIdentifier, w.name, w.description, w.md5Hash }) |f|

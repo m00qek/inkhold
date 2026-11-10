@@ -210,6 +210,14 @@ trusting it.
   replaced or the digest purged. `download/summary` gives a token URL for
   `/api/oss/summary/:id`; its token is minted for `id | 2^62`, so it never
   fetches a file.
+- **A category always has an id.** The app's category picker reads every
+  category's `uniqueIdentifier` and crashes on a null one, and a tablet can
+  hold such categories (imported from folders by a pre-Digest Inkhold). So a
+  category added or updated without one, or with `""`, which is the app's own
+  Uncategorized, gets a random id and an `md5Hash` the tablet lacks. The app
+  then sees the server's copy as changed, and its next sync copies the id onto
+  the tablet (`updateLocalKnowledgeBaseFromServer`). Schema v24 did the same
+  once for categories already stored.
 - Both byte URLs sit under `/api/oss/` because the app moves only such URLs
   onto the address it was given (`replaceHost`). Any other keeps the scheme
   the server wrote, `http` behind a TLS proxy, and the proxy's 301 fails the

@@ -529,3 +529,56 @@ test "a note's upload can never be filed as a document, and tokens do not cross 
     const resp = try roundtrip(&f.ctx, try buildRequest(&reqbuf, "GET", file_path, &.{}, ""), &obuf);
     try std.testing.expectEqual(@as(u16, 403), resp.status);
 }
+
+test "a category sent without an id gets one, with a md5 the tablet lacks, so its next sync copies the id" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var obuf: [65536]u8 = undefined;
+    var reqbuf: [8192]u8 = undefined;
+    const alice = try signedIn(f, &obuf, &reqbuf, "alice", "SN1");
+
+    // The Nov 2026 shape: a category the tablet itself holds with a null id.
+    const id = try addId(f, &obuf, &reqbuf, &alice, "/api/file/add/summary/group",
+        \\{"uniqueIdentifier":null,"name":"Français","description":"","md5Hash":"tablet-md5","creationTime":1,"lastModifiedTime":1}
+    );
+    const Group = struct { uid: []const u8, md5: []const u8 };
+    const got: Group = blk: {
+        const resp = try call(f, &obuf, &reqbuf, &alice, "POST", "/api/file/query/summary/group", whole);
+        var p = try std.json.parseFromSlice(Summaries, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        try std.testing.expectEqual(@as(usize, 1), p.value.summaryDOList.len);
+        const g = p.value.summaryDOList[0];
+        try std.testing.expectEqual(@as(usize, 32), g.uniqueIdentifier.?.len);
+        try std.testing.expect(!std.mem.eql(u8, "tablet-md5", g.md5Hash));
+        break :blk .{ .uid = try gpa.dupe(u8, g.uniqueIdentifier.?), .md5 = try gpa.dupe(u8, g.md5Hash) };
+    };
+    defer gpa.free(got.uid);
+    defer gpa.free(got.md5);
+
+    // A rename still without an id keeps the server's id, and again a md5 the
+    // tablet does not have. An empty id is the app's Uncategorized: the same.
+    for ([_][]const u8{ "null", "\"\"" }) |sent| {
+        const body = try std.fmt.allocPrint(gpa, "{{\"id\":{d},\"uniqueIdentifier\":{s},\"name\":\"Francês\",\"md5Hash\":\"tablet-md5-2\",\"lastModifiedTime\":2}}", .{ id, sent });
+        defer gpa.free(body);
+        const r = try call(f, &obuf, &reqbuf, &alice, "PUT", "/api/file/update/summary/group", body);
+        try std.testing.expectEqual(@as(u16, 200), r.status);
+        const resp = try call(f, &obuf, &reqbuf, &alice, "POST", "/api/file/query/summary/group", whole);
+        var p = try std.json.parseFromSlice(Summaries, gpa, resp.body, .{ .ignore_unknown_fields = true });
+        defer p.deinit();
+        const g = p.value.summaryDOList[0];
+        try std.testing.expectEqualStrings(got.uid, g.uniqueIdentifier.?);
+        try std.testing.expectEqualStrings("Francês", g.name.?);
+        try std.testing.expect(!std.mem.eql(u8, "tablet-md5-2", g.md5Hash));
+    }
+
+    // With an id, a category is stored exactly as sent.
+    _ = try addId(f, &obuf, &reqbuf, &alice, "/api/file/add/summary/group",
+        \\{"uniqueIdentifier":"kb-work","name":"Work","md5Hash":"w1","creationTime":1,"lastModifiedTime":1}
+    );
+    const resp = try call(f, &obuf, &reqbuf, &alice, "POST", "/api/file/query/summary/group", whole);
+    var p = try std.json.parseFromSlice(Summaries, gpa, resp.body, .{ .ignore_unknown_fields = true });
+    defer p.deinit();
+    try std.testing.expectEqualStrings("kb-work", p.value.summaryDOList[1].uniqueIdentifier.?);
+    try std.testing.expectEqualStrings("w1", p.value.summaryDOList[1].md5Hash);
+}
