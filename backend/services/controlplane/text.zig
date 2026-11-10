@@ -13,9 +13,9 @@ const allowedLinkScheme = controlplane.allowedLinkScheme;
 const controlplane_index = @import("index.zig");
 const controlplane_meta = @import("meta.zig");
 
-/// `GET /note/{id}/page/{n}/text` — the stored transcript and its `text_hash`.
-/// Null when missing, not owned, or not recognized (`recogn_status != 1`), so
-/// the handler 404s it like a stale `?v=`.
+/// `GET /note/{id}/page/{n}/text` — the stored text and its `text_hash`: the
+/// transcript, plus any typed text boxes. Null when missing, not owned, or the
+/// page has no text, so the handler 404s it like a stale `?v=`.
 pub fn pageText(self: ControlPlaneService, arena: std.mem.Allocator, user_id: u64, id: u64, n: u64) !?PageText {
     return pageTextIn(self, arena, user_id, id, n, .live);
 }
@@ -43,7 +43,7 @@ pub fn pageTextForMd5(self: ControlPlaneService, arena: std.mem.Allocator, md5: 
 
     var r = (try self.files.db.row(
         "SELECT text_hash, text, recogn_offset, recogn_length FROM note_page_index " ++
-            "WHERE blob_md5 = ?1 AND page_index = ?2 AND recogn_status = 1 AND text_hash IS NOT NULL;",
+            "WHERE blob_md5 = ?1 AND page_index = ?2 AND text_hash IS NOT NULL;",
         &.{ .{ .text = md5 }, .{ .int = @intCast(n) } },
     )) orelse return null;
     defer r.finalize();
@@ -58,6 +58,7 @@ pub fn pageTextForMd5(self: ControlPlaneService, arena: std.mem.Allocator, md5: 
     if (!r.isNull(1)) out.vo.text = try arena.dupe(u8, r.text(1));
 
     // Word boxes: one KB-scale ranged read of the stored `RECOGNTEXT` range.
+    // Recognised words only; typed text carries none.
     if (!r.isNull(2) and !r.isNull(3)) {
         const offset = r.int(2);
         const length = r.int(3);

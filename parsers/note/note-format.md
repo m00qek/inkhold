@@ -346,13 +346,10 @@ occur: every key in 22 notes from a Nomad, firmware Chauvet.E103.2610191001;
 | Where | Keys |
 |---|---|
 | Header | `APP_VERSION`, `DEVICE_DPI`, `SOFT_DPI`, `FILE_PARSE_TYPE`, `IS_OLD_APPLY_EQUIPMENT`, `ANTIALIASING_CONVERT`, `FINALOPERATION_LAYER`, `MODULE_LABEL`, `STYLEUSAGETYPE`, `PDFSTYLELIST`, `RATTA_ETMD` |
-| Page | `RECOGNTYPE`, `RECOGNLANGUAGE`, `RECOGNFILESTATUS`, `PAGETEXTBOX`, `DISABLE`, `IDTABLE` |
+| Page | `RECOGNTYPE`, `RECOGNLANGUAGE`, `RECOGNFILESTATUS`, `IDTABLE` |
 
-**`PAGETEXTBOX` is the one that could hold searchable text.** The Note app's
-library also names `TEXTBOX` and `TEXTBOX_TRAILS`, so a page's typed text
-boxes probably hang from it. Every page seen so far has `PAGETEXTBOX:0`, so
-the block's layout is unknown and Inkhold does not search text typed into a
-text box. Supporting it needs a note with one.
+`PAGETEXTBOX` and `DISABLE`, once in this list, are read now: they go with
+text boxes ([§10.5](#105-text-boxes)).
 
 ---
 
@@ -786,7 +783,9 @@ The four parallel arrays, each `u32 N` followed by `N` elements:
 | 11 | Marker | **C** |
 | 15 | **Calligraphy Pen** | **C** |
 | 16 | **Ink Pen** | **C** |
-| 1 | `InkPen` in the inherited enum — **not observed**, and 16 is what this firmware writes for the Ink Pen | **I** |
+| 1 | `InkPen` in the inherited enum. Not observed in the `.mark` corpus; **every pen stroke** in three `.note` pages from firmware Chauvet.E103.2610191001 (2026-11) is pen 1 | **C** |
+| 0 | **A text box**, not a stroke — [§10.5](#105-text-boxes) | **C** |
+| 4 | A record that came with a sticker: 513 bytes, no field list. Layout unknown | **I** |
 
 15 and 16 are new here: they are absent from the inherited enum, they account for
 75 of the 189 strokes, and they are named because the capture's author wrote the
@@ -894,6 +893,51 @@ pen 10/11:  width  = constant × (thickness / 1000)
 
 The ±10% residual is why the contours are the better source: they are exact where
 this is fitted.
+
+### 10.5 Text boxes
+
+**C**, from three `.note` pages (Nomad, firmware Chauvet.E103.2610191001,
+2026-11): `tests/fixtures/textbox_recognition_on.note` (two boxes, recognition
+on), `textbox_recognition_off.note` (one box, a Standard note) and one capture
+kept local.
+
+**A text box is a record in `TOTALPATH`, not a stroke and not part of the
+transcript.** The tablet never puts typed text in `RECOGNTEXT`, with
+recognition on or off; the transcript of a page holding only typed text is
+`{"elements": []}`. The text is drawn into `MAINLAYER` like ink, so a renderer
+shows it; only a reader of `TOTALPATH` can search it.
+
+| Offset | Type | Meaning | |
+|---|---|---|---|
+| `+0` | u32 | `section_len`, as for a stroke | **C** |
+| `+4` | u32 | **pen = 0**: what marks a text box | **C** |
+| `+8`, `+12` | u32 | `0`, `100` | **?** |
+| `+483` | u32 | byte length of the field list, its final comma included | **C** |
+| `+487` | bytes | the **field list**: base64 values, each followed by `,` | **C** |
+| … | 26 B | `…none…` and zeros | **?** |
+
+The field list holds 19 values on every box seen. Decoded:
+
+| Field | Example | Meaning | |
+|---|---|---|---|
+| 3 | `20261109060851683675` | an id, `yyyyMMddHHmmss` + digits | **I** |
+| 4, 5 | `702,928,259,127` | the box in **panel pixels**, `x,y,w,h` (twice) | **C** |
+| 10 | `48.000000` | font size | **I** |
+| 11 | `/system/fonts/DroidSansFallbackFull.ttf` | font | **C** |
+| **12** | `Très bien\nça va` | **the text**, UTF-8, line breaks as `\n` | **C** |
+| 13 | `0,0,0,0.000000,…` | style, unknown | **?** |
+
+Two page keys go with it:
+
+- **`PAGETEXTBOX`** is a flag: `0` on every page without a box, `1` on a page
+  with one **or two**. Read the strokes only when it is not `0`.
+- **`DISABLE`** lists every live box, `x,y,w,h|` each (`702,928,259,127|702,928,260,64|`).
+  Inkhold keeps only a record whose rectangle `DISABLE` lists. Erased strokes
+  stay in this block ([§10.2](#102-erasure)); whether a deleted box does is
+  unknown, and that check keeps one out of search either way.
+
+Boxes overlap freely: a new box is always placed mid-page, and on the device it
+moves only with the pen.
 
 ---
 

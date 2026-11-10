@@ -358,3 +358,53 @@ test "a parsed Note owns its strings — the input buffer may be freed" {
     try std.testing.expectEqualStrings("style_white", doc.pages[0].style().?);
     try std.testing.expectEqual(@as(u32, 1920), doc.dimensions().width);
 }
+
+const textbox_on = @embedFile("fixtures/textbox_recognition_on.note");
+const textbox_off = @embedFile("fixtures/textbox_recognition_off.note");
+
+test "textbox_recognition_on.note: two typed boxes, accents and a line break; the transcript has none of it" {
+    const gpa = std.testing.allocator;
+    var doc = try note.parse(gpa, textbox_on);
+    defer doc.deinit();
+    const page = doc.pages[0];
+    try std.testing.expectEqualStrings("1", page.block.get("PAGETEXTBOX").?); // a flag: 1 with two boxes
+
+    var boxes = try note.textbox.forParsedPage(gpa, doc.source, page);
+    defer boxes.deinit();
+    try std.testing.expectEqual(@as(usize, 2), boxes.boxes.len);
+    try std.testing.expectEqualStrings("Très bien\nça va", boxes.boxes[0].text);
+    try std.testing.expectEqual(note.textbox.Rect{ .x = 702, .y = 928, .w = 259, .h = 127 }, boxes.boxes[0].rect);
+    try std.testing.expectEqualStrings("Box 2 - 42", boxes.boxes[1].text);
+
+    const plain = try boxes.plainText(gpa);
+    defer gpa.free(plain);
+    try std.testing.expectEqualStrings("Très bien\nça va\nBox 2 - 42", plain);
+
+    // Recognition is on and finished, and still holds nothing typed.
+    var rec = (try note.recognition.forPage(gpa, doc, 0)).?;
+    defer rec.deinit();
+    try std.testing.expectEqual(@as(usize, 0), rec.elements().len);
+}
+
+test "textbox_recognition_off.note: a Standard note stores its box the same way" {
+    const gpa = std.testing.allocator;
+    var doc = try note.parse(gpa, textbox_off);
+    defer doc.deinit();
+    try std.testing.expectEqualStrings("0", doc.header.get("FILE_RECOGN_TYPE").?);
+    const page = doc.pages[0];
+    try std.testing.expectEqual(@as(u32, 0), page.recognitionAddress());
+
+    var boxes = try note.textbox.forParsedPage(gpa, doc.source, page);
+    defer boxes.deinit();
+    try std.testing.expectEqual(@as(usize, 1), boxes.boxes.len);
+    try std.testing.expectEqualStrings("café noir", boxes.boxes[0].text);
+}
+
+test "a page without text boxes yields none, without reading its strokes" {
+    const gpa = std.testing.allocator;
+    var doc = try note.parse(gpa, sample);
+    defer doc.deinit();
+    var boxes = try note.textbox.forParsedPage(gpa, doc.source, doc.pages[0]);
+    defer boxes.deinit();
+    try std.testing.expectEqual(@as(usize, 0), boxes.boxes.len);
+}

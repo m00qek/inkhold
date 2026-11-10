@@ -17,7 +17,7 @@ const Allocator = std.mem.Allocator;
 /// Bump when anything the client caches under `(md5, index_version)` changes
 /// (it is the browser's cache key); stale rows re-parse lazily. A schema change
 /// that leaves `terms/`/`text/` byte-identical takes no bump. Never reuse a number.
-pub const index_version: i64 = 16;
+pub const index_version: i64 = 17; // 17: typed text boxes join a page's text
 
 /// Re-exported so the indexer and `page_payload.serialize` share one emit list.
 pub const LayerRef = sn.page_payload.LayerRef;
@@ -84,6 +84,8 @@ pub const NoteRow = struct {
     rle_variant: u8 = 0,
     recogn_type: ?[]const u8 = null,
     recogn_language: ?[]const u8 = null,
+    /// Pages with RECOGNSTATUS 1, plus pages searchable without it (typed text
+    /// boxes, schema comment notwithstanding): the listing's "has text" flag.
     recognized_page_count: u32 = 0,
     /// The cover image's own pixel dims. NULL = no cover; 0 = present but
     /// undecodable (still served). Mirrors `spd_index.thumb_w/thumb_h`.
@@ -115,7 +117,8 @@ pub const PageRow = struct {
     /// concatenated after an SNPG header are the page.
     layers: []const IndexedLayer,
     recogn_status: u8 = 0,
-    /// md5 of the raw `RECOGNTEXT` block; null unless `recogn_status == 1`.
+    /// md5 of the raw `RECOGNTEXT` block, folded with the typed text when the
+    /// page has text boxes; null when the page has neither.
     text_hash: ?[32]u8 = null,
     recogn_offset: ?u32 = null,
     recogn_length: ?u32 = null,
@@ -125,7 +128,8 @@ pub const PageRow = struct {
     links_offset: ?u32 = null,
     links_length: ?u32 = null,
     links_hash: ?[32]u8 = null,
-    /// `recognition.plainText()`; null when the page has no finished text.
+    /// `recognition.plainText()`, then the typed text boxes, one per line;
+    /// null when the page has neither.
     text: ?[]const u8 = null,
     /// `PAGESTYLEMD5` of a custom raster-image template background; the resolve
     /// key for `GET /note/{id}/template/{hash}`. NULL otherwise.
@@ -149,8 +153,9 @@ pub const Parsed = struct {
     }
 };
 
-/// The `.note` page source for `derive_search`. Pages with no finished
-/// transcript are skipped (common: devices sync before recognition finishes).
+/// The `.note` page source for `derive_search`. Pages with no text, neither a
+/// finished transcript nor a typed box, are skipped (common: devices sync
+/// before recognition finishes).
 pub const Pages = struct {
     p: *const Parsed,
     i: usize = 0,

@@ -12,9 +12,10 @@ pub const NoteCoverage = struct {
     file_id: u64,
     /// `FILE_RECOGN_TYPE` 1: the tablet recognizes this note's handwriting.
     recognition: bool,
-    /// Pages with writing: inked (or not scanned yet), or recognized with text.
+    /// Pages with writing: inked (or not scanned yet), or with text.
     /// The tablet also "recognizes" blank pages, to nothing; those don't count.
     written: u32,
+    /// Of those, searchable: recognized, or with typed text.
     recognized: u32,
     /// `RECOGNSTATUS` 2: the tablet had not finished when it synced.
     running: u32,
@@ -23,9 +24,11 @@ pub const NoteCoverage = struct {
 /// One query over the person's live `.note` files with writing on them. A
 /// page "with writing": `has_ink` not 0 (NULL, not scanned yet, counts: better
 /// to say a page may be unsearchable than to hide it), or recognized to text.
-const written = "(p.has_ink IS NOT 0 OR (p.recogn_status = 1 AND length(p.text) > 0))";
+const written = "(p.has_ink IS NOT 0 OR length(p.text) > 0)";
+/// Searchable: recognised, or with typed text (which needs no recognition).
+const searchable = "(p.recogn_status = 1 OR length(p.text) > 0)";
 const sql =
-    "SELECT f.id, n.recogn_type = '1', SUM(" ++ written ++ "), SUM(p.recogn_status = 1 AND " ++ written ++ ")," ++
+    "SELECT f.id, n.recogn_type = '1', SUM(" ++ written ++ "), SUM(" ++ searchable ++ " AND " ++ written ++ ")," ++
     " SUM(p.recogn_status = 2 AND " ++ written ++ ")" ++
     " FROM files f JOIN note_index n ON n.blob_md5 = f.md5 JOIN note_page_index p ON p.blob_md5 = f.md5" ++
     " WHERE f.user_id = ?1 AND f.deleted = 0 AND f.is_folder = 0 AND lower(f.name) LIKE '%.note' AND n.indexable = 1" ++
@@ -93,4 +96,14 @@ test "only the caller's live notes" {
     try testing.expectEqual(@as(usize, 0), (try coverage(f.a(), f.db, 2)).len);
     try f.files.trash(1, id);
     try testing.expectEqual(@as(usize, 0), (try coverage(f.a(), f.db, 1)).len);
+}
+
+test "a never-recognised note with typed text counts its page as searchable" {
+    var f = try fixture.Fixture.init();
+    defer f.deinit();
+    const id = try f.putBytes(1, "Standard.note", @embedFile("textbox_recognition_off.note"));
+    f.drain();
+    const got = try coverage(f.a(), f.db, 1);
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqual(NoteCoverage{ .file_id = id, .recognition = false, .written = 1, .recognized = 1, .running = 0 }, got[0]);
 }

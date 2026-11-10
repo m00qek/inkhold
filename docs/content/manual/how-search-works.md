@@ -13,10 +13,12 @@ extra:
 
 Inkhold reads text; it doesn't recognise handwriting itself. Your Supernote
 recognises the handwriting in your notebooks and saves that text inside each
-file. Inkhold reads it, as it reads the text of PDFs and text files.
+file. Inkhold reads it, and the text typed into a notebook's text boxes, as it
+reads the text of PDFs and text files.
 
-So a notebook the tablet never recognised can't be searched, and handwriting on
-a PDF can't either: the tablet only recognises handwriting in notebooks. The
+So handwriting in a notebook the tablet never recognised can't be searched,
+though text typed into its text boxes can. Handwriting on a PDF can't either:
+the tablet only recognises handwriting in notebooks. The
 line under your results says how many pages with writing are searchable, and
 **Which notes** lists the ones that aren't, so a missing result never passes
 for "not there".
@@ -34,7 +36,8 @@ second search is as fast as your device.
 ## What a search matches
 
 A result holds every word you type, in its name or in its text: notebook and
-folder names, recognised handwriting, PDF and text file contents, and to-dos.
+folder names, recognised handwriting, text typed into text boxes, PDF and text
+file contents, and to-dos.
 Results come best first, by how much of a document matched, with notebooks
 weighed above other files. With no exact match, it looks for close spellings
 and says so.
