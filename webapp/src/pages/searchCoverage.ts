@@ -1,7 +1,7 @@
-// How much of the person's handwriting search can find, said where they
-// search. Only what the tablet recognized is searchable, so a note with
-// recognition off, or pages not recognized yet, is invisible to search except
-// by name. One line with the total, opening to the notes that need attention
+// How much of the person's writing search can find, said where they search.
+// Handwriting is searchable only once the tablet recognized it; typed text
+// always is. So a note with recognition off, or pages not recognized yet, is
+// invisible to search except by name and by its text boxes. One line with the total, opening to the notes that need attention
 // and why. Fetched once per search, from `GET …/search-index/coverage`.
 
 import { el } from "../ui/dom";
@@ -18,7 +18,7 @@ export interface CoverageSummary {
   readonly attention: readonly NoteCoverage[];
 }
 
-/** Pages of a note search can't find: everything when recognition is off. */
+/** Pages of a note search can't find: with recognition off, all but those with typed text. */
 export function unsearchable(n: NoteCoverage): number {
   return Math.max(0, n.written - n.recognized);
 }
@@ -38,7 +38,12 @@ const pages = (n: number) => `${n} ${n === 1 ? "page" : "pages"}`;
 
 /** Why a note's pages can't be found, in the person's terms. */
 export function why(n: NoteCoverage): string {
-  if (!n.recognition) return `Recognition is off on the tablet: ${pages(n.written)} with writing can't be searched`;
+  if (!n.recognition) {
+    const lost = unsearchable(n);
+    return lost === n.written
+      ? `Recognition is off on the tablet: ${pages(n.written)} with writing can't be searched`
+      : `Recognition is off on the tablet: ${lost} of ${pages(n.written)} with writing can't be searched`;
+  }
   const waiting = Math.min(n.running, unsearchable(n));
   const missing = unsearchable(n) - waiting;
   const parts: string[] = [];
@@ -51,7 +56,7 @@ export function why(n: NoteCoverage): string {
 export function coverageText(s: CoverageSummary): string {
   if (s.written === 0) return "No handwriting to search yet.";
   if (s.attention.length === 0) return `All your handwriting is searchable: ${pages(s.written)}.`;
-  return `Handwriting is searchable on ${s.recognized} of ${pages(s.written)} with writing.`;
+  return `Text is searchable on ${s.recognized} of ${pages(s.written)} with writing.`;
 }
 
 export interface SearchCoverage {
