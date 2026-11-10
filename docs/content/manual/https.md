@@ -33,8 +33,15 @@ processor: AES-GCM where the processor has AES instructions, ChaCha20 where it
 does not, as on every Raspberry Pi. On a Pi 1, AES costs about three times as
 much.
 
-To try it before you have a real certificate, `bash scripts/dev-cert.sh` in the
-repository makes a self-signed one.
+The tablet accepts only a certificate from a public certificate authority, such
+as Let's Encrypt. It ignores certificates you add to it, so a self-signed one
+fails at sign-in and at every sync. A server reachable only from home can still
+get one: with Let's Encrypt's DNS challenge, the name has to exist in public
+DNS, but the server itself never has to be reachable from outside.
+
+To try HTTPS in a browser before you have a real certificate,
+`bash scripts/dev-cert.sh` in the repository makes a self-signed one. Browsers
+accept it once you tell them to; the tablet does not.
 
 ## Or behind a reverse proxy
 
