@@ -1,4 +1,4 @@
-// The "Recognized text" panel controller, with the DOM injected as an
+// The "Page text" panel controller, with the DOM injected as an
 // {@link OcrView}. The transcript is lazy: fetched only while the panel is open
 // on a page whose `textHash` is non-null, never on note-open.
 
@@ -74,7 +74,7 @@ export function createOcrController({ api, view, failures }: OcrDeps): OcrContro
       if (mine !== token || !open || noteId !== id || page?.textHash !== textHash) return;
       shownKey = null; // let a later visit retry
       if (dispatchApiFailure(failures, e, id, p)) return;
-      view.setState({ kind: "error", message: "Couldn't load the recognized text." });
+      view.setState({ kind: "error", message: "Couldn't load the page text." });
     }
   }
 

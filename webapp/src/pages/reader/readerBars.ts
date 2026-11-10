@@ -89,8 +89,8 @@ export function createReaderButtons(): ReaderButtons {
     class: "btn",
     type: "button",
     "aria-pressed": "false",
-    "aria-label": "Recognized text",
-    title: "Recognized text",
+    "aria-label": "Page text",
+    title: "Page text",
     html: svg(VIEWER_IC.text, 1.7),
   });
 

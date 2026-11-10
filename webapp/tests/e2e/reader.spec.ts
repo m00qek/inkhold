@@ -113,9 +113,9 @@ test.describe("reader", () => {
   // The fake leaves every third page (index 2, 5, 8…) unrecognised.
   test.describe("recognized text", () => {
     const toggle = (page: import("@playwright/test").Page) =>
-      page.getByRole("button", { name: "Recognized text" });
+      page.getByRole("button", { name: "Page text" });
     const panel = (page: import("@playwright/test").Page) =>
-      page.getByRole("region", { name: "Recognized text" });
+      page.getByRole("region", { name: "Page text" });
 
     test("toggling shows and hides the panel and tracks aria-pressed", async ({ page }) => {
       await signedIn(page);
@@ -135,7 +135,7 @@ test.describe("reader", () => {
       await expect(toggle(page)).toHaveAttribute("aria-pressed", "false");
     });
 
-    test("the panel head reads `[icon] Recognized text` — a decorative icon before the label", async ({ page }) => {
+    test("the panel head reads `[icon] Page text` — a decorative icon before the label", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
@@ -143,7 +143,7 @@ test.describe("reader", () => {
       await toggle(page).click();
       const head = panel(page).locator(".ocr__head");
       await expect(head.locator(".ocr__head-ic svg")).toBeVisible();
-      await expect(head).toContainText("Recognized text");
+      await expect(head).toContainText("Page text");
     });
 
     test("the page canvas re-lays out when the panel takes its share of the stage", async ({ page }) => {
@@ -182,7 +182,7 @@ test.describe("reader", () => {
       await expect(panel(page).locator(".ocr__body")).toContainText("page 2");
     });
 
-    test("a page with no recognized text disables the toggle and states so plainly", async ({ page }) => {
+    test("a page with no text disables the toggle and states so plainly", async ({ page }) => {
       await signedIn(page);
       await page.goto("/#/note/141");
       await expect(page.locator(".pager__count")).toHaveValue("1 / 20");
@@ -197,7 +197,7 @@ test.describe("reader", () => {
       await expect(toggle(page)).toBeEnabled();
       await toggle(page).click();
       await page.getByRole("button", { name: /^Page 3\b/ }).click();
-      await expect(panel(page).locator(".side-panel__state")).toContainText("No recognized text");
+      await expect(panel(page).locator(".side-panel__state")).toContainText("No text on this page");
       await expect(toggle(page)).toBeEnabled();
     });
 
@@ -239,9 +239,9 @@ test.describe("reader", () => {
       const pageBox = (await page.locator(".page").boundingBox())!;
       expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(pageBox.x + 2);
 
-      await expect(page.getByRole("region", { name: "Recognized text" })).toBeHidden();
+      await expect(page.getByRole("region", { name: "Page text" })).toBeHidden();
       await expect(
-        page.locator(".reader__bar").getByRole("button", { name: "Recognized text" }),
+        page.locator(".reader__bar").getByRole("button", { name: "Page text" }),
       ).toHaveAttribute("aria-pressed", "false");
     });
 
@@ -273,8 +273,8 @@ test.describe("reader", () => {
       await expect(pagesPanel(page)).toBeVisible();
 
       // A right dock on a stage too narrow for both collapses the left page index.
-      await page.locator(".reader__bar").getByRole("button", { name: "Recognized text" }).click();
-      await expect(page.getByRole("region", { name: "Recognized text" })).toBeVisible();
+      await page.locator(".reader__bar").getByRole("button", { name: "Page text" }).click();
+      await expect(page.getByRole("region", { name: "Page text" })).toBeVisible();
       await expect(pagesPanel(page)).toBeHidden();
       await expect(pagesToggle(page)).toHaveAttribute("aria-pressed", "false");
     });
