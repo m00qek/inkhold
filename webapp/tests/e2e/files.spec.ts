@@ -26,7 +26,7 @@ test.describe("non-.note files", () => {
     // Scoped to the reader: the PDF viewer mounts a `.filmstrip` of its own.
     await expect(page.getByRole("region", { name: "Reader" }).locator(".filmstrip")).toBeHidden();
     await expect(page.locator(".pager__count")).toBeHidden();
-    await expect(page.getByRole("button", { name: "Recognized text" })).toBeHidden();
+    await expect(page.getByRole("button", { name: "Page text" })).toBeHidden();
 
     await expect(page.locator(".reader__title")).toContainText("pricing page");
     await expect(page.locator(".reader__title")).toContainText(".png");

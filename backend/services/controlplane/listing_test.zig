@@ -410,3 +410,36 @@ test "cross-user isolation: another user can't read the note" {
     const empty = try svc.listing(arena.allocator(), 2, null);
     try testing.expectEqual(@as(usize, 0), empty.entries.len);
 }
+
+test "typed text boxes: searchable text and a textHash, recognition on or off" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+
+    // Recognition on and finished, its transcript empty: the text is all typed.
+    const on = try seedBytes(&f, null, "on.note", @embedFile("textbox_recognition_on.note"));
+    const meta_on = (try svc.noteMeta(a, 1, on)).?;
+    const pt_on = (try svc.pageText(a, 1, on, 0)).?;
+    try testing.expectEqualStrings(meta_on.pages[0].textHash.?, &pt_on.hash);
+    try testing.expectEqualStrings("Très bien\nça va\nBox 2 - 42", pt_on.vo.text.?);
+    // Each box is one "word" covering it, in the note's own mm (`meta.pxPerMm`).
+    const words = pt_on.vo.words.?;
+    try testing.expectEqual(@as(usize, 2), words.len);
+    try testing.expectEqualStrings("Très bien\nça va", words[0].text);
+    const scale = meta_on.pxPerMm.?;
+    try testing.expectApproxEqAbs(@as(f32, 702), words[0].xMm * scale, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 928), words[0].yMm * scale, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 259), words[0].wMm * scale, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 127), words[0].hMm * scale, 0.01);
+    try testing.expectEqualStrings("Box 2 - 42", words[1].text);
+
+    // A Standard note: never recognised, still searchable.
+    const off = try seedBytes(&f, null, "off.note", @embedFile("textbox_recognition_off.note"));
+    const meta_off = (try svc.noteMeta(a, 1, off)).?;
+    const pt_off = (try svc.pageText(a, 1, off, 0)).?;
+    try testing.expectEqualStrings(meta_off.pages[0].textHash.?, &pt_off.hash);
+    try testing.expectEqualStrings("café noir", pt_off.vo.text.?);
+}

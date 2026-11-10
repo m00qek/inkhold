@@ -177,9 +177,9 @@ export function createReader(deps: ReaderDeps): Reader {
   const buttons = createReaderButtons();
   // Beside the page in `.page-wrap`, so opening it narrows the page.
   const ocrPanel = createSidePanel({
-    ariaLabel: "Recognized text",
+    ariaLabel: "Page text",
     icon: svg(VIEWER_IC.text, 1.7),
-    label: "Recognized text",
+    label: "Page text",
     hookPrefix: "ocr",
     onClose: closeWith(buttons.ocrToggle),
   });

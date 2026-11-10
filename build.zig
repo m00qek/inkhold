@@ -310,7 +310,7 @@ pub fn build(b: *std.Build) void {
     linkSqlite(b, backend_test_mod, sqlite_c);
     backend_test_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, optimize));
     // Device captures for the golden test; @embedFile cannot leave its module dir.
-    for ([_][]const u8{ "sample.note", "sample-2.note", "layers_edited.note" }) |fixture| {
+    for ([_][]const u8{ "sample.note", "sample-2.note", "layers_edited.note", "textbox_recognition_on.note", "textbox_recognition_off.note" }) |fixture| {
         backend_test_mod.addAnonymousImport(fixture, .{
             .root_source_file = b.path(b.pathJoin(&.{ "parsers/note/tests/fixtures", fixture })),
         });

@@ -155,7 +155,7 @@ test.describe("the initial route is dispatched once", () => {
     await page.getByRole("button", { name: "Zoom in" }).click();
     // Scoped to the reader: the hidden `.txt` viewer also has a `.zoom`.
     await expect(page.locator(".reader .zoom")).toHaveText("100%");
-    await page.getByRole("button", { name: "Recognized text" }).click();
+    await page.getByRole("button", { name: "Page text" }).click();
     await expect(page.locator(".ocr")).toBeVisible();
 
     // `bubbles: true`: the listener is on `window`, which a non-bubbling event never reaches.

@@ -86,9 +86,9 @@ test.describe("reader", () => {
       await expect(download).toHaveAttribute("title", "Download");
       await expect(download.locator("svg")).toBeVisible();
 
-      const ocr = bar.getByRole("button", { name: "Recognized text" });
+      const ocr = bar.getByRole("button", { name: "Page text" });
       await expect(ocr).toHaveText("");
-      await expect(ocr).toHaveAttribute("title", "Recognized text");
+      await expect(ocr).toHaveAttribute("title", "Page text");
       await expect(ocr).toHaveAttribute("aria-pressed", "false");
     });
 

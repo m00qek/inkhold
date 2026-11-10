@@ -182,7 +182,7 @@ test.describe("on a phone", () => {
     await page.goto("/#/note/101");
     const bar = page.locator(".reader__bar");
     await expect(bar.getByRole("button", { name: "Next page" })).toBeVisible();
-    for (const tool of ["Recognized text", "Pages"]) await expect(bar.getByRole("button", { name: tool }), tool).toBeVisible();
+    for (const tool of ["Page text", "Pages"]) await expect(bar.getByRole("button", { name: tool }), tool).toBeVisible();
     for (const tool of ["Zoom in", "Zoom out"]) await expect(bar.getByRole("button", { name: tool }), tool).toBeHidden();
     // Find in the top row, beside ⋯, level with the title.
     const find = bar.getByRole("button", { name: "Find in this note" });
@@ -433,7 +433,7 @@ test.describe("on a phone", () => {
     await page.goto("/#/note/101");
     const bar = page.locator(".reader__bar");
     const pages = bar.getByRole("button", { name: "Pages" });
-    const ocr = bar.getByRole("button", { name: /Recognized text/ });
+    const ocr = bar.getByRole("button", { name: /Page text/ });
     await pages.click();
     await expect(pages).toHaveAttribute("aria-pressed", "true");
     await expect(ocr).toHaveAttribute("aria-pressed", "false");
@@ -565,8 +565,8 @@ test.describe("on a phone", () => {
     const alone = (await sheetPage.boundingBox())!;
     const open = (name: string) => bar.getByRole("button", { name }).click();
 
-    await open("Recognized text");
-    const text = page.getByRole("region", { name: "Recognized text" });
+    await open("Page text");
+    const text = page.getByRole("region", { name: "Page text" });
     await expect(text).toBeVisible();
     const controls = (await bar.locator(".toolbar__group:not(.toolbar__group--file)").boundingBox())!;
     let panel = (await text.boundingBox())!;

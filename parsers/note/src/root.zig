@@ -31,6 +31,7 @@ pub const decoder = @import("decoder.zig"); // RATTA_RLE: decode / decodeInto
 pub const render = @import("render.zig"); // layer compositing -> grayscale
 pub const recognition = @import("recognition.zig"); // RECOGNTEXT (OCR) blobs
 pub const links = @import("links.zig"); // EXTERNALLINKINFO (a PDF template's links)
+pub const textbox = @import("textbox.zig"); // typed text boxes, from TOTALPATH
 pub const page_payload = @import("page_payload.zig"); // SNPG wire format
 pub const renderPageGray = render.renderPageGray;
 pub const Image = render.Image;
@@ -46,5 +47,6 @@ test {
     _ = render;
     _ = recognition;
     _ = links;
+    _ = textbox;
     _ = page_payload;
 }

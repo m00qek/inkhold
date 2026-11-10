@@ -484,3 +484,25 @@ test "indexing over the blob source allocates nothing proportional to file size"
 const shared = @import("index_helpers.zig");
 const sample = shared.sample;
 const assertGolden = shared.assertGolden;
+
+test "typed text boxes join a page's text, and search sees them, recognition on or off" {
+    const gpa = testing.allocator;
+    var on = try parseBlob(gpa, @embedFile("textbox_recognition_on.note"));
+    defer on.deinit();
+    try testing.expect(on.indexable);
+    try testing.expectEqual(@as(u8, 1), on.pages[0].recogn_status);
+    try testing.expectEqualStrings("Très bien\nça va\nBox 2 - 42", on.pages[0].text.?);
+    try testing.expect(on.pages[0].text_hash != null);
+
+    var off = try parseBlob(gpa, @embedFile("textbox_recognition_off.note"));
+    defer off.deinit();
+    try testing.expectEqual(@as(u8, 0), off.pages[0].recogn_status);
+    try testing.expectEqualStrings("café noir", off.pages[0].text.?);
+    try testing.expect(off.pages[0].text_hash != null);
+    try testing.expectEqual(@as(u32, 1), off.note.recognized_page_count); // the card's "searchable" mark
+
+    var pages = noteindex.Pages.init(&off);
+    const p = (try pages.next()).?;
+    try testing.expectEqualStrings("café noir", p.text);
+    try testing.expect((try pages.next()) == null);
+}

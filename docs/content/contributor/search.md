@@ -91,9 +91,9 @@ from text the browser already holds, as results scroll into view.
 
 ## Saying what cannot be searched
 
-Only what the tablet recognised is searchable. So search tells the person how
-much that is: a line under the results, "Handwriting is searchable on 84 of
-161 pages with writing", computed by one query the browser asks for at most
+Handwriting is searchable only once the tablet recognised it; text typed into
+a text box always is. So search tells the person how much is covered: a line
+under the results, "Text is searchable on 84 of 161 pages with writing", computed by one query the browser asks for at most
 once a minute, which opens into the list of notebooks search cannot fully read
 and why. A document still being derived says "still being indexed" and is
 asked again, never "No matches".

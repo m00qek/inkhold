@@ -15,13 +15,15 @@ describe("the numbers", () => {
   });
 
   it("says it plainly", () => {
-    expect(coverageText(summarize([n("1", 4, 1)]))).toBe("Handwriting is searchable on 1 of 4 pages with writing.");
+    expect(coverageText(summarize([n("1", 4, 1)]))).toBe("Text is searchable on 1 of 4 pages with writing.");
     expect(coverageText(summarize([n("1", 4, 4)]))).toBe("All your handwriting is searchable: 4 pages.");
     expect(coverageText(summarize([]))).toBe("No handwriting to search yet.");
   });
 
   it("says why, per note", () => {
     expect(why(n("1", 22, 0, false))).toBe("Recognition is off on the tablet: 22 pages with writing can't be searched");
+    // A page with typed text is searchable even with recognition off.
+    expect(why(n("1", 22, 1, false))).toBe("Recognition is off on the tablet: 21 of 22 pages with writing can't be searched");
     expect(why(n("1", 20, 2))).toBe("18 of 20 pages with writing not recognized");
     expect(why(n("1", 5, 2, true, 3))).toBe("3 pages still being recognized on the tablet");
     expect(why(n("1", 6, 2, true, 1))).toBe("3 of 6 pages with writing not recognized; 1 page still being recognized on the tablet");
@@ -39,7 +41,7 @@ describe("the block", () => {
     await settle();
     expect(painted).toBe(1);
     const box = cov.block((id) => ({ "1": "Diário", "2": "Aula" })[id] ?? null)!;
-    expect(box.querySelector(".coverage__line")?.textContent).toBe("Handwriting is searchable on 1 of 27 pages with writing.");
+    expect(box.querySelector(".coverage__line")?.textContent).toBe("Text is searchable on 1 of 27 pages with writing.");
     // "9" is not in the listing: left out of the list, still counted.
     expect([...box.querySelectorAll(".coverage__name")].map((a) => a.textContent)).toEqual(["Diário", "Aula"]);
     cov.block(() => null);

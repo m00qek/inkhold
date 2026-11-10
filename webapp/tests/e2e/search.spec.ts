@@ -317,7 +317,7 @@ test.describe("universal search", () => {
     await railSettled(page);
     await searchBox(page).fill("Aurora");
     const cov = page.locator(".coverage");
-    await expect(cov.locator(".coverage__line")).toHaveText(/^Handwriting is searchable on \d+ of \d+ pages with writing\.$/);
+    await expect(cov.locator(".coverage__line")).toHaveText(/^Text is searchable on \d+ of \d+ pages with writing\.$/);
     await cov.locator("summary").click();
     // A note with recognition off says so, and opens from the list.
     const off = cov.locator("li", { hasText: "Recognition is off on the tablet" }).first();

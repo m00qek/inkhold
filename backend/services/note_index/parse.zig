@@ -142,6 +142,36 @@ pub fn parseBlobSource(gpa: Allocator, src: sn.Source) Allocator.Error!Parsed {
                 } else |_| {} // undecodable RECOGNTEXT: keep the range, drop the text
             }
 
+            // Typed text boxes: never in the transcript, recognition on or off,
+            // so they join the page's text here. Best-effort: strokes that do
+            // not walk add nothing and never make the note unindexable.
+            typed: {
+                var boxes = sn.textbox.forParsedPage(gpa, src, page) catch |e| switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => break :typed,
+                };
+                defer boxes.deinit();
+                if (boxes.boxes.len == 0) break :typed;
+                const typed_text = try boxes.plainText(gpa);
+                defer gpa.free(typed_text);
+                row.text = if (row.text) |t|
+                    (if (t.len == 0) try a.dupe(u8, typed_text) else try std.mem.concat(a, u8, &.{ t, "\n", typed_text }))
+                else
+                    try a.dupe(u8, typed_text);
+                // The `?v=` key must change when either half does.
+                var h = Md5.init(.{});
+                if (row.text_hash) |*th| h.update(th);
+                h.update("\x00typed\x00");
+                h.update(typed_text);
+                var digest: [Md5.digest_length]u8 = undefined;
+                h.final(&digest);
+                var hex: [32]u8 = undefined;
+                hexEncode(&hex, &digest);
+                row.text_hash = hex;
+                // Searchable without recognition: counted like a recognised page.
+                if (row.recogn_status != 1) recognized += 1;
+            }
+
             // PDF-template links: range + md5 only (the md5 is the serve `?v=`);
             // records are decoded at serve time.
             const links_addr = page.linksAddress();

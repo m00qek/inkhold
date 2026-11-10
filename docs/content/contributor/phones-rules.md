@@ -44,7 +44,7 @@ the bar is not a container, so its bottom row can be fixed to the screen.
   a viewer's own bar.
 - Cards run in two columns.
 - A viewer keeps ‹, the title and ⋯ at the top, and one row at the bottom:
-  paging, then the panel switches (Recognized text, Layers, Pages; a PDF's
+  paging, then the panel switches (Page text, Layers, Pages; a PDF's
   Pages, Outline, Annotations). Those stay in view because a switch's state is
   worth seeing; a text file shows its text size there.
 - Zoom is a pinch, and a double tap goes back to Fit (`ui/pinchZoom.ts`). The

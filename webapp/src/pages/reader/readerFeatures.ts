@@ -9,9 +9,9 @@ import type { ReaderCtx } from "./readerContext";
 import { revealIn } from "../../ui/dom";
 
 const OCR_MESSAGE: Record<Exclude<OcrState["kind"], "text">, string> = {
-  loading: "Loading recognized text…",
-  empty: "No recognized text on this page.",
-  error: "Couldn't load the recognized text. Change page to try again.",
+  loading: "Loading page text…",
+  empty: "No text on this page.",
+  error: "Couldn't load the page text. Change page to try again.",
 };
 
 /** Builds the transcript panel, find in note, the Export menu and the filmstrip engine onto `ctx`. */
@@ -27,7 +27,7 @@ export function installReaderFeatures(ctx: ReaderCtx): void {
       },
       setToggleEnabled(enabled) {
         ctx.buttons.ocrToggle.disabled = !enabled;
-        ctx.buttons.ocrToggle.title = enabled ? "Recognized text" : "This page has no recognized text";
+        ctx.buttons.ocrToggle.title = enabled ? "Page text" : "This page has no text";
       },
       setState(state) {
         if (state.kind === "text") {

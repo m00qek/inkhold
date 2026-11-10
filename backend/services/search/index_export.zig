@@ -87,10 +87,10 @@ fn isNote(comptime a: []const u8) []const u8 {
 
 const has_text = "text IS NOT NULL AND text <> ''";
 
-/// Carries recognised text; the complement of `unsearchable`.
+/// Carries text, recognised or typed; the complement of `unsearchable`.
 fn hasRecognisedText(comptime a: []const u8) []const u8 {
     return "EXISTS (SELECT 1 FROM note_page_index WHERE blob_md5 = " ++ a ++
-        ".md5 AND recogn_status = 1 AND " ++ has_text ++ ")";
+        ".md5 AND " ++ has_text ++ ")";
 }
 
 /// The three fill passes as one SQL expression over alias `a`. Tier 2 is the

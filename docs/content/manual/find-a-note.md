@@ -25,8 +25,10 @@ of PDFs and text files, and your to-dos.
 
 - **Handwriting**, from the text your Supernote recognised itself. A notebook
   the tablet never recognised can't be searched; the line under the results,
-  for example "Handwriting is searchable on 84 of 161 pages with writing",
+  for example "Text is searchable on 84 of 161 pages with writing",
   says how much is covered, and **Which notes** lists the ones that aren't.
+- **Typed text**, from a notebook's text boxes, whether or not the tablet
+  recognises the notebook.
 - **PDFs and text files**, from their own text. Handwriting on a PDF is not
   searchable: see [What doesn't work yet](@/manual/limits.md).
 - **Close spellings.** With no exact match, it says "No exact match — showing
