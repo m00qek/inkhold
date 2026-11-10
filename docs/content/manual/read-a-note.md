@@ -17,9 +17,9 @@ the pages, with the same ink as on the tablet.
 - **Zoom** with **+** and **−**, or a pinch on a phone. **Fit** fits the page
   to the screen again.
 - **Find in this note** (Ctrl+F) searches its recognised handwriting and typed
-  text, and marks each handwriting match on the page. A match in a text box is
-  not marked: the tablet records where each recognised word is, but not where
-  typed words are.
+  text, and marks each match on the page. A match in a text box marks the whole
+  box: the tablet records where each recognised word is, but only where typed
+  text's box is.
 - **Recognized text** shows the text the tablet recognised on the page.
 - **Layers** shows a page's layers, each on its own, to hide the ones you don't
   want to see. It is available when the page has more than one.
