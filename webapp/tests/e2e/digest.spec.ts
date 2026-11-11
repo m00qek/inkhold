@@ -179,3 +179,18 @@ test.describe("Digest", () => {
     await expect(page.locator("#note-digests-panel")).toBeHidden();
   });
 });
+
+test.describe("Digest on a phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("a notebook's Digests is under ⋯, so the bar's touch-sized switches fit one row", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/121/page/2");
+    // Enabled once the note's digests are in: a menu leaves out a tool that can't act.
+    await expect(page.locator('[aria-controls="note-digests-panel"]')).toBeEnabled();
+    await page.locator(".reader__bar").getByRole("button", { name: "More" }).click();
+    await page.locator(".menu__pop--float.is-open").getByRole("menuitemcheckbox", { name: "Digests" }).click();
+    await expect(page.locator("#note-digests-panel")).toBeVisible();
+    await expect(page.locator("#note-digests-panel")).toContainText("Ship the beta before the review");
+  });
+});

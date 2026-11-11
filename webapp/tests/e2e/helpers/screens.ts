@@ -118,6 +118,13 @@ export const SCREENS: Screen[] = [
     ownTitle: true,
     open: async (p) => {
       await p.goto("/#/note/121");
+      // A phone keeps it under ⋯, which lists it once the note's digests are in.
+      if ((p.viewportSize()?.width ?? 1280) < 700) {
+        await p.locator('[aria-controls="note-digests-panel"]:not([disabled])').waitFor({ state: "attached" });
+        await p.locator(".reader__bar").getByRole("button", { name: "More" }).click();
+        await p.locator(".menu__pop--float.is-open").getByRole("menuitemcheckbox", { name: "Digests" }).click();
+        return;
+      }
       await p.getByRole("button", { name: "Digests", exact: true }).click();
     },
   },

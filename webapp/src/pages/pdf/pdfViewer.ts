@@ -337,8 +337,8 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       // Panel switches stay on the bar everywhere: their state is worth seeing.
       { kind: "custom", key: "pages", el: pagesToggle, focus: [pagesToggle] },
       { kind: "custom", key: "outline", el: outlineOpener.el, focus: [outlineOpener.el] },
-      // Shown while the server keeps digests.
-      { kind: "custom", key: "digests", el: digests.opener.el, focus: [digests.opener.el] },
+      // Shown while the server keeps digests; under ⋯ on a phone, like the reader's.
+      { kind: "custom", key: "digests", el: digests.opener.el, focus: [digests.opener.el], fold: true },
       // Shown only when a `.mark` exists.
       { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle] },
       { kind: "custom", key: "copy", el: copy.btn, focus: [copy.btn], fold: true },

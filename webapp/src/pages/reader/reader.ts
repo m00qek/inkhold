@@ -309,8 +309,9 @@ export function createReader(deps: ReaderDeps): Reader {
       { kind: "custom", key: "find", el: findBar.toggle, focus: [findBar.toggle], top: true },
       // Panel switches stay on the bar everywhere: their state is worth seeing.
       { kind: "custom", key: "ocr", el: buttons.ocrToggle, focus: [buttons.ocrToggle] },
-      // Shown for a `.note` while the server keeps digests.
-      { kind: "custom", key: "digests", el: digests.opener.el, focus: [digests.opener.el] },
+      // Shown for a `.note` while the server keeps digests. On a phone, under ⋯:
+      // a row of touch-sized switches holds paging, Page text, Layers and Pages.
+      { kind: "custom", key: "digests", el: digests.opener.el, focus: [digests.opener.el], fold: true },
       { kind: "custom", key: "layers", el: buttons.layersToggle, focus: [buttons.layersToggle] },
       { kind: "custom", key: "pages", el: buttons.pagesToggle, focus: [buttons.pagesToggle] },
     ],
