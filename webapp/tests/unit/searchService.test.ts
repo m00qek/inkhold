@@ -199,6 +199,34 @@ describe("createIndexSearch", () => {
     expect(loads()).toBe(1);
   });
 
+  it("finds item rows set before the engine exists, and their replacements at once", async () => {
+    const { load, loads } = spyLoader();
+    const { sync } = fakeSync();
+    const local = createIndexSearch({ sync, load });
+    await local.sync();
+    local.setItems("todo", [{ key: "t1", text: "comprar reuniao" }]);
+
+    const first = await local.search("comprar");
+    expect(first.items).toEqual({ name: [], todo: ["t1"], digest: [] });
+    expect(first.documents).toEqual([]);
+
+    local.setItems("todo", [{ key: "t2", text: "vender reuniao" }]);
+    expect((await local.search("comprar")).items.todo).toEqual([]);
+    expect((await local.search("vender")).items.todo).toEqual(["t2"]);
+    expect(loads()).toBe(1);
+  });
+
+  it("writes the items again into an engine made after a drop", async () => {
+    const { load } = spyLoader();
+    const { sync } = fakeSync();
+    const local = createIndexSearch({ sync, load });
+    await local.sync();
+    local.setItems("digest", [{ key: "d1", text: "baleia branca" }]);
+    await local.search("baleia");
+    local.drop();
+    expect((await local.search("baleia")).items.digest).toEqual(["d1"]);
+  });
+
   it("groups pages by document, joins the manifest, and ranks by how much of each matched", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();

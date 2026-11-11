@@ -1,6 +1,7 @@
 // The library-wide search result shape, and its order. Excerpts are cut in
 // the browser (`excerpt.ts`), so the server never interprets a query.
 
+import type { ItemKind } from "./itemRows";
 import type { Tier } from "./manifestCodec";
 
 /** One matching document, not one page. */
@@ -37,12 +38,19 @@ export interface LocalResults {
   readonly documents: readonly LocalHit[];
   /** Non-empty only when the ladder answered, for "matched X". */
   readonly expansions: readonly Expansion[];
+  /** The keys of the matching items of each kind, best first (`itemRows.ts`). */
+  readonly items: ItemHits;
   /**
    * Documents kept for a quoted phrase without being checked: their text is
    * not in the browser, so whether the words sit together is not known.
    */
   readonly unchecked?: number;
 }
+
+/** Matching item keys by kind. */
+export type ItemHits = Readonly<Record<ItemKind, readonly string[]>>;
+
+export const NO_ITEM_HITS: ItemHits = { name: [], todo: [], digest: [] };
 
 export interface LocalSearch {
   /**

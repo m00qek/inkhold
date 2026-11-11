@@ -317,7 +317,7 @@ describe("createNoteSearch", () => {
 
       const state = h.last();
       expect(state?.kind).toBe("results");
-      expect(Object.keys(state ?? {}).sort()).toEqual(["documents", "expansions", "kind", "query"]);
+      expect(Object.keys(state ?? {}).sort()).toEqual(["documents", "expansions", "items", "kind", "query"]);
     });
 
     it("substitutes nothing when the query as typed answered", async () => {
@@ -348,6 +348,7 @@ describe("createNoteSearch", () => {
         totalPages: 0,
         documents: [],
         expansions: [],
+        items: { name: [], todo: [], digest: [] },
       });
     });
   });

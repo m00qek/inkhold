@@ -5,10 +5,11 @@
 
 import { newestPerDocument } from "../cache/termsStore";
 import type { CoreLoader, QueryResult, TermsDocument } from "./indexEngine";
+import { ITEM_KINDS, type ItemKind, type ItemRow } from "./itemRows";
 import { createSearchEngine, type SearchEngine } from "./searchEngine";
 import { createIndexSync, type IndexSync, type SyncOutcome } from "./indexSync";
 import type { Derivation, ManifestRow } from "./manifestCodec";
-import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
+import { rankDocuments, type ItemHits, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
 
 /** No cap: the scan is full anyway, and a capped document would undercount its matches. */
 const ALL_PAGES = 0xffffffff;
@@ -40,6 +41,11 @@ export interface IndexSearch extends LocalSearch {
   indexVersion(md5: string): number | null;
   /** The last synced manifest's `derivation`, or `null` for a document it doesn't list. */
   derivation(md5: string): Derivation | null;
+  /**
+   * Replaces one kind's item rows: names, to-dos, digests, which the browser
+   * holds itself. Written at once to a built engine, else at its build.
+   */
+  setItems(kind: ItemKind, rows: readonly ItemRow[]): void;
   /** Free the instance; the next search rebuilds from IndexedDB rows. */
   drop(): void;
 }
@@ -69,14 +75,18 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   let built = -1;
   /** Each built document's page count, for density; replaced with every build. */
   let pageCounts = new Map<string, number>();
+  /** The last rows of each kind, for an engine made later. */
+  const itemRows = new Map<ItemKind, readonly ItemRow[]>();
 
   async function build(): Promise<SearchEngine> {
     const target = rows;
     // Dedupe again: `SearchIndex.build` throws on a repeated md5.
     const stored = newestPerDocument(await sync.documents());
     const docs: TermsDocument[] = stored;
+    const fresh = index === null;
     const engine = index ?? createSearchEngine({ load });
     try {
+      if (fresh) for (const [kind, rows] of itemRows) await engine.setItems(kind, rows);
       await engine.build(docs);
     } catch (err) {
       // Drop a failed or dead engine so the next search starts fresh.
@@ -133,6 +143,18 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     indexVersion: (md5) => versions.get(md5) ?? null,
     derivation: (md5) => derivations.get(md5) ?? null,
 
+    setItems(kind, rows) {
+      itemRows.set(kind, rows);
+      const engine = index;
+      // A failed write empties the engine's index: start over at the next search.
+      engine?.setItems(kind, rows).catch(() => {
+        if (index !== engine) return;
+        engine.close();
+        index = null;
+        built = -1;
+      });
+    },
+
     drop() {
       index?.close();
       index = null;
@@ -183,7 +205,9 @@ function group(
       pageCount: pageCounts.get(md5) ?? null,
     });
   }
+  const items = Object.fromEntries(ITEM_KINDS.map((k) => [k, result.items.filter((i) => i.kind === k).map((i) => i.key)])) as unknown as ItemHits;
   // Only with a surviving row, or "matched X" would sit over an empty list.
-  const expansions = documents.length > 0 ? result.expansions : [];
-  return { totalPages, documents: rankDocuments(documents), expansions };
+  const any = documents.length > 0 || ITEM_KINDS.some((k) => items[k].length > 0);
+  const expansions = any ? result.expansions : [];
+  return { totalPages, documents: rankDocuments(documents), expansions, items };
 }

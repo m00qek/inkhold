@@ -3,7 +3,7 @@
 // token; a response whose token has moved on is dropped, not painted.
 
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
-import type { Expansion, LocalHit, LocalSearch } from "../search/localSearch";
+import { NO_ITEM_HITS, type Expansion, type ItemHits, type LocalHit, type LocalSearch } from "../search/localSearch";
 
 /**
 * One or two characters match nearly the whole index (the expensive case).
@@ -28,6 +28,8 @@ export type SearchState =
       documents: readonly LocalHit[];
       /** What the typo ladder substituted, per token rather than per document. */
       expansions: readonly Expansion[];
+      /** The matching names, to-dos and digests, by kind. */
+      items: ItemHits;
       /** Kept for a quoted phrase without being checked (`LocalResults.unchecked`). */
       unchecked?: number;
     }
@@ -52,7 +54,7 @@ export interface NoteSearchController {
 
 export const noLocalSearch: LocalSearch = {
   ready: false,
-  search: (query) => Promise.resolve({ query, totalPages: 0, documents: [], expansions: [] }),
+  search: (query) => Promise.resolve({ query, totalPages: 0, documents: [], expansions: [], items: NO_ITEM_HITS }),
 };
 
 export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
@@ -91,6 +93,7 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
         query,
         documents: results.documents,
         expansions: results.expansions,
+        items: results.items,
         // Only a phrase search that couldn't check everything says so.
         ...(results.unchecked ? { unchecked: results.unchecked } : {}),
       });

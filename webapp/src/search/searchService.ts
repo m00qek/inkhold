@@ -5,6 +5,7 @@
 
 import type { LiveChannel } from "../sync/types";
 import type { CoreLoader } from "./indexEngine";
+import type { ItemKind, ItemRow } from "./itemRows";
 import type { IndexSync } from "./indexSync";
 import { createIndexSearch, type LiveDocument } from "./indexSearch";
 import type { Derivation } from "./manifestCodec";
@@ -28,6 +29,8 @@ export interface SearchServiceOptions {
 }
 
 export interface SearchService extends LocalSearch {
+  /** One kind's item rows, replaced (`indexSearch.ts`). */
+  setItems(kind: ItemKind, rows: readonly ItemRow[]): void;
   /** A trigger fired. Coalesced; extra calls are free. */
   refresh(): void;
   /** Never rejects. */
@@ -97,6 +100,8 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     refresh,
 
     syncNow,
+
+    setItems: (kind, rows) => local.setItems(kind, rows),
 
     indexVersion: (md5) => local.indexVersion(md5),
     derivation: (md5) => local.derivation(md5),
