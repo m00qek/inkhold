@@ -1,12 +1,14 @@
-// The library-wide search renderer: merges name matches from the cached tree
-// with transcript hits from the index into one list, painted whole (no append
-// path; a corpus change is a repaint).
+// The library-wide search renderer: merges name matches and transcript hits,
+// both from the index, joined to the cached tree, into one list, painted
+// whole (no append path; a corpus change is a repaint). The names reach the
+// index as rows of their own (`nameRows`).
 
 import { cardList } from "./galleryCards";
 import { el } from "../ui/dom";
 import { coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail/railPlaces";
-import { matchesName, nameQueryFor, type NameQuery } from "../search/match";
+import { insideQuery, matchesName } from "../search/match";
+import type { ItemRow } from "../search/itemRows";
 import type { SearchCoverage } from "./searchCoverage";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
@@ -20,6 +22,27 @@ function plural(n: number, one: string): string {
 /** `.txt` ordinals count paragraphs (1), `.note` pages (0); the index has no kind. */
 function segmentKind(note: NoteSummary): number {
   return note.fileType.trim().toLowerCase() === "txt" ? 1 : 0;
+}
+
+const NOTE = "n:";
+const FOLDER = "f:";
+
+/** The search index's rows for names: every note's, and every folder's by the label the rail shows. */
+export function nameRows(folders: Pick<FolderCache, "values">, labelFor: (folder: Folder) => string): ItemRow[] {
+  const rows = new Map<string, string>();
+  for (const cached of folders.values()) {
+    for (const e of cached.entries) {
+      if (e.kind === "note") rows.set(NOTE + e.id, e.name);
+      else rows.set(FOLDER + e.id, labelFor(e));
+    }
+  }
+  return [...rows].map(([key, text]) => ({ key, text }));
+}
+
+/** What matched by name: notes and folders, by id. */
+interface NameHits {
+  readonly notes: ReadonlySet<Id>;
+  readonly folders: ReadonlySet<Id>;
 }
 
 /** Read through getters so a paint reflects state at paint time. */
@@ -74,7 +97,35 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   * drops hits the tree doesn't name: the local index may be a superset of the
   * live library. Name matches first; otherwise the engine's order is kept.
   */
-  function searchResults(query: NameQuery | null): SearchResult[] {
+  /**
+   * The names the index matched for `q`, once it answered. Only when none
+   * matched as typed, the typed text anywhere in a name ("style" in
+   * "MyStyle"), then the typo ladder's: fallbacks, never a widening.
+   */
+  function nameHits(q: string): NameHits {
+    const s = ctx.getSearchState();
+    if (s.kind !== "results" || s.query !== q) return { notes: new Set(), folders: new Set() };
+    const notes = new Set<Id>();
+    const folders = new Set<Id>();
+    for (const key of s.items.name) {
+      if (key.startsWith(NOTE)) notes.add(key.slice(NOTE.length));
+      else if (key.startsWith(FOLDER)) folders.add(key.slice(FOLDER.length));
+    }
+    if ((notes.size > 0 || folders.size > 0) && s.expansions.length === 0) return { notes, folders };
+    // Before the typo ladder's answer, as for to-dos.
+    const inside = insideQuery(q);
+    const inNotes = new Set<Id>();
+    const inFolders = new Set<Id>();
+    for (const cached of ctx.folders.values()) {
+      for (const e of cached.entries) {
+        if (e.kind === "note" && matchesName(e.name, inside)) inNotes.add(e.id);
+        else if (e.kind === "folder" && matchesName(ctx.labelFor(e), inside)) inFolders.add(e.id);
+      }
+    }
+    return inNotes.size > 0 || inFolders.size > 0 ? { notes: inNotes, folders: inFolders } : { notes, folders };
+  }
+
+  function searchResults(names: NameHits): SearchResult[] {
     const searchState = ctx.getSearchState();
     const cached = allCachedNotes();
     const byId = new Map<Id, SearchResult>();
@@ -89,7 +140,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
           noteId,
           note: known.note,
           folderPath: known.folderPath,
-          nameMatched: matchesName(known.note.name, query),
+          nameMatched: names.notes.has(noteId),
           pages: doc.pages,
           kind: segmentKind(known.note),
           md5: doc.md5,
@@ -99,7 +150,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     }
 
     for (const [noteId, { note, folderPath }] of cached) {
-      if (byId.has(noteId) || !matchesName(note.name, query)) continue;
+      if (byId.has(noteId) || !names.notes.has(noteId)) continue;
       byId.set(noteId, { noteId, note, folderPath, nameMatched: true, pages: [], kind: segmentKind(note), md5: null, written: true });
     }
 
@@ -114,19 +165,12 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     return ctx.coverage.block((id) => notes.get(id)?.note.name ?? null);
   }
 
-  /** Every note and folder name the search can show, for choosing the rule. */
-  function* allNames(): Generator<string> {
-    for (const cached of ctx.folders.values()) {
-      for (const e of cached.entries) yield e.kind === "folder" ? ctx.labelFor(e) : e.name;
-    }
-  }
-
   /** Folders named like the query, by the label the rail shows; each once. */
-  function folderResults(query: NameQuery | null): Folder[] {
+  function folderResults(names: NameHits): Folder[] {
     const seen = new Map<Id, Folder>();
     for (const cached of ctx.folders.values()) {
       for (const e of cached.entries) {
-        if (e.kind !== "folder" || seen.has(e.id) || !matchesName(ctx.labelFor(e), query)) continue;
+        if (e.kind !== "folder" || seen.has(e.id) || !names.folders.has(e.id)) continue;
         seen.set(e.id, e);
       }
     }
@@ -157,15 +201,14 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /**
-  * Names paint on the keystroke; transcripts join when the engine answers.
+  * Names and transcripts paint when the engine answers.
   * "Searching", "failed" and "nothing" stay three distinct states.
   */
   function renderSearch(q: string): void {
     const searchState = ctx.getSearchState();
-    // The word rule; typed text anywhere in a name only when no name matched it.
-    const query = nameQueryFor(q, allNames());
-    const results = searchResults(query);
-    const folders = folderResults(query);
+    const names = nameHits(q);
+    const results = searchResults(names);
+    const folders = folderResults(names);
     const pages = results.reduce((n, r) => n + r.pages.length, 0);
 
     const pending = ctx.indexPending() ?? 0;

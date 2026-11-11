@@ -1,7 +1,10 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect } from "vitest";
-import { createGallerySearch, type GallerySearchCtx } from "../../src/pages/gallerySearch";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { createGallerySearch, nameRows, type GallerySearchCtx } from "../../src/pages/gallerySearch";
+import { SearchIndex, type SearchCoreExports } from "../../src/search/indexEngine";
 import type { SearchState } from "../../src/pages/noteSearch";
 import type { SearchResult } from "../../src/pages/galleryCards";
 import type { Entry, Id, Listing, NoteSummary } from "../../src/core/types";
@@ -29,8 +32,9 @@ function listing(entries: Entry[]): Listing {
   return { folderId: null, path: [], entries, syncVersion: 1 };
 }
 
-function results(query: string, documents: LocalHit[], expansions: Expansion[] = []): SearchState {
-  return { kind: "results", query, documents, expansions };
+/** The index's answer; `names` are the name rows it matched (`n:<id>`, `f:<id>`). */
+function results(query: string, documents: LocalHit[], expansions: Expansion[] = [], names: string[] = []): SearchState {
+  return { kind: "results", query, documents, expansions, items: { name: names, todo: [], digest: [] } };
 }
 
 /** The renderer with every collaborator stubbed; `resultCard` records the join. */
@@ -87,6 +91,9 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
     },
     setPending(n: number | null) {
       pending = n;
+    },
+    setState(next: SearchState) {
+      state = next;
     },
     setState(s: SearchState) {
       state = s;
@@ -150,7 +157,7 @@ describe("the join between a hit and the listing", () => {
 describe("the name half of the query", () => {
   it("still merges filename matches that no transcript hit named", () => {
     const h = harness({
-      state: results("rut", [doc(7, [1])]),
+      state: results("rut", [doc(7, [1])], [], ["n:8"]),
       pending: 0,
       tree: [note("7", "Weekly review"), note("8", "Rutabaga plans")],
     });
@@ -162,7 +169,7 @@ describe("the name half of the query", () => {
 
   it("marks a document that matched BOTH ways once, as a name match", () => {
     const h = harness({
-      state: results("weekly", [doc(7, [1, 2])]),
+      state: results("weekly", [doc(7, [1, 2])], [], ["n:7"]),
       pending: 0,
       tree: [note("7", "Weekly review")],
     });
@@ -175,7 +182,7 @@ describe("the name half of the query", () => {
 
   it("puts name matches first and otherwise keeps the engine's rank order", () => {
     const h = harness({
-      state: results("plan", [doc(1, [0, 1, 2]), doc(2, [5])]),
+      state: results("plan", [doc(1, [0, 1, 2]), doc(2, [5])], [], ["n:3"]),
       pending: 0,
       tree: [note("1", "Alpha"), note("2", "Beta"), note("3", "Plan B")],
     });
@@ -383,25 +390,48 @@ describe("the search renderer's pending sentences", () => {
 describe("names follow the index's rule", () => {
   const folder = (id: string, name: string): Entry => ({ kind: "folder", id, name }) as Entry;
   const idle: SearchState = results("x", []);
+  // From the working directory: under happy-dom `import.meta.url` is not a file URL.
+  const wasm = readFileSync(resolve("public/sqlite-core.wasm"));
 
-  it("ignores accents and case, and takes the words in any order", () => {
-    const h = harness({ state: idle, pending: 0, tree: [note("1", "Reunião de pais"), note("2", "Haus of gabin"), note("3", "Ideias")] });
+  /** The renderer over the real index (`sqlite-core.wasm`), holding the tree's names. */
+  async function indexed(tree: Entry[]) {
+    const h = harness({ state: idle, pending: 0, tree });
+    const index = await SearchIndex.open(async () => {
+      const { instance } = await WebAssembly.instantiate(wasm, {});
+      const core = instance.exports as unknown as SearchCoreExports;
+      core._initialize?.();
+      return core;
+    });
+    index.build([]);
+    index.setItems("name", nameRows({ values: () => [listing(tree)] }, (f) => f.name));
+    return {
+      ...h,
+      paint(q: string) {
+        const r = index.query(q, 1000, true);
+        h.setState(results(q, [], r.expansions, r.items.map((i) => i.key)));
+        return h.paint(q);
+      },
+    };
+  }
+
+  it("ignores accents and case, and takes the words in any order", async () => {
+    const h = await indexed([note("1", "Reunião de pais"), note("2", "Haus of gabin"), note("3", "Ideias")]);
     h.paint("reuniao");
     expect(h.rows()).toEqual(["Reunião de pais"]);
     h.paint("gabin haus");
     expect(h.rows()).toEqual(["Haus of gabin"]);
   });
 
-  it("the last word may be the start of one; the others are whole words", () => {
-    const h = harness({ state: idle, pending: 0, tree: [note("1", "Haus of gabin")] });
+  it("the last word may be the start of one; the others are whole words", async () => {
+    const h = await indexed([note("1", "Haus of gabin")]);
     h.paint("haus gab");
     expect(h.rows()).toEqual(["Haus of gabin"]);
     h.paint("hau gabin");
     expect(h.rows()).toEqual([]);
   });
 
-  it("falls back to the text inside a name only when no name matched by words", () => {
-    const h = harness({ state: idle, pending: 0, tree: [note("1", "MyStyle"), note("2", "Style guide")] });
+  it("falls back to the text inside a name only when no name matched by words", async () => {
+    const h = await indexed([note("1", "MyStyle"), note("2", "Style guide")]);
     // "style" is a word of "Style guide": the word rule answers, alone.
     h.paint("style");
     expect(h.rows()).toEqual(["Style guide"]);
@@ -410,8 +440,8 @@ describe("names follow the index's rule", () => {
     expect(h.rows()).toEqual(["MyStyle", "Style guide"]);
   });
 
-  it("finds folders by name, in their own group before the notes", () => {
-    const h = harness({ state: idle, pending: 0, tree: [folder("f1", "Aulas de Francês"), note("1", "Francês 3")] });
+  it("finds folders by name, in their own group before the notes", async () => {
+    const h = await indexed([folder("f1", "Aulas de Francês"), note("1", "Francês 3")]);
     const g = h.paint("frances");
     expect(h.folderRows()).toEqual(["Aulas de Francês"]);
     expect(h.rows()).toEqual(["Francês 3"]);
@@ -420,8 +450,8 @@ describe("names follow the index's rule", () => {
     expect(g.querySelector(".section-head + ul.cards > .card--folder")?.textContent).toBe("Aulas de Francês");
   });
 
-  it("a folder alone is an answer, not 'no matches'", () => {
-    const h = harness({ state: idle, pending: 0, tree: [folder("f1", "Receitas")] });
+  it("a folder alone is an answer, not 'no matches'", async () => {
+    const h = await indexed([folder("f1", "Receitas")]);
     h.paint("receitas");
     expect(h.folderRows()).toEqual(["Receitas"]);
     expect(h.gallery.querySelector(".empty")).toBeNull();

@@ -1,14 +1,16 @@
-// What search knows of the tablet's apps: the last To-Do and Digest answers,
-// written into the search index as rows of their own (`todoRows`,
-// `digestRows`) and kept on the device (`cache/itemStore.ts`), so search
-// finds them offline too (#18). The pages hand each answer over; until the
-// first one, the stored one stands in. A change re-asks an open search, so
-// what was just saved is found at once.
+// What search finds besides document pages, written into the search index as
+// rows of their own: the library's names (`nameRows`), read from the cached
+// tree, and the tablet's apps, the last To-Do and Digest answers (`todoRows`,
+// `digestRows`), kept on the device (`cache/itemStore.ts`) so search finds
+// them offline too (#18). The pages hand each answer over; until the first
+// one, the stored one stands in. A change re-asks an open search, so what was
+// just saved is found at once.
 
 import type { TodoSnapshot } from "../../api/todoTypes";
 import type { DigestSnapshot } from "../../api/digestTypes";
 import type { ItemStore } from "../../cache/itemStore";
 import type { SearchService } from "../../search/searchService";
+import type { ItemRow } from "../../search/itemRows";
 import { todoRows } from "../todo/todoSearch";
 import { digestRows } from "../digest/digestSearch";
 
@@ -19,11 +21,15 @@ export interface SearchItems {
   /** The page's answer; null (its load failed) keeps what search has. */
   setTodo(s: TodoSnapshot | null): void;
   setDigest(s: DigestSnapshot | null): void;
+  /** Reads the names again (the tree changed, or a search is about to run); a change re-asks the search. */
+  refreshNames(): void;
 }
 
 export interface SearchItemsDeps {
   service: Pick<SearchService, "setItems">;
   store: ItemStore;
+  /** Every name the library shows, from the cached tree. */
+  names(): ItemRow[];
   /** Search's rows changed: re-ask an open search. */
   onChanged(): void;
 }
@@ -40,6 +46,8 @@ export function createSearchItems(deps: SearchItemsDeps): SearchItems {
   /** The pages answered: the stored copies are no longer wanted. */
   let todoLive = false;
   let digestLive = false;
+  /** The names last written, as one string: a tree walk mostly changes nothing. */
+  let namesHeld = "";
 
   function useTodo(s: TodoSnapshot): void {
     todo = s;
@@ -75,6 +83,14 @@ export function createSearchItems(deps: SearchItemsDeps): SearchItems {
       digestLive = true;
       void store.put("digest", s);
       useDigest(s);
+    },
+    refreshNames() {
+      const rows = deps.names();
+      const held = rows.map((r) => `${r.key}\t${r.text}`).join("\n");
+      if (held === namesHeld) return;
+      namesHeld = held;
+      service.setItems("name", rows);
+      deps.onChanged();
     },
   };
 }

@@ -11,6 +11,7 @@ import { createDigestThumbs } from "../digest/digestThumbs";
 import { parsePlace, placePath } from "../digest/digestModel";
 import type { LibraryCtx } from "./libraryContext";
 import { createSearchItems } from "./searchItems";
+import { nameRows } from "../gallerySearch";
 import { openItemStore } from "../../cache/itemStore";
 
 /** The handwriting each app draws, kept in the persistent thumbnail store. */
@@ -23,7 +24,12 @@ export function installAppInks(ctx: LibraryCtx): void {
 /** Both pages, each read once at start: the rail shows an app only when the server keeps its data. */
 export function installAppPages(ctx: LibraryCtx): void {
   const { api, content, gallery, st } = ctx;
-  ctx.searchItems = createSearchItems({ service: ctx.searchService, store: openItemStore(), onChanged: () => ctx.search.again() });
+  ctx.searchItems = createSearchItems({
+    service: ctx.searchService,
+    store: openItemStore(),
+    names: () => nameRows(ctx.folderCache, (f) => ctx.rail.labelFor(f)),
+    onChanged: () => ctx.search.again(),
+  });
   ctx.todo = createTodoPage({
     api,
     content,
