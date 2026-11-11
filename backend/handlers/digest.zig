@@ -103,7 +103,7 @@ pub fn list(ctx: *Context, req: *Request, params: Params) anyerror!void {
         o.* = .{
             .id = d.id,
             .text = d.content orelse "",
-            .comment = if (d.comment_str) |c| (if (c.len == 0) null else c) else null,
+            .comment = listedComment(d.comment_str),
             .categoryUid = d.parent_uid,
             .author = digestweb.authorOf(a, d),
             .createdAt = if (d.creation_time > 0) d.creation_time else d.created_at,
@@ -196,6 +196,13 @@ fn noCategory(ctx: *Context, req: *Request) anyerror!void {
 }
 fn badComment(ctx: *Context, req: *Request) anyerror!void {
     return fail(ctx, req, .bad_request, "BAD_COMMENT", "a comment holds at most 2000 characters of text");
+}
+
+/// A comment as listed: as the browser's edit would keep it, without the
+/// blank space the tablet may have left around it; null when there is none.
+fn listedComment(c: ?[]const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, c orelse return null, " \t\r\n");
+    return if (t.len == 0) null else t;
 }
 
 /// The comment without the blank space around it; null when it is not text

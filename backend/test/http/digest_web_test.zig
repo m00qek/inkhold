@@ -19,7 +19,7 @@ const note_add =
     \\{"commentStr":"","content":"This is a test note.","creationTime":1794354714865,"lastModifiedTime":1794354714866,"md5Hash":"b018b3f88421e0b94e6860bd88d4d9ea","metadata":"{\"author\":\"\",\"note_page\":\"2\",\"note_fileId\":\"F20261109060649314933DT231jzqIRw9\",\"note_pageId\":\"P20261109062932431207F1CB7AuJNdF7\",\"unique_identifier\":\"75d4b7d10094123e92ec7673753bbc2c\"}","parentUniqueIdentifier":"kb-phon","sourcePath":"Note/20261109_060644.note","sourceType":2}
 ;
 const manual_add =
-    \\{"content":"Typed on the tablet","md5Hash":"m3","metadata":"{\"unique_identifier\":\"u-manual\"}","parentUniqueIdentifier":"","sourcePath":"","sourceType":4}
+    \\{"commentStr":"  Note\n","content":"Typed on the tablet","md5Hash":"m3","metadata":"{\"unique_identifier\":\"u-manual\"}","parentUniqueIdentifier":"","sourcePath":"","sourceType":4}
 ;
 
 const Listing = struct {
@@ -139,6 +139,8 @@ test "a person's digests: categories, sources found in the library, pages 1-base
         try testing.expectEqual(manual, d2.id);
         try testing.expectEqualStrings("manual", d2.source.kind);
         try testing.expectEqual(@as(?[]const u8, null), d2.source.path);
+        // The blank space the tablet left around its comment is not listed.
+        try testing.expectEqualStrings("Note", d2.comment.?);
     }
     {
         var l = try listing(f, &b, &rui.web);
