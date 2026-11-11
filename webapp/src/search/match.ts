@@ -1,13 +1,9 @@
-// The one rule for matching a query against a name: what the index does to
-// note text, applied to the things the index doesn't hold (note and folder
-// names, to-dos). The query's words are folded like the index's
-// (`unicode61 remove_diacritics 2`, imitated by `fold.ts`); each must be a
-// whole word of the name, in any order, and the last may be the start of one,
-// as the index treats the word still being typed.
-//
-// When that finds no names at all, callers fall back to `insideQuery`: the
-// typed text anywhere in a name ("style" in "MyStyle"). A fallback, never a
-// widening, like the index's typo ladder.
+// What the browser still does with a query itself, beside the index, which
+// decides every word match (names, to-dos and digests are rows there): mark
+// the matched words, by the index's rule imitated (`fold.ts`, `nameQuery`),
+// and the one fallback FTS5 cannot do, the typed text anywhere in a name
+// ("style" in "MyStyle", `insideQuery`), used only when the index matched no
+// name or to-do as typed. A fallback, never a widening.
 
 import { fold, words } from "./fold";
 import { holdsAll, phrasesOf, type Phrase } from "./phrase";
@@ -33,13 +29,6 @@ export function nameQuery(q: string): NameQuery | null {
 export function insideQuery(q: string): NameQuery | null {
   const inside = fold(q).replace(/"/g, "").replace(/\s+/g, " ").trim();
   return inside === "" ? null : { whole: [], start: "", inside };
-}
-
-/** The word rule, or `insideQuery` when it matches no name in `texts`. */
-export function nameQueryFor(q: string, texts: Iterable<string>): NameQuery | null {
-  const strict = nameQuery(q);
-  for (const t of texts) if (matchesName(t, strict)) return strict;
-  return insideQuery(q);
 }
 
 /** True when every query word is a word of `text` (the last, the start of one). */

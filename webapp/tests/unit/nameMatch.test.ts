@@ -1,7 +1,8 @@
-// The one rule names are matched by: the index's, applied in the browser.
+// The index's rule imitated in the browser, for marking matched words, and the
+// match-inside fallback.
 
 import { describe, it, expect } from "vitest";
-import { insideQuery, matchesName, nameMarks, nameQuery, nameQueryFor } from "../../src/search/match";
+import { insideQuery, matchesName, nameMarks, nameQuery } from "../../src/search/match";
 
 const m = (text: string, q: string) => matchesName(text, nameQuery(q));
 
@@ -46,11 +47,6 @@ describe("marking a matched name", () => {
 });
 
 describe("the fallback: typed text anywhere in a name", () => {
-  it("is used only when the word rule matches no name", () => {
-    expect(nameQueryFor("style", ["MyStyle", "Style guide"])?.inside).toBeUndefined();
-    expect(nameQueryFor("style", ["MyStyle"])?.inside).toBe("style");
-  });
-
   it("folds accents and case, and marks the original letters", () => {
     expect(matchesName("Lição 3", insideQuery("icao"))).toBe(true);
     const text = "Lição 3";
