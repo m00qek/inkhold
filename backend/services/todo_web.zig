@@ -270,26 +270,6 @@ pub fn decodeLink(arena: std.mem.Allocator, links: []const u8) ?Link {
     return .{ .path = path, .page = page };
 }
 
-/// The tablet's storage root, and its top folders as the library names them
-/// (the device syncs `Note` under `NOTE`, `Document` under `DOCUMENT`).
-const tablet_root = "/storage/emulated/0/";
-const tablet_roots = [_]struct { tablet: []const u8, library: []const u8 }{
-    .{ .tablet = "Note", .library = "NOTE/Note" },
-    .{ .tablet = "MyStyle", .library = "NOTE/MyStyle" },
-    .{ .tablet = "Document", .library = "DOCUMENT/Document" },
-};
-
-/// A tablet path in the library's own form, or null for one outside its storage.
-pub fn libraryPath(arena: std.mem.Allocator, tablet_path: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, tablet_path, tablet_root)) return null;
-    const rest = tablet_path[tablet_root.len..];
-    const cut = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
-    const top = rest[0..cut];
-    for (tablet_roots) |r| if (std.mem.eql(u8, r.tablet, top))
-        return std.fmt.allocPrint(arena, "{s}{s}", .{ r.library, rest[cut..] }) catch null;
-    return rest;
-}
-
 // ---- tests ----
 
 const testing = std.testing;
@@ -463,7 +443,7 @@ test "new ids look like the tablet's" {
     try testing.expectEqualStrings("deadbeef", id[0..8]);
 }
 
-test "a lassoed task's link: the tablet path becomes the library's, page 1-based" {
+test "a lassoed task's link: the tablet's path and its page, 1-based" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -471,9 +451,6 @@ test "a lassoed task's link: the tablet path becomes the library's, page 1-based
     const links = "eyJhcHBOYW1lIjoibm90ZSIsImZpbGVJZCI6IkYyMDI2MTEwMzA4MDUzMTc4MDY3NURtSHl1TlRQMGtMciIsImZpbGVQYXRoIjoiL3N0b3JhZ2UvZW11bGF0ZWQvMC9Ob3RlL0ZyYW7Dp2Fpcy9BMC5BMSDDiWNvbGUgRHVmbGUvQXBvc3RpbGEubm90ZSIsInBhZ2UiOjI3LCJwYWdlSWQiOiJQMjAyNjExMDMwODExMjAwMTA2ODVENTlhYWlWalNrTGEifQ==";
     const l = decodeLink(a, links).?;
     try testing.expectEqual(@as(i64, 27), l.page);
-    try testing.expectEqualStrings("NOTE/Note/Français/A0.A1 École Dufle/Apostila.note", libraryPath(a, l.path).?);
-    try testing.expectEqualStrings("INBOX/a.note", libraryPath(a, "/storage/emulated/0/INBOX/a.note").?);
-    try testing.expectEqualStrings("NOTE/MyStyle/x.note", libraryPath(a, "/storage/emulated/0/MyStyle/x.note").?);
-    try testing.expectEqual(@as(?[]const u8, null), libraryPath(a, "/sdcard/elsewhere.note"));
+    try testing.expectEqualStrings("/storage/emulated/0/Note/Français/A0.A1 École Dufle/Apostila.note", l.path);
     try testing.expectEqual(@as(?Link, null), decodeLink(a, "not base64 at all!"));
 }
