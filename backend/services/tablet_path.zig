@@ -34,6 +34,8 @@ pub fn fromStorage(arena: std.mem.Allocator, path: []const u8) ?[]const u8 {
     return path;
 }
 
+// ---- tests ----
+
 const testing = std.testing;
 
 test "absolute tablet paths: the cloud's roots, other folders as named, the rest none" {

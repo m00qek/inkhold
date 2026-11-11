@@ -39,6 +39,9 @@ const SourceVO = struct {
     fileId: ?u64 = null,
     /// 1-based.
     page: ?i64 = null,
+    /// The library's file is not the size it was when the passage was taken:
+    /// it has changed since, and the page may no longer hold the passage.
+    changed: bool = false,
 };
 
 const DigestVO = struct {
@@ -54,7 +57,7 @@ const DigestVO = struct {
     source: SourceVO,
     /// The handwritten note's md5, which names its page; absent: none.
     note: ?[]const u8,
-    /// Its comment changed here and no tablet has fetched it yet.
+    /// Its comment or category changed here and no tablet has fetched it yet.
     waiting: bool,
 };
 
@@ -87,12 +90,14 @@ pub fn list(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const groups = digest.groups(ctx.db, a, user_id) catch return serverError(ctx, req);
     var categories: std.ArrayList(CategoryVO) = .empty;
     // A category without an id can hold no digest (v24 gave every stored one an id).
-    for (groups) |g| if (g.uid) |uid| try categories.append(a, .{ .uid = uid, .name = g.name orelse "" });
+    // Nor one whose id is empty, which would pose as Uncategorized.
+    for (groups) |g| if (g.uid) |uid| if (uid.len > 0) try categories.append(a, .{ .uid = uid, .name = g.name orelse "" });
 
     const rows = digest.digestsPage(ctx.db, a, user_id, null, 1, std.math.maxInt(u32)) catch return serverError(ctx, req);
     const listed = digest.tabletListedAt(ctx.db, user_id) catch return serverError(ctx, req);
     const changed = digest.changedSince(ctx.db, a, user_id, listed) catch return serverError(ctx, req);
     const digests = try a.alloc(DigestVO, rows.len);
+    var files: LibraryFiles = .{ .ctx = ctx, .a = a, .user_id = user_id };
     for (rows, digests) |d, *o| {
         const src = digestweb.sourceOf(a, d);
         o.* = .{
@@ -103,7 +108,7 @@ pub fn list(ctx: *Context, req: *Request, params: Params) anyerror!void {
             .author = digestweb.authorOf(a, d),
             .createdAt = if (d.creation_time > 0) d.creation_time else d.created_at,
             .modifiedAt = if (d.last_modified_time > 0) d.last_modified_time else d.updated_at,
-            .source = .{ .kind = src.kind, .path = src.path, .page = src.page, .fileId = fileOf(ctx, a, user_id, src.path) },
+            .source = sourceVO(src, try files.of(src.path)),
             .note = digestweb.servableNote(d),
             .waiting = std.mem.indexOfScalar(u64, changed, d.id) != null,
         };
@@ -141,13 +146,24 @@ pub fn edit(ctx: *Context, req: *Request, params: Params) anyerror!void {
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
 
+fn sourceVO(src: digestweb.Source, file: ?LibraryFile) SourceVO {
+    return .{
+        .kind = src.kind,
+        .path = src.path,
+        .page = src.page,
+        .fileId = if (file) |f| f.id else null,
+        .changed = if (file) |f| (if (src.size) |s| s != f.size else false) else false,
+    };
+}
+
 /// GET /api/controlplane/digests/:id/note/:md5 -> the handwritten note's page,
 /// as SNPG bytes like any note page. `{md5}` pins the note, so the page is
 /// immutable; a replaced note is a new md5 and so a new URL. `manual_db_lock`,
 /// streamed unlocked.
 pub fn note(ctx: *Context, req: *Request, params: Params) anyerror!void {
-    const id = reply.pathId(params) orelse return badRequest(ctx, req);
-    const md5 = params.get("md5") orelse return badRequest(ctx, req);
+    // An id that is not a number names no digest, as on the other routes.
+    const id = reply.pathId(params) orelse return reply.notFound(req);
+    const md5 = params.get("md5") orelse return reply.notFound(req);
     if (!ctx.config.digest_sync) return reply.notFound(req);
     var svc = controlplane.ControlPlaneService.init(ctx.files);
 
@@ -194,9 +210,29 @@ fn nowMs(ctx: *Context) i64 {
     return std.Io.Clock.real.now(ctx.io).toMilliseconds();
 }
 
-/// The library's id for a file the tablet names by its storage path; null
-/// when it is not in the library (not synced, or moved since).
-fn fileOf(ctx: *Context, a: std.mem.Allocator, user_id: u64, path: ?[]const u8) ?u64 {
-    const p = tablet_path.fromStorage(a, path orelse return null) orelse return null;
-    return ctx.files.resolvePath(user_id, p) catch null;
-}
+const LibraryFile = struct { id: u64, size: u64 };
+
+/// The library's files that digests name by their tablet path, each looked
+/// up once per listing: a document's many digests share one.
+const LibraryFiles = struct {
+    ctx: *Context,
+    a: std.mem.Allocator,
+    user_id: u64,
+    seen: std.StringHashMapUnmanaged(?LibraryFile) = .empty,
+
+    /// Null when the file is not in the library (not synced, or moved since).
+    fn of(self: *LibraryFiles, path: ?[]const u8) std.mem.Allocator.Error!?LibraryFile {
+        const p = path orelse return null;
+        const got = try self.seen.getOrPut(self.a, p);
+        if (!got.found_existing) got.value_ptr.* = self.find(p);
+        return got.value_ptr.*;
+    }
+
+    fn find(self: *LibraryFiles, path: []const u8) ?LibraryFile {
+        const p = tablet_path.fromStorage(self.a, path) orelse return null;
+        const id = (self.ctx.files.resolvePath(self.user_id, p) catch return null) orelse return null;
+        const entry = (self.ctx.files.get(self.user_id, id) catch return null) orelse return null;
+        defer entry.deinit(self.ctx.gpa);
+        return .{ .id = id, .size = entry.size };
+    }
+};

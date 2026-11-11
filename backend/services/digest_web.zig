@@ -36,6 +36,9 @@ pub const Source = struct {
     path: ?[]const u8 = null,
     /// 1-based; null when the app did not say.
     page: ?i64 = null,
+    /// A document's size in bytes when the passage was taken (`source_size`),
+    /// so a file changed since can be told; null for a note, or when not said.
+    size: ?u64 = null,
 };
 
 /// Where `d` came from. Metadata the app did not write, or wrote in a shape
@@ -49,7 +52,8 @@ pub fn sourceOf(arena: std.mem.Allocator, d: digest.Digest) Source {
         .note => notePage(meta),
         .manual, .other => null,
     };
-    return .{ .kind = kind, .path = if (kind == .manual) null else path, .page = page };
+    const size: ?u64 = if (kind == .document) documentSize(meta) else null;
+    return .{ .kind = kind, .path = if (kind == .manual) null else path, .page = page, .size = size };
 }
 
 /// Who wrote what the digest quotes: the row's own `author`, else the one the
@@ -110,6 +114,15 @@ fn documentPage(arena: std.mem.Allocator, meta: ?std.json.ObjectMap) ?i64 {
     return if (page >= 0) page + 1 else null;
 }
 
+/// A document's `source_size`, a whole number of bytes.
+fn documentSize(meta: ?std.json.ObjectMap) ?u64 {
+    const m = meta orelse return null;
+    return switch (m.get("source_size") orelse return null) {
+        .integer => |i| if (i >= 0) @intCast(i) else null,
+        else => null,
+    };
+}
+
 /// A note's `note_page` is 1-based, sent as a string ("2").
 fn notePage(meta: ?std.json.ObjectMap) ?i64 {
     const m = meta orelse return null;
@@ -151,6 +164,7 @@ test "a PDF passage: its path, its page 1-based, the document's author" {
     try testing.expectEqual(Kind.document, s.kind);
     try testing.expectEqualStrings(d.source_path.?, s.path.?);
     try testing.expectEqual(@as(?i64, 1), s.page);
+    try testing.expectEqual(@as(?u64, 407277), s.size);
     try testing.expectEqualStrings("john", authorOf(a, d).?);
 }
 

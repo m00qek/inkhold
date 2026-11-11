@@ -32,7 +32,7 @@ const Listing = struct {
         categoryUid: []const u8,
         author: ?[]const u8 = null,
         createdAt: i64,
-        source: struct { kind: []const u8, path: ?[]const u8 = null, fileId: ?u64 = null, page: ?i64 = null },
+        source: struct { kind: []const u8, path: ?[]const u8 = null, fileId: ?u64 = null, page: ?i64 = null, changed: bool = false },
         note: ?[]const u8 = null,
         waiting: bool,
     } = &.{},
@@ -326,4 +326,42 @@ test "a digest moved to another category in the browser: the tablet reads it the
     defer l.deinit();
     try testing.expectEqualStrings("moved", l.value.digests[0].comment.?);
     try testing.expectEqualStrings("kb-phon", l.value.digests[0].categoryUid);
+}
+
+test "a source changed since its passage was taken is said so; a category with no id is never listed; a malformed id names no digest" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var b: Bufs = .{};
+    const ana = try person(f, &b, "ana");
+    // The Nomad's PDF was 407277 bytes when the passage was taken.
+    const folder = try f.files.ensureFolderPath(ana.id, "NOTE/MyStyle/Français");
+    const same = try gpa.alloc(u8, 407277);
+    defer gpa.free(same);
+    @memset(same, 'x');
+    _ = try putSeed(f, ana.id, folder, "La_phonetique_du_francais_Prof_Flavio_Adler.pdf", same);
+    _ = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", helpers.nomad_add);
+    {
+        var l = try listing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expect(l.value.digests[0].source.fileId != null);
+        try testing.expect(!l.value.digests[0].source.changed);
+    }
+    _ = try putSeed(f, ana.id, folder, "La_phonetique_du_francais_Prof_Flavio_Adler.pdf", "%PDF-1.4 a different edition");
+    {
+        var l = try listing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expect(l.value.digests[0].source.changed);
+    }
+
+    // A category row stored with an empty id would pose as Uncategorized.
+    try f.ctx.db.run("INSERT INTO digests (user_id, is_group, uid, name, md5_hash, created_at, updated_at) VALUES (?1, 1, '', 'Ghost', 'g', 0, 0);", &.{.{ .int = @intCast(ana.id) }});
+    {
+        var l = try listing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expectEqual(@as(usize, 0), l.value.categories.len);
+    }
+
+    try testing.expectEqual(@as(u16, 404), (try get(f, &b, "/api/controlplane/digests/abc/note/245354713d4c121a2368d9295f6379ca", &ana.web)).status);
+    try expectFailure((try put(f, &b, "/api/controlplane/digests/abc", &ana.web, "{\"comment\":\"x\"}")).body, "NO_SUCH_DIGEST");
 }

@@ -527,7 +527,7 @@ pub const ddl_v24 =
     \\WHERE is_group = 1 AND deleted = 0 AND (uid IS NULL OR uid = '');
 ;
 
-// v25: what the browser changed in a digest (its typed comment) that a tablet
+// v25: what the browser changed in a digest (its comment or its category) that a tablet
 // has not fetched yet, as To-Do's v21. A digest's `web_changed_at` is set by
 // the browser's edit and cleared when a tablet sends the digest;
 // `digest_sync_state` keeps, per account, when a tablet last asked for the
