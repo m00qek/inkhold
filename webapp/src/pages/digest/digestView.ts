@@ -3,7 +3,7 @@
 // groups (categories, or sources), the digests of the one picked, and the
 // digest open in a side panel. Everything that goes somewhere is a link to
 // its place, so a digest can be opened in a new tab or sent to someone. The
-// open digest's typed comment is the one thing that can be changed here.
+// open digest's typed comment and its category are what can be changed here.
 
 import { el } from "../../ui/dom";
 import { ICONS, svg } from "../../ui/icons";
@@ -12,6 +12,7 @@ import { digestHref, notePageHref } from "../../router";
 import { absoluteDate } from "../../ui/relativeTime";
 import { MAX_COMMENT, type Digest, type DigestSnapshot } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
+import type { DigestThumbs } from "./digestThumbs";
 import {
   categoryName, categoryRows, digestsIn, placePath, sameView, sourceGroups, sourceLine, SOURCE_SECTIONS, tabOf, viewTitle,
   type DigestPlace, type DigestView,
@@ -28,12 +29,15 @@ export interface DigestActions {
   draftComment(text: string): void;
   saveComment(d: Digest): void;
   cancelComment(): void;
+  /** Offer the categories to move the digest to, from `trigger`. */
+  moveTo(d: Digest, trigger: HTMLElement): void;
 }
 
 export interface DigestPaint {
   snap: DigestSnapshot;
   place: DigestPlace;
   ink: DigestInk;
+  thumbs: DigestThumbs;
   /** The comment being edited: its digest and the text so far; null: none. */
   editing: { id: string; draft: string } | null;
   /** A save in flight. */
@@ -192,9 +196,14 @@ export function panel(p: DigestPaint, a: DigestActions): HTMLElement | null {
   const note = p.ink.holder(d, "digest-panel__ink");
   note?.setAttribute("role", "img");
   note?.setAttribute("aria-label", "Handwritten note");
-  const facts: [string, string][] = [
+  const move = el("button", { class: "btn digest-panel__move", type: "button", id: "digest-move", "aria-haspopup": "menu", "aria-expanded": "false", text: "Move to…" });
+  move.addEventListener("click", (e) => {
+    e.stopPropagation();
+    a.moveTo(d, move);
+  });
+  const facts: [string, string | HTMLElement][] = [
     ["From", sourceLine(d)],
-    ["Category", categoryName(p.snap, d)],
+    ["Category", el("span", { class: "digest-panel__category" }, el("span", { text: categoryName(p.snap, d) }), move)],
     ...(d.author ? [["Author", d.author] as [string, string]] : []),
     ["Made", absoluteDate(d.createdAt)],
   ];
@@ -205,10 +214,12 @@ export function panel(p: DigestPaint, a: DigestActions): HTMLElement | null {
     { class: "digest-panel", "aria-labelledby": "digest-panel-title" },
     el("div", { class: "digest-panel__head" }, el("h2", { class: "digest-panel__title", id: "digest-panel-title", text: "Selected digest" }), close),
     el("blockquote", { class: "digest-panel__text" }, el("p", { text: d.text })),
+    // The passage, then where it is.
+    sourceLink(d, p, a),
     comment(d, p, a),
     note ? el("div", { class: "digest-panel__part" }, el("h3", { text: "Handwritten note" }), note) : null,
-    el("dl", { class: "digest-panel__facts" }, ...facts.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { text: v })])),
-    el("div", { class: "digest-panel__actions" }, openLink(d, a), copy),
+    el("dl", { class: "digest-panel__facts" }, ...facts.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", {}, v)])),
+    el("div", { class: "digest-panel__actions" }, copy),
     d.source.kind !== "manual" && d.source.fileId === null
       ? el("p", { class: "digest-panel__aside", text: "That file is not in the library, so it can't be opened here." })
       : null,
@@ -279,11 +290,19 @@ function commentForm(d: Digest, draft: string, busy: boolean, a: DigestActions, 
 }
 
 /** A link to the digest's source at its page, which the app opens itself; null when the library hasn't the file. */
-function openLink(d: Digest, a: DigestActions): HTMLElement | null {
+/**
+ * The page the digest was taken from, small, with its caption: one link to
+ * that page, which the app opens itself; null when the library hasn't the file.
+ */
+function sourceLink(d: Digest, p: DigestPaint, a: DigestActions): HTMLElement | null {
   const s = d.source;
   if (s.kind === "manual" || s.fileId === null) return null;
-  const text = s.page === null ? "Open the file" : `Open at page ${s.page}`;
-  const link = el("a", { class: "btn", href: notePageHref(s.fileId, Math.max(0, (s.page ?? 1) - 1)), text });
+  const link = el(
+    "a",
+    { class: "digest-panel__source", href: notePageHref(s.fileId, Math.max(0, (s.page ?? 1) - 1)) },
+    p.thumbs.holder(d, "digest-panel__thumb"),
+    el("span", { class: "digest-panel__caption", text: s.page === null ? "Open the file" : `Open at page ${s.page}` }),
+  );
   onPlainClick(link, () => a.openSource(d));
   return link;
 }

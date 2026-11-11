@@ -11,7 +11,7 @@ import { delay } from "./fake";
 import { fakeHash } from "./fakeHash";
 import { DEMO_GRAMMAR_ID, demoNotesOn } from "./demoNotes";
 import { ApiError } from "./errors";
-import { MAX_COMMENT, type Digest, type DigestCategory, type DigestSnapshot } from "./digestTypes";
+import { MAX_COMMENT, type Digest, type DigestCategory, type DigestEdit, type DigestSnapshot } from "./digestTypes";
 
 const DAY = 86_400_000;
 
@@ -113,13 +113,16 @@ export function fakeDigestMethods(latency: number) {
         waiting: digests.some((d) => d.waiting),
       };
     },
-    async digestSetComment(id: string, comment: string): Promise<void> {
+    async digestEdit(id: string, change: DigestEdit): Promise<void> {
       await delay(latency);
-      const text = comment.trim();
-      if ([...text].length > MAX_COMMENT) throw new ApiError("BAD_COMMENT", "a comment holds at most 2000 characters of text", 400);
+      const text = change.comment?.trim();
+      if (text !== undefined && [...text].length > MAX_COMMENT) throw new ApiError("BAD_COMMENT", "a comment holds at most 2000 characters of text", 400);
+      const uid = change.categoryUid;
+      if (uid !== undefined && uid !== "" && !categories.some((c) => c.uid === uid)) throw new ApiError("NO_SUCH_CATEGORY", "there is no such category", 404);
       const d = digests.find((x) => x.id === id);
       if (!d) throw new ApiError("NO_SUCH_DIGEST", "there is no such digest", 404);
-      d.comment = text === "" ? null : text;
+      if (text !== undefined) d.comment = text === "" ? null : text;
+      if (uid !== undefined) d.categoryUid = uid;
       d.waiting = true;
     },
     async digestNoteBytes(_id: string, md5: string): Promise<ArrayBuffer> {

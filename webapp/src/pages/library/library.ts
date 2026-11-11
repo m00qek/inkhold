@@ -48,6 +48,7 @@ import { createTodoPage } from "../todo/todoPage";
 import { createTodoInk } from "../todo/todoInk";
 import { createDigestPage } from "../digest/digestPage";
 import { createDigestInk } from "../digest/digestInk";
+import { createDigestThumbs } from "../digest/digestThumbs";
 import { parsePlace, placePath } from "../digest/digestModel";
 
 export const ADMIN_KEY = "admin";
@@ -379,6 +380,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     onChanged: () => ctx.rail.build(),
     go: (path) => go(digestHref(path)),
     ink: ctx.digestInk,
+    thumbs: createDigestThumbs({ api, thumbnails: ctx.thumbnails }),
     openFile: (id, page) => go(notePageHref(id, page)),
   });
   // Once at start, like To-Do: the rail shows Digest only when the server keeps digests.

@@ -6,13 +6,13 @@
 import { describe, it, expect, vi } from "vitest";
 import { createDigestPage, type DigestHost } from "../../src/pages/digest/digestPage";
 import type { DigestInk } from "../../src/pages/digest/digestInk";
-import type { DigestSnapshot } from "../../src/api/digestTypes";
+import type { DigestEdit, DigestSnapshot } from "../../src/api/digestTypes";
 
 const ink: DigestInk = { picture: async () => null, holder: () => null };
 
-function host(digests: () => Promise<DigestSnapshot>, digestSetComment: (id: string, c: string) => Promise<void> = async () => {}): DigestHost & { changed: number; toasts: string[] } {
+function host(digests: () => Promise<DigestSnapshot>, digestEdit: (id: string, c: DigestEdit) => Promise<void> = async () => {}): DigestHost & { changed: number; toasts: string[] } {
   const h = {
-    api: { digests, digestSetComment },
+    api: { digests, digestEdit },
     content: document.createElement("div"),
     gallery: document.createElement("div"),
     crumbs: document.createElement("div"),
@@ -25,6 +25,7 @@ function host(digests: () => Promise<DigestSnapshot>, digestSetComment: (id: str
     onChanged: () => void h.changed++,
     go: () => {},
     ink,
+    thumbs: { holder: () => null },
     openFile: () => {},
     changed: 0,
     toasts: [] as string[],
@@ -97,8 +98,8 @@ describe("the Digest page", () => {
       async () => structuredClone(server),
       async (id, c) => {
         if (refuse) throw new Error("offline");
-        saved.push(`${id}:${c}`);
-        server = { ...server, waiting: true, digests: server.digests.map((d) => (d.id === id ? { ...d, comment: c, waiting: true } : d)) };
+        saved.push(`${id}:${c.comment}`);
+        server = { ...server, waiting: true, digests: server.digests.map((d) => (d.id === id ? { ...d, comment: c.comment ?? null, waiting: true } : d)) };
       },
     );
     const page = createDigestPage(h);

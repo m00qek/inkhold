@@ -93,6 +93,41 @@ test.describe("Digest", () => {
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/comment.png` });
   });
 
+  test("Move to… moves the digest to another category; it waits for the tablet, open where it was", async ({ page }) => {
+    await openDigest(page, "/category/c0ffee00000000000000000000000001/d/2");
+    const p = page.locator(".digest-panel");
+    await p.getByRole("button", { name: "Move to…" }).click();
+    const menu = page.locator(".menu__pop--float.is-open");
+    await expect(menu.getByRole("menuitemradio", { name: "Home" })).toHaveAttribute("aria-checked", "true");
+    await expect(menu.getByRole("menuitemradio")).toHaveText(["Uncategorized", "Home", "Kitchen", "Reading"]);
+    await menu.getByRole("menuitemradio", { name: "Kitchen" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Moved to Kitchen." })).toBeVisible();
+    await expect(p.locator(".digest-panel__category")).toContainText("Kitchen");
+    await expect(p).toContainText("Waiting for the tablet");
+    // Still open where it was; it has left Home's list.
+    await expect(page).toHaveURL(/category\/c0ffee00000000000000000000000001\/d\/2$/);
+    await expect(card(page, "Descale")).toHaveCount(0);
+    await expect(p.getByRole("button", { name: "Move to…" })).toBeFocused();
+    const kitchen = page.getByRole("navigation", { name: "Categories" }).getByRole("link", { name: /^Kitchen/ });
+    await expect(kitchen.locator(".digest-group__count")).toHaveText("2");
+  });
+
+  test("the open digest shows its source page, the link to it", async ({ page }) => {
+    await openDigest(page, "/d/5");
+    const link = page.locator(".digest-panel").getByRole("link", { name: "Open at page 2" });
+    await expect(link.locator(".digest-panel__thumb.has-thumb img")).toBeVisible();
+    await link.click();
+    await expect(page).toHaveURL(/#\/note\/121\/page\/2$/);
+  });
+
+  test("a PDF digest's source page is drawn too", async ({ page }) => {
+    await signedIn(page);
+    await servePdf(page, readFileSync(new URL("../fixtures/demo/deutsch-lernen.pdf", import.meta.url)));
+    await page.goto("/#/digest/d/1");
+    await expect(page.locator(".digest-panel__thumb.has-thumb img")).toBeVisible({ timeout: 20_000 });
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/source-thumb.png` });
+  });
+
   test("Open at page opens the source there, and Back returns to the digest", async ({ page }) => {
     await openDigest(page, "/d/2");
     await page.locator(".digest-panel").getByRole("link", { name: "Open at page 2" }).click();

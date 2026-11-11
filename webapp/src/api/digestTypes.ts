@@ -1,6 +1,6 @@
 // The person's digests, as the browser sees them: what the tablet's Digest app
-// synced (`/api/controlplane/digests`). The browser changes one thing, a
-// digest's typed comment, which the tablet takes at its next sync.
+// synced (`/api/controlplane/digests`). The browser changes two things, a
+// digest's typed comment and its category, which the tablet takes at its next sync.
 
 /** A category the person made on the tablet. Uncategorized is not one: a digest with `categoryUid` "" is in it. */
 export interface DigestCategory {
@@ -37,6 +37,14 @@ export interface Digest {
   note: string | null;
   /** Its comment changed here and no tablet has fetched it yet. */
   waiting: boolean;
+}
+
+/** What an edit changes; an absent field stays. */
+export interface DigestEdit {
+  /** "" removes the comment. */
+  comment?: string;
+  /** A category's uid; "" is Uncategorized. */
+  categoryUid?: string;
 }
 
 /** The app's own limit on a comment, in characters. */

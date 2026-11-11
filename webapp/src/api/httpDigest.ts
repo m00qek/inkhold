@@ -1,7 +1,7 @@
 // The person's digests over HTTP (`/api/controlplane/digests…`).
 
 import { rawFetch, request } from "./request";
-import type { Digest, DigestSnapshot, DigestSourceKind } from "./digestTypes";
+import type { Digest, DigestEdit, DigestSnapshot, DigestSourceKind } from "./digestTypes";
 
 type Raw = Partial<{
   enabled: boolean;
@@ -57,8 +57,8 @@ export const digestMethods = {
   async digests(): Promise<DigestSnapshot> {
     return digestsOf(await request<Raw>("GET", "/api/controlplane/digests"));
   },
-  async digestSetComment(id: string, comment: string): Promise<void> {
-    await request("PUT", `/api/controlplane/digests/${enc(id)}`, { comment });
+  async digestEdit(id: string, change: DigestEdit): Promise<void> {
+    await request("PUT", `/api/controlplane/digests/${enc(id)}`, change);
   },
   async digestNoteBytes(id: string, md5: string): Promise<ArrayBuffer> {
     // No `?v=`: `:md5` already pins the note.

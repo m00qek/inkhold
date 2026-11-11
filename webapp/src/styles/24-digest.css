@@ -405,6 +405,51 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
+/* The source page, small, and its caption: one link to that page. Room is
+   kept for the page while it is drawn, so nothing below it moves. */
+.digest-panel__source {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  text-decoration: none;
+}
+.digest-panel__source:hover {
+  border-color: var(--ink-soft);
+  background: var(--hover-fill);
+}
+.digest-panel__source:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.digest-panel__thumb {
+  flex: none;
+  display: block;
+  width: 72px;
+  aspect-ratio: 3 / 4;
+  border: 1px solid var(--line);
+  background: var(--desk);
+  overflow: hidden;
+}
+.digest-panel__thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--sheet);
+}
+.digest-panel__caption {
+  font-weight: 500;
+}
+.digest-panel__category {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+}
 .digest-panel__actions {
   display: flex;
   flex-wrap: wrap;

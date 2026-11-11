@@ -7,14 +7,16 @@
 // someone is looking, but never repaints over a comment being written.
 
 import { el, keepingFocus } from "../../ui/dom";
+import { openBarMenu, type BarRow } from "../../ui/barMenu";
 import type { Api } from "../../api/types";
 import type { Digest, DigestSnapshot } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
-import { placePath, sameView, type DigestPlace } from "./digestModel";
+import type { DigestThumbs } from "./digestThumbs";
+import { categoryRows, placePath, sameView, type DigestPlace } from "./digestModel";
 import { groups, list, notice, panel, placeTitle, tabs, type DigestActions } from "./digestView";
 
 export interface DigestHost {
-  api: Pick<Api, "digests" | "digestSetComment">;
+  api: Pick<Api, "digests" | "digestEdit">;
   content: HTMLElement;
   gallery: HTMLElement;
   crumbs: HTMLElement;
@@ -31,6 +33,8 @@ export interface DigestHost {
   /** Go to a place (its `placePath`). */
   go(path: string): void;
   ink: DigestInk;
+  /** The open digest's source page, small. */
+  thumbs: DigestThumbs;
   /** Open a library file at a page (0-based). */
   openFile(id: string, page: number): void;
 }
@@ -73,7 +77,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
    * Where focus goes after the next paint: the panel just opened, the card of
    * the one just closed, or the comment's box or its Edit button.
    */
-  let focusNext: "panel" | "comment-box" | "comment-edit" | { card: string } | null = null;
+  let focusNext: "panel" | "comment-box" | "comment-edit" | "move" | { card: string } | null = null;
 
   async function load(): Promise<void> {
     const mine = ++loadToken;
@@ -129,12 +133,23 @@ export function createDigestPage(host: DigestHost): DigestPage {
       focusNext = "comment-edit";
       paint();
     },
+    moveTo(d: Digest, trigger: HTMLElement) {
+      if (!snap || busy) return;
+      // Uncategorized and the person's categories; All is a view, not a place to be.
+      const rows: BarRow[] = [
+        { kind: "section", title: "Move to" },
+        ...categoryRows(snap)
+          .filter((r): r is typeof r & { uid: string } => r.uid !== null)
+          .map<BarRow>((r) => ({ kind: "item", label: r.name, checked: r.uid === d.categoryUid, onSelect: () => move(d, r.uid, r.name) })),
+      ];
+      openBarMenu(trigger, rows);
+    },
     saveComment(d: Digest) {
       if (!editing || busy) return;
       const text = editing.draft;
       busy = true;
       paint();
-      host.api.digestSetComment(d.id, text).then(
+      host.api.digestEdit(d.id, { comment: text }).then(
         async () => {
           busy = false;
           editing = null;
@@ -151,6 +166,25 @@ export function createDigestPage(host: DigestHost): DigestPage {
     },
   };
 
+  /** One move: the call, then a fresh read; the digest stays open where it is. */
+  function move(d: Digest, uid: string, name: string): void {
+    if (uid === d.categoryUid || busy) return;
+    busy = true;
+    focusNext = "move";
+    host.api.digestEdit(d.id, { categoryUid: uid }).then(
+      async () => {
+        busy = false;
+        host.toast(`Moved to ${name}.`);
+        await load();
+      },
+      (e: unknown) => {
+        busy = false;
+        if (!host.handled(e)) host.toast("Couldn't move the digest. Check your connection and try again.");
+        paint();
+      },
+    );
+  }
+
   function paint(): void {
     if (!open_) return;
     chrome(true);
@@ -164,7 +198,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
         root.replaceChildren(notice("Digest sync is off on this server", "The tablet's digests are not kept here. An administrator can turn it on with digest_sync in the server's config.", null));
         return;
       }
-      const p = { snap, place, ink: host.ink, editing, busy };
+      const p = { snap, place, ink: host.ink, thumbs: host.thumbs, editing, busy };
       const side = panel(p, actions);
       root.replaceChildren(
         tabs(place, actions),
@@ -175,6 +209,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
     focusNext = null;
     if (next === "panel") root.querySelector<HTMLElement>(".digest-panel__close")?.focus();
     else if (next === "comment-edit") root.querySelector<HTMLElement>("#digest-comment-edit")?.focus();
+    else if (next === "move") root.querySelector<HTMLElement>("#digest-move")?.focus();
     else if (next === "comment-box") {
       const box = root.querySelector<HTMLTextAreaElement>("#digest-comment");
       box?.focus();
