@@ -203,9 +203,9 @@ trusting it.
   else: the handwritten note stays the tablet's. The category is
   `parentUniqueIdentifier`, which the app copies as the digest's
   `knowledgeBaseUniqueAttribute`, Uncategorized when it lacks that category;
-  the server only moves a digest to one of the account's live categories. The tablet asking for the
-  manifest is what clears "Waiting for the tablet", which puts that route on
-  the writer.
+  the server only moves a digest to one of the account's live categories. The
+  tablet asking for the manifest is what clears "Waiting for the tablet", which
+  puts that route on the writer.
 - **Retain locally** for digests is the provider URI
   `knowledge/update_all_to_add_state`: every digest and every category but the
   default one goes back to server id 0 and state new, so the next sync uploads
