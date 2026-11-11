@@ -40,6 +40,7 @@ else
 const tokenizer = @import("schema").fts_tokenizer;
 
 const sqlite_core_fuzzy = @import("sqlite_core_fuzzy.zig");
+pub const q = @import("sqlite_core_query.zig");
 
 /// Bump when `index_ddl` or `tokenizer` changes: stored images go stale with
 /// nothing server-side moving.
@@ -65,6 +66,9 @@ var image: ?[*]u8 = null;
 var image_len: usize = 0;
 /// Bound with `SQLITE_STATIC`, so it must outlive its statement.
 pub var match: std.ArrayList(u8) = .empty;
+/// `match` with quoted phrases held to their order, for the text rows; empty
+/// when the query quotes none.
+pub var phrase_match: std.ArrayList(u8) = .empty;
 var hits: std.ArrayList(u32) = .empty;
 var errbuf: std.ArrayList(u8) = .empty;
 /// What the typo ladder substituted, `typed \t matched \n`; cleared by every
@@ -72,6 +76,17 @@ var errbuf: std.ArrayList(u8) = .empty;
 pub var expansion: std.ArrayList(u8) = .empty;
 
 const no_db: i32 = -c.SQLITE_MISUSE;
+
+/// A rowid carries its kind in its top bits, `rowid >> kind_shift`, so one
+/// query answers every kind with a limit and an exact total of its own. Kind
+/// 0 is a document page, a set of words; the others are running text.
+const kind_shift = 28;
+/// Under 2^31 in all, so `idx_hit`'s i32 holds every rowid.
+const kinds = 8;
+const text_base: i64 = 1 << kind_shift;
+const rowid_end: i64 = kinds << kind_shift;
+var kind_totals: [kinds]u32 = @splat(0);
+var kind_hits: [kinds]u32 = @splat(0);
 
 /// Built without `-DSQLITE_TEMP_STORE=3`; outside SQLite's result-code range.
 const bad_build: i32 = -100;
@@ -157,6 +172,7 @@ export fn idx_close() void {
     }
     hits.clearRetainingCapacity();
     match.clearRetainingCapacity();
+    phrase_match.clearRetainingCapacity();
     expansion.clearRetainingCapacity();
 }
 
@@ -175,7 +191,8 @@ export fn idx_commit() i32 {
     return -rc;
 }
 
-/// `doc_id` is the rowid; a repeat is a constraint failure, never an overwrite.
+/// `doc_id` is the rowid, its kind in the top bits (`kind_shift`); a repeat is
+/// a constraint failure, never an overwrite.
 export fn idx_add(doc_id: u32, ptr: [*]const u8, len: usize) i32 {
     const h = db orelse return no_db;
     if (add_stmt == null) {
@@ -208,24 +225,14 @@ export fn idx_add(doc_id: u32, ptr: [*]const u8, len: usize) i32 {
     return 0;
 }
 
-/// Appends `term` as a quoted FTS5 string, doubling `"` so the expression is
-/// safe regardless of tokenizer.
-pub fn appendQuoted(term: []const u8) !void {
-    try match.append(gpa, '"');
-    for (term) |ch| {
-        if (ch == '"') try match.append(gpa, '"');
-        try match.append(gpa, ch);
-    }
-    try match.append(gpa, '"');
-}
-
-/// Builds `match` from the raw query, folding each token through the index's
-/// tokenizer. Terms are ANDed; only the last gets `*`, and not after trailing
-/// whitespace. A token that folds to nothing contributes nothing.
+/// Builds `match` and, when the query quotes a phrase, `phrase_match` from
+/// the raw query, folding each token through the index's tokenizer
+/// (`sqlite_core_query.zig`). A token that folds to nothing contributes nothing.
 pub fn buildMatch(h: *c.sqlite3, query: []const u8) i32 {
     match.clearRetainingCapacity();
+    phrase_match.clearRetainingCapacity();
 
-    var rc = c.sqlite3_exec(h, fold_ddl, null, null, null);
+    const rc = c.sqlite3_exec(h, fold_ddl, null, null, null);
     if (rc != c.SQLITE_OK) {
         setErrDb();
         return -rc;
@@ -233,22 +240,11 @@ pub fn buildMatch(h: *c.sqlite3, query: []const u8) i32 {
 
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    var terms: std.ArrayList([]const u8) = .empty;
-
-    var it = std.mem.tokenizeAny(u8, query, " \t\r\n\x0b\x0c");
-    while (it.next()) |tok| {
-        terms.clearRetainingCapacity();
-        rc = foldToken(h, arena, tok, &terms);
-        if (rc != 0) return rc;
-        for (terms.items) |term| {
-            if (match.items.len != 0) match.append(gpa, ' ') catch return -c.SQLITE_NOMEM;
-            appendQuoted(term) catch return -c.SQLITE_NOMEM;
-        }
-    }
-
-    const open_ended = query.len != 0 and !std.ascii.isWhitespace(query[query.len - 1]);
-    if (match.items.len != 0 and open_ended) match.append(gpa, '*') catch return -c.SQLITE_NOMEM;
+    var s: q.Scan = undefined;
+    const rc2 = q.scan(h, arena_state.allocator(), foldToken, query, &s);
+    if (rc2 != 0) return rc2;
+    q.emit(gpa, &match, s, null, false) catch return -c.SQLITE_NOMEM;
+    if (s.hasPhrase()) q.emit(gpa, &phrase_match, s, null, true) catch return -c.SQLITE_NOMEM;
     return 0;
 }
 
@@ -307,10 +303,12 @@ pub fn foldToken(
     return 0;
 }
 
-/// Returns the exact total; `idx_hit(i)` reads the first `min(total, limit)`.
+/// Returns the exact total; `idx_hit(i)` reads the buffered hits, up to
+/// `limit` of each kind (`idx_kind_total`), and -1 past them.
 pub export fn idx_query(ptr: [*]const u8, len: usize, limit: u32) i32 {
     const h = db orelse return no_db;
     hits.clearRetainingCapacity();
+    @memset(&kind_totals, 0);
     expansion.clearRetainingCapacity();
 
     const rc0 = buildMatch(h, ptr[0..len]);
@@ -320,19 +318,33 @@ pub export fn idx_query(ptr: [*]const u8, len: usize, limit: u32) i32 {
     return runMatch(h, limit);
 }
 
-/// Steps `match`, buffering `limit` rowids and returning the exact total;
-/// shared by the exact and fuzzy passes.
+/// Steps `match` (and `phrase_match` over the text rows), buffering up to
+/// `limit` rowids of each kind and returning the exact total; shared by the
+/// exact and fuzzy passes.
 pub fn runMatch(h: *c.sqlite3, limit: u32) i32 {
     hits.clearRetainingCapacity();
+    @memset(&kind_totals, 0);
+    @memset(&kind_hits, 0);
+    if (phrase_match.items.len == 0) return stepRange(h, match.items, 0, rowid_end, limit);
+    const pages = stepRange(h, match.items, 0, text_base, limit);
+    if (pages < 0) return pages;
+    const text = stepRange(h, phrase_match.items, text_base, rowid_end, limit);
+    if (text < 0) return text;
+    return pages + text;
+}
 
+/// One MATCH over the rowids `[lo, hi)`, best ranked first.
+fn stepRange(h: *c.sqlite3, expr: []const u8, lo: i64, hi: i64, limit: u32) i32 {
     var stmt: ?*c.sqlite3_stmt = null;
-    var rc = c.sqlite3_prepare_v2(h, "SELECT rowid FROM docs WHERE docs MATCH ?1 ORDER BY rank", -1, &stmt, null);
+    var rc = c.sqlite3_prepare_v2(h, "SELECT rowid FROM docs WHERE docs MATCH ?1 AND rowid >= ?2 AND rowid < ?3 ORDER BY rank", -1, &stmt, null);
     if (rc != c.SQLITE_OK) {
         setErrDb();
         return -rc;
     }
     defer _ = c.sqlite3_finalize(stmt);
-    rc = c.sqlite3_bind_text(stmt, 1, match.items.ptr, @intCast(match.items.len), null);
+    rc = c.sqlite3_bind_text(stmt, 1, expr.ptr, @intCast(expr.len), null);
+    if (rc == c.SQLITE_OK) rc = c.sqlite3_bind_int64(stmt, 2, lo);
+    if (rc == c.SQLITE_OK) rc = c.sqlite3_bind_int64(stmt, 3, hi);
     if (rc != c.SQLITE_OK) {
         setErrDb();
         return -rc;
@@ -346,12 +358,45 @@ pub fn runMatch(h: *c.sqlite3, limit: u32) i32 {
             setErrDb();
             return -rc;
         }
-        if (hits.items.len < limit) {
-            hits.append(gpa, @intCast(c.sqlite3_column_int64(stmt, 0))) catch return -c.SQLITE_NOMEM;
+        const rowid: u32 = @intCast(c.sqlite3_column_int64(stmt, 0));
+        const kind = rowid >> kind_shift;
+        if (kind_hits[kind] < limit) {
+            hits.append(gpa, rowid) catch return -c.SQLITE_NOMEM;
+            kind_hits[kind] += 1;
         }
+        kind_totals[kind] += 1;
         total += 1;
     }
     return total;
+}
+
+/// The last query's exact total for one kind of row (`rowid >> 28`).
+export fn idx_kind_total(kind: u32) i32 {
+    if (kind >= kinds) return 0;
+    return @intCast(kind_totals[kind]);
+}
+
+/// Removes one row: a to-do or digest changed, a name went. A missing rowid is no error.
+export fn idx_delete(rowid: u32) i32 {
+    const h = db orelse return no_db;
+    var s: ?*c.sqlite3_stmt = null;
+    var rc = c.sqlite3_prepare_v2(h, "DELETE FROM docs WHERE rowid = ?1", -1, &s, null);
+    if (rc != c.SQLITE_OK) {
+        setErrDb();
+        return -rc;
+    }
+    defer _ = c.sqlite3_finalize(s);
+    rc = c.sqlite3_bind_int64(s, 1, @intCast(rowid));
+    if (rc != c.SQLITE_OK) {
+        setErrDb();
+        return -rc;
+    }
+    rc = c.sqlite3_step(s);
+    if (rc != c.SQLITE_DONE) {
+        setErrDb();
+        return -rc;
+    }
+    return 0;
 }
 
 export fn idx_hit(i: u32) i32 {

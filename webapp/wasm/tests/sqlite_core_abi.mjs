@@ -64,7 +64,8 @@ function query(text, limit = 10) {
   const total = e.idx_query(buf[0], buf[1], limit);
   const hits = [];
   if (total >= 0) {
-    for (let i = 0; i < Math.min(total, limit); i++) hits.push(e.idx_hit(i));
+    // Up to `limit` of each kind: read until the -1 past the last.
+    for (let i = 0, h = e.idx_hit(0); i < total && h >= 0; h = e.idx_hit(++i)) hits.push(h);
   }
   drop(buf);
   return { total, hits, expansion: expansionText() };
@@ -75,7 +76,8 @@ function fuzzy(text, limit = 10) {
   const total = e.idx_fuzzy(buf[0], buf[1], limit);
   const hits = [];
   if (total >= 0) {
-    for (let i = 0; i < Math.min(total, limit); i++) hits.push(e.idx_hit(i));
+    // Up to `limit` of each kind: read until the -1 past the last.
+    for (let i = 0, h = e.idx_hit(0); i < total && h >= 0; h = e.idx_hit(++i)) hits.push(h);
   }
   drop(buf);
   return { total, hits, expansion: expansionText() };
@@ -100,7 +102,7 @@ function expansionText() {
 for (const name of [
   "idx_alloc", "idx_free", "idx_schema_version",
   "idx_open", "idx_close", "idx_begin", "idx_add", "idx_commit",
-  "idx_query", "idx_hit",
+  "idx_query", "idx_hit", "idx_kind_total", "idx_delete",
   "idx_fuzzy", "idx_expansion_ptr", "idx_expansion_len",
   "idx_serialize", "idx_image_ptr", "idx_image_alloc", "idx_deserialize",
   "idx_errmsg_ptr", "idx_errmsg_len",
@@ -262,6 +264,60 @@ equal(fuzzy("xilofone ").expansion, "", "...and reports no substitution");
     if (query(i % 2 === 0 ? "reunião " : "japonesa ").total !== (i % 2 === 0 ? 2 : 1)) drifted += 1;
   }
   equal(drifted, 0, "the query fold does not accumulate across 200 searches");
+}
+
+// ---- kinds of row ----
+// A rowid's top bits are its kind (`rowid >> 28`); kind 0 is a document page,
+// a set of words, and the others are running text.
+const TEXT = 1 << 28;
+const TODO = 2 << 28;
+{
+  e.idx_begin();
+  for (const [id, body] of [
+    // A page whose words are those of the phrase, out of order.
+    [16, "set chart color"],
+    [TEXT + 1, "color chart for the kitchen"],
+    [TODO + 1, "chart the color of the kitchen"],
+    [TODO + 2, "paint the kitchen"],
+  ]) {
+    const buf = put(body);
+    equal(e.idx_add(id, buf[0], buf[1]), 0, `row ${id} is indexed`);
+    drop(buf);
+  }
+  e.idx_commit();
+
+  const all = query("kitchen ");
+  equal(all.total, 3, "one query answers every kind of row");
+  equal(e.idx_kind_total(0), 0, "...and counts each kind on its own: no page says kitchen");
+  equal(e.idx_kind_total(1), 1, "...one text row");
+  equal(e.idx_kind_total(2), 2, "...two to-dos");
+  equal(e.idx_kind_total(9), 0, "a kind past the last is none");
+
+  const capped = query("kitchen ", 1);
+  equal(capped.total, 3, "the limit caps what is buffered, per kind, not the total");
+  equal(capped.hits.length, 2, "...one hit of each kind that has any");
+
+  // In order on text rows; only the words on a page (phrase.ts checks there).
+  const phrase = query('"color chart" ');
+  equal(phrase.hits.slice().sort((a, b) => a - b).join(","), `16,${TEXT + 1}`, "a quoted phrase finds the text row holding it in order, and every page with its words");
+  equal(e.idx_kind_total(2), 0, "...but not the to-do with the words apart");
+  equal(query('"color char').hits.includes(TEXT + 1), true, "a phrase still being typed matches its last word as a start");
+  equal(query('"color char" ').hits.includes(TEXT + 1), false, "...and a closed one matches it whole");
+  equal(query('"kitchen" paint').total, 1, "a single quoted word is just a word");
+  equal(query('"the kitchen" paint').hits[0], TODO + 2, "a phrase ANDs with the words beside it");
+
+  // The typo ladder keeps the order: its best near-miss stands in.
+  {
+    const r = fuzzy('"colour chart" ');
+    equal(r.expansion, "colour>color", "a misspelt word in a phrase is corrected");
+    check(r.hits.includes(TEXT + 1) && !r.hits.includes(TODO + 1), "...and the phrase still holds its order", r.hits.join(","));
+  }
+
+  equal(e.idx_delete(TODO + 1), 0, "a row is deleted by its rowid");
+  equal(query("kitchen ").total, 2, "...and no longer answers");
+  equal(e.idx_delete(TODO + 1), 0, "deleting a row already gone is no error");
+  for (const id of [16, TEXT + 1, TODO + 2]) e.idx_delete(id);
+  equal(query("kitchen ").total, 0, "the kinds' rows are gone again");
 }
 
 // ---- the .spd half of the same instance ----
