@@ -14,7 +14,7 @@ export { fakeFileHash } from "./fakeHash";
 import { createBinFake } from "./binFake";
 import { LAYERED_NOTE_ID, layeredPageLayers, layeredPagePayload, withLayeredPageLayers } from "./layeredFixture";
 import { fakeFileHash } from "./fakeHash";
-import { demoMeta, demoNotesOn, demoPageBytes, demoPageText, demoSummaries, isDemoNote } from "./demoNotes";
+import { DEMO_GRAMMAR_ID, demoMeta, demoNotesOn, demoPageBytes, demoPageText, demoSummaries, isDemoNote } from "./demoNotes";
 import { MARKED_PDF_ID, PDF_MARK_ID, PDF_MARK_SOURCE_PAGE, RECOGNIZED_FROM, fakeTextHash, pages, fakeText, fakePageLinks, note, UNSCALED_NOTE_ID, fakeWords, fakeSize, FAKE_UPLOAD_HEADROOM, uploadSteps, UPLOAD_ID_BASE, NOW, versionPageCount, baseVersions, CHILDREN, ALL_NOTES, noteSummary, pathTo, withItemCount } from "./fakeFixtures";
 
 /** Upload ids, per module; the counter only grows. */
@@ -57,7 +57,10 @@ function markMeta(): NoteMeta {
   };
 }
 
-/** The demo's real notebooks join the Note folder once, ahead of the fixtures (`demoNotes.ts`). */
+/**
+ * The demo's real notebooks join the Note folder once, ahead of the fixtures,
+ * and its German grammar sheet the Document folder (`demoNotes.ts`).
+ */
 let demoNotesAdded = false;
 function addDemoNotes(): void {
   if (demoNotesAdded || !demoNotesOn()) return;
@@ -65,6 +68,9 @@ function addDemoNotes(): void {
   const rows = demoSummaries(NOW);
   CHILDREN.note = [...rows, ...(CHILDREN.note ?? [])];
   for (const r of rows) ALL_NOTES[r.id] = r;
+  const grammar = note(DEMO_GRAMMAR_ID, "Deutsch lernen — Grammatik", 3, NOW - 3 * 86_400_000, { fileType: "pdf" });
+  CHILDREN.document = [grammar, ...(CHILDREN.document ?? [])];
+  ALL_NOTES[grammar.id] = grammar;
 }
 
 export function createFakeApi(opts: FakeApiOptions = {}): Api {

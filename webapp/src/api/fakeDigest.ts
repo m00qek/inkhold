@@ -2,9 +2,14 @@
 // synced them, with sources in the fake library (`fakeFixtures.ts`) so
 // "Open at page" lands somewhere, one source the library lacks, and a
 // category with nothing in it.
+//
+// The demo and the docs' screenshots get their own set (`demoNotes.ts`):
+// someone learning German, quoting the demo's grammar sheet word for word.
+// The e2e suite keeps the first set, whose texts its tests read.
 
 import { delay } from "./fake";
 import { fakeHash } from "./fakeHash";
+import { DEMO_GRAMMAR_ID, demoNotesOn } from "./demoNotes";
 import type { Digest, DigestCategory, DigestSnapshot } from "./digestTypes";
 
 const DAY = 86_400_000;
@@ -16,10 +21,13 @@ const CATEGORIES: DigestCategory[] = [
 ];
 const [HOME, KITCHEN] = CATEGORIES.map((c) => c.uid) as [string, string];
 
-/** A digest's handwritten note: its md5, which the fake bytes answer to. */
-export const FAKE_NOTE_MD5 = fakeHash("digest-note-1").padEnd(32, "0").slice(0, 32);
+/** A handwritten note's md5, from a seed: the fake renderer draws each its own. */
+const noteMd5 = (seed: string) => fakeHash(seed).padEnd(32, "0").slice(0, 32);
 
-function digests(now: number): Digest[] {
+/** The e2e set's one handwritten note. */
+export const FAKE_NOTE_MD5 = noteMd5("digest-note-1");
+
+function testDigests(now: number): Digest[] {
   const at = (days: number) => now - days * DAY;
   return [
     {
@@ -60,12 +68,38 @@ function digests(now: number): Digest[] {
   ];
 }
 
+const DEMO_CATEGORIES: DigestCategory[] = [
+  { uid: "de000000000000000000000000000001", name: "Grammar" },
+  { uid: "de000000000000000000000000000002", name: "Phrases for Berlin" },
+];
+const [GRAMMAR, PHRASES] = DEMO_CATEGORIES.map((c) => c.uid) as [string, string];
+
+/** The demo's German, in the grammar sheet's own words and pages. */
+function demoDigests(now: number): Digest[] {
+  const at = (days: number) => now - days * DAY;
+  const sheet = (page: number) => ({ kind: "document" as const, path: "Document/Deutsch lernen — Grammatik.pdf", fileId: DEMO_GRAMMAR_ID, page });
+  const typed = { kind: "manual" as const, path: null, fileId: null, page: null };
+  const base = { author: null, categoryUid: GRAMMAR };
+  return [
+    { ...base, id: "11", text: "Im Deutschen hat jedes Nomen ein Geschlecht: der, die oder das.", comment: "Learn every noun with its article, never alone.", createdAt: at(3), note: noteMd5("demo-articles"), source: sheet(1) },
+    { ...base, id: "12", text: "Der Plural hat für alle drei Geschlechter denselben Artikel: die.", comment: null, createdAt: at(3) + 60_000, note: null, source: sheet(1) },
+    { ...base, id: "13", text: "Im Nebensatz steht das Verb am Ende.", comment: null, createdAt: at(2), note: noteMd5("demo-weil"), source: sheet(2) },
+    { ...base, id: "14", text: "Trennbare Verben teilen sich: Ich rufe dich morgen an.", comment: "anrufen, aufstehen, einkaufen: the prefix goes to the end.", createdAt: at(2) + 60_000, note: null, source: sheet(2) },
+    { ...base, id: "15", text: "Verben der Bewegung bilden das Perfekt meist mit sein.", comment: "sein, not haben!", createdAt: at(1), note: noteMd5("demo-perfekt"), source: sheet(3) },
+    { ...base, id: "16", categoryUid: PHRASES, text: "Entschuldigung, wo ist der Bahnhof?", comment: "Excuse me, where is the station?", createdAt: at(1) + 60_000, note: null, source: typed },
+    { ...base, id: "17", categoryUid: PHRASES, text: "Ich hätte gern einen Kaffee, bitte.", comment: "I'd like a coffee, please.", createdAt: at(0.2), note: noteMd5("demo-kaffee"), source: typed },
+    { ...base, id: "18", categoryUid: "", text: "Wir haben gestern Kaffee getrunken.", comment: null, createdAt: at(0.1), note: null, source: sheet(3) },
+  ];
+}
+
 export function fakeDigestMethods(latency: number) {
   const made = Date.now();
+  const demo = demoNotesOn();
   return {
     async digests(): Promise<DigestSnapshot> {
       await delay(latency);
-      return { enabled: true, categories: CATEGORIES.map((c) => ({ ...c })), digests: digests(made) };
+      const categories = demo ? DEMO_CATEGORIES : CATEGORIES;
+      return { enabled: true, categories: categories.map((c) => ({ ...c })), digests: demo ? demoDigests(made) : testDigests(made) };
     },
     async digestNoteBytes(_id: string, md5: string): Promise<ArrayBuffer> {
       await delay(latency);

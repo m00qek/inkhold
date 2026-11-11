@@ -61,9 +61,11 @@ function demoFiles(): Plugin {
   const txt = { path: at("./tests/fixtures/demo/readme.txt"), type: "text/plain; charset=utf-8" };
   const spd = { path: at("../parsers/spd/tests/fixtures/layers_hidden.spd"), type: "application/octet-stream" };
   const pdf = { path: at("./wasm/tests/fixtures/two-page.pdf"), type: "application/pdf" };
-  // Ids from `src/api/fakeFixtures.ts`.
+  const grammar = { path: at("./tests/fixtures/demo/deutsch-lernen.pdf"), type: "application/pdf" };
+  // Ids from `src/api/fakeFixtures.ts`, and the German grammar sheet's from `src/api/demoNotes.ts`.
   const files: Record<string, { path: URL; type: string }> = {
     "142": pdf,
+    "193": grammar,
     "174": spd,
     "175": spd,
     "176": spd,
