@@ -83,6 +83,7 @@ const non_immutable_routes = [_][]const u8{
     "/api/controlplane/search-index/stream",
     "/api/controlplane/server-info",
     "/api/controlplane/digests",
+    "/api/controlplane/digests/:id",
     "/api/controlplane/todo",
     "/api/controlplane/todo/lists",
     "/api/controlplane/todo/lists/:id",

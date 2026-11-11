@@ -12,6 +12,7 @@ const requestWithCookie = harness.requestWithCookie;
 const deviceLogin = harness.deviceLogin;
 const putSeed = harness.putSeed;
 const expectHeaderContains = harness.expectHeaderContains;
+const expectFailure = harness.expectFailure;
 
 /// The Nomad's note digest of 2026-11-10: handwriting on page 2, converted.
 const note_add =
@@ -33,7 +34,10 @@ const Listing = struct {
         createdAt: i64,
         source: struct { kind: []const u8, path: ?[]const u8 = null, fileId: ?u64 = null, page: ?i64 = null },
         note: ?[]const u8 = null,
+        waiting: bool,
     } = &.{},
+    tabletSyncedAt: ?i64 = null,
+    waiting: bool = false,
 };
 
 const Bufs = struct { obuf: [16384]u8 = undefined, reqbuf: [8192]u8 = undefined };
@@ -50,6 +54,10 @@ fn person(f: *Fixture, b: *Bufs, who: []const u8) !Person {
 
 fn get(f: *Fixture, b: *Bufs, path: []const u8, tok: []const u8) !harness.Response {
     return requestWithCookie(&f.ctx, &b.obuf, &b.reqbuf, "GET", path, tok, "");
+}
+
+fn put(f: *Fixture, b: *Bufs, path: []const u8, tok: []const u8, body: []const u8) !harness.Response {
+    return requestWithCookie(&f.ctx, &b.obuf, &b.reqbuf, "PUT", path, tok, body);
 }
 
 fn listing(f: *Fixture, b: *Bufs, tok: []const u8) !std.json.Parsed(Listing) {
@@ -71,6 +79,9 @@ test "off: the listing says so and serves nothing" {
     try testing.expectEqual(@as(usize, 0), l.value.digests.len);
     const resp = try get(f, &b, "/api/controlplane/digests/1/note/245354713d4c121a2368d9295f6379ca", &tok);
     try testing.expectEqual(@as(u16, 404), resp.status);
+    const edit = try put(f, &b, "/api/controlplane/digests/1", &tok, "{\"comment\":\"x\"}");
+    try testing.expectEqual(@as(u16, 409), edit.status);
+    try expectFailure(edit.body, "DIGEST_SYNC_OFF");
 }
 
 test "a person's digests: categories, sources found in the library, pages 1-based; another person sees none" {
@@ -197,4 +208,78 @@ test "a handwritten note's page: served under its md5, immutable, to its owner o
         const missing = try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/{d}/note/{s}", .{ id + 100, &md5 });
         try testing.expectEqual(@as(u16, 404), (try get(f, &b, missing, &ana.web)).status);
     }
+}
+
+/// The manifest's row for `id`, as the tablet's app reads it.
+fn manifestRow(f: *Fixture, b: *Bufs, tok: *const [32]u8, id: u64) !struct { md5: [32]u8, modified: i64 } {
+    const resp = try helpers.call(f, &b.obuf, &b.reqbuf, tok, "POST", "/api/file/query/summary/hash", "{\"page\":0,\"size\":0}");
+    var p = try std.json.parseFromSlice(struct { summaryInfoVOList: []const struct { id: u64, md5Hash: []const u8, lastModifiedTime: i64 } }, gpa, resp.body, .{ .ignore_unknown_fields = true });
+    defer p.deinit();
+    for (p.value.summaryInfoVOList) |r| if (r.id == id) {
+        var md5: [32]u8 = undefined;
+        @memcpy(&md5, r.md5Hash[0..32]);
+        return .{ .md5 = md5, .modified = r.lastModifiedTime };
+    };
+    return error.NotInManifest;
+}
+
+test "the comment, edited in the browser: a new md5 the tablet takes, waiting until it asks; nothing else changes" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var b: Bufs = .{};
+    const ana = try person(f, &b, "ana");
+    const rui = try person(f, &b, "rui");
+    const id = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", helpers.nomad_add);
+    const before = try manifestRow(f, &b, &ana.tablet, id);
+
+    var pbuf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/{d}", .{id});
+    try harness.expectSuccess((try put(f, &b, path, &ana.web, "{\"comment\":\"  Learn it by heart \\n\"}")).body);
+    {
+        var l = try listing(f, &b, &ana.web);
+        defer l.deinit();
+        const d = l.value.digests[0];
+        try testing.expectEqualStrings("Learn it by heart", d.comment.?);
+        try testing.expectEqualStrings("La phonétique du français", d.text);
+        try testing.expect(d.waiting and l.value.waiting);
+    }
+    // The tablet's next sync: a new md5 and a later time, so its app takes the
+    // server's copy; asking for the manifest is the fetch, and nothing waits.
+    const after = try manifestRow(f, &b, &ana.tablet, id);
+    try testing.expect(!std.mem.eql(u8, &before.md5, &after.md5));
+    try testing.expect(after.modified > before.modified);
+    {
+        var l = try listing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expect(!l.value.digests[0].waiting and !l.value.waiting);
+        try testing.expect(l.value.tabletSyncedAt != null);
+    }
+    {
+        var body: [32]u8 = undefined;
+        const resp = try helpers.call(f, &b.obuf, &b.reqbuf, &ana.tablet, "POST", "/api/file/query/summary/id", try std.fmt.bufPrint(&body, "{{\"ids\":[{d}]}}", .{id}));
+        try testing.expect(std.mem.indexOf(u8, resp.body, "\"commentStr\":\"Learn it by heart\"") != null);
+        // The handwritten note is the tablet's, untouched.
+        try testing.expect(std.mem.indexOf(u8, resp.body, "245354713d4c121a2368d9295f6379ca") != null);
+    }
+
+    // "" removes the comment.
+    try harness.expectSuccess((try put(f, &b, path, &ana.web, "{\"comment\":\"\"}")).body);
+    {
+        var l = try listing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expectEqual(@as(?[]const u8, null), l.value.digests[0].comment);
+    }
+
+    // Longer than the app holds, no comment at all, someone else's, a digest that is gone.
+    const long = try gpa.alloc(u8, 2_001 * 2);
+    defer gpa.free(long);
+    for (0..2_001) |i| @memcpy(long[i * 2 ..][0..2], "é");
+    const too_long = try std.fmt.allocPrint(gpa, "{{\"comment\":\"{s}\"}}", .{long});
+    defer gpa.free(too_long);
+    try expectFailure((try put(f, &b, path, &ana.web, too_long)).body, "BAD_COMMENT");
+    try expectFailure((try put(f, &b, path, &ana.web, "{}")).body, "BAD_COMMENT");
+    try expectFailure((try put(f, &b, path, &rui.web, "{\"comment\":\"mine\"}")).body, "NO_SUCH_DIGEST");
+    const gone = try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/{d}", .{id + 100});
+    try expectFailure((try put(f, &b, gone, &ana.web, "{\"comment\":\"x\"}")).body, "NO_SUCH_DIGEST");
 }

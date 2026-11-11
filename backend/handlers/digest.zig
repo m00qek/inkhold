@@ -1,9 +1,10 @@
 //! The browser's Digest: `/api/controlplane/digests…`, the signed-in person's
 //! own digests and categories, as their tablet's app synced them
-//! (`services/digest_web.zig`). Read only: the app decides every merge from
-//! md5s only it computes, so the tablet stays the only writer. Off with
-//! `config.digest_sync`, like the tablet's side: the listing then says
-//! `enabled: false`.
+//! (`services/digest_web.zig`). The browser changes one thing, a digest's
+//! typed comment, which the tablet takes at its next sync
+//! (`digest.setComment` says why); everything else, the handwritten note
+//! included, is the tablet's alone. Off with `config.digest_sync`, like the
+//! tablet's side: the listing then says `enabled: false` and an edit is refused.
 
 const std = @import("std");
 const router = @import("../http/router.zig");
@@ -19,8 +20,12 @@ const read = @import("controlplane/read.zig");
 const Context = context.Context;
 const Request = router.Request;
 const Params = router.Params;
+const fail = reply.fail;
 const badRequest = reply.badRequest;
 const serverError = reply.serverError;
+
+/// The app's own limit on a comment (`KnowledgeFieldNameConstants`), in characters.
+const max_comment_chars = 2_000;
 
 // ---- bodies ----
 
@@ -49,6 +54,8 @@ const DigestVO = struct {
     source: SourceVO,
     /// The handwritten note's md5, which names its page; absent: none.
     note: ?[]const u8,
+    /// Its comment changed here and no tablet has fetched it yet.
+    waiting: bool,
 };
 
 const DigestsVO = struct {
@@ -56,7 +63,14 @@ const DigestsVO = struct {
     enabled: bool,
     categories: []const CategoryVO = &.{},
     digests: []const DigestVO = &.{},
+    /// Epoch ms; absent until a tablet has asked for these digests.
+    tabletSyncedAt: ?i64 = null,
+    /// Something changed here that no tablet has fetched yet.
+    waiting: bool = false,
 };
+
+/// Absent: no change; "" removes the comment.
+const CommentReq = struct { comment: ?[]const u8 = null };
 
 // ---- handlers ----
 
@@ -75,6 +89,8 @@ pub fn list(ctx: *Context, req: *Request, params: Params) anyerror!void {
     for (groups) |g| if (g.uid) |uid| try categories.append(a, .{ .uid = uid, .name = g.name orelse "" });
 
     const rows = digest.digestsPage(ctx.db, a, user_id, null, 1, std.math.maxInt(u32)) catch return serverError(ctx, req);
+    const listed = digest.tabletListedAt(ctx.db, user_id) catch return serverError(ctx, req);
+    const changed = digest.changedSince(ctx.db, a, user_id, listed) catch return serverError(ctx, req);
     const digests = try a.alloc(DigestVO, rows.len);
     for (rows, digests) |d, *o| {
         const src = digestweb.sourceOf(a, d);
@@ -88,9 +104,32 @@ pub fn list(ctx: *Context, req: *Request, params: Params) anyerror!void {
             .modifiedAt = if (d.last_modified_time > 0) d.last_modified_time else d.updated_at,
             .source = .{ .kind = src.kind, .path = src.path, .page = src.page, .fileId = fileOf(ctx, a, user_id, src.path) },
             .note = digestweb.servableNote(d),
+            .waiting = std.mem.indexOfScalar(u64, changed, d.id) != null,
         };
     }
-    try json.respond(ctx.gpa, req, .ok, DigestsVO{ .enabled = true, .categories = categories.items, .digests = digests }, null);
+    try json.respond(ctx.gpa, req, .ok, DigestsVO{
+        .enabled = true,
+        .categories = categories.items,
+        .digests = digests,
+        .tabletSyncedAt = listed,
+        .waiting = changed.len > 0,
+    }, null);
+}
+
+/// PUT /api/controlplane/digests/:id {comment}: the digest's typed comment,
+/// "" for none. Only the comment: the tablet owns every other field.
+pub fn setComment(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    if (!ctx.config.digest_sync) return off(ctx, req);
+    const id = reply.pathId(params) orelse return noDigest(ctx, req);
+    var parsed = json.readBody(CommentReq, ctx.gpa, req) catch return badRequest(ctx, req);
+    defer parsed.deinit();
+    const comment = cleanComment(parsed.value.comment orelse return badComment(ctx, req)) orelse return badComment(ctx, req);
+    var raw: [16]u8 = undefined;
+    ctx.io.random(&raw);
+    const md5 = std.fmt.bytesToHex(raw, .lower);
+    const found = digest.setComment(ctx.db, ctx.caller.?.user_id, id, comment, &md5, nowMs(ctx)) catch return serverError(ctx, req);
+    if (!found) return noDigest(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
 
 /// GET /api/controlplane/digests/:id/note/:md5 -> the handwritten note's page,
@@ -120,6 +159,28 @@ pub fn note(ctx: *Context, req: *Request, params: Params) anyerror!void {
 }
 
 // ---- helpers ----
+
+fn off(ctx: *Context, req: *Request) anyerror!void {
+    return fail(ctx, req, .conflict, "DIGEST_SYNC_OFF", "Digest sync is off on this server");
+}
+fn noDigest(ctx: *Context, req: *Request) anyerror!void {
+    return fail(ctx, req, .not_found, "NO_SUCH_DIGEST", "there is no such digest");
+}
+fn badComment(ctx: *Context, req: *Request) anyerror!void {
+    return fail(ctx, req, .bad_request, "BAD_COMMENT", "a comment holds at most 2000 characters of text");
+}
+
+/// The comment without the blank space around it; null when it is not text
+/// or longer than the app holds.
+fn cleanComment(v: []const u8) ?[]const u8 {
+    const t = std.mem.trim(u8, v, " \t\r\n");
+    const n = std.unicode.utf8CountCodepoints(t) catch return null;
+    return if (n > max_comment_chars) null else t;
+}
+
+fn nowMs(ctx: *Context) i64 {
+    return std.Io.Clock.real.now(ctx.io).toMilliseconds();
+}
 
 /// The library's id for a file the tablet names by its storage path; null
 /// when it is not in the library (not synced, or moved since).

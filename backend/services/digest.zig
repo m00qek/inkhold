@@ -121,7 +121,8 @@ pub fn putDigest(db: sqlite.Db, user_id: u64, id: u64, d: Digest, now_ms: i64) s
         \\UPDATE digests SET uid = COALESCE(?3, uid), parent_uid = ?4, content = ?5, source_path = ?6,
         \\  source_type = ?7, data_source = ?8, author = ?9, tags = ?10, metadata = ?11,
         \\  comment_str = ?12, comment_handwrite_name = ?13, handwrite_inner_name = ?14,
-        \\  handwrite_md5 = ?15, md5_hash = ?16, last_modified_time = ?17, updated_at = ?18
+        \\  handwrite_md5 = ?15, md5_hash = ?16, last_modified_time = ?17, updated_at = ?18,
+        \\  web_changed_at = NULL
         \\WHERE user_id = ?1 AND id = ?2 AND is_group = 0 AND deleted = 0;
     , &.{
         .{ .int = @intCast(user_id) },             .{ .int = @intCast(id) },                .{ .text_opt = d.uid },
@@ -344,6 +345,56 @@ pub fn handwriting(db: sqlite.Db, arena: std.mem.Allocator, user_id: u64, id: u6
 /// The id of the live digest with this uid (metadata `unique_identifier`).
 pub fn liveDigestId(db: sqlite.Db, user_id: u64, uid: []const u8) sqlite.Error!?u64 {
     return liveId(db, user_id, false, uid);
+}
+
+// ---- the browser's edit, and what a tablet has fetched ----
+
+/// The browser's edit of a live digest's typed comment, the one field it may
+/// change. `md5_hash` must be new: the app takes the server's copy when its
+/// md5 differs from the one it last synced and its own is unchanged, with no
+/// clock in it; when both changed, the newer `last_modified_time` wins, so it
+/// moves past the row's own time and a tablet clock ahead cannot win over the
+/// edit (decompiled `KnowledgeSyncRepository.processKnowledgeDetail`). The
+/// handwritten note is never touched. False when there is no such live digest.
+pub fn setComment(db: sqlite.Db, user_id: u64, id: u64, comment: []const u8, md5_hash: []const u8, now_ms: i64) sqlite.Error!bool {
+    try db.runCached(
+        \\UPDATE digests SET comment_str = ?3, md5_hash = ?4,
+        \\  last_modified_time = MAX(?5, last_modified_time + 1), updated_at = ?5, web_changed_at = ?5
+        \\WHERE user_id = ?1 AND id = ?2 AND is_group = 0 AND deleted = 0;
+    , &.{ .{ .int = @intCast(user_id) }, .{ .int = @intCast(id) }, .{ .text = comment }, .{ .text = md5_hash }, .{ .int = now_ms } });
+    return db.changes() > 0;
+}
+
+/// A tablet asked for this account's manifest at `now_ms`: its sync takes
+/// everything the browser changed before that ("Waiting for the tablet" clears).
+pub fn markTabletListed(db: sqlite.Db, user_id: u64, now_ms: i64) sqlite.Error!void {
+    try db.runCached(
+        \\INSERT INTO digest_sync_state (user_id, tablet_listed_at) VALUES (?1, ?2)
+        \\ON CONFLICT (user_id) DO UPDATE SET tablet_listed_at = excluded.tablet_listed_at;
+    , &.{ .{ .int = @intCast(user_id) }, .{ .int = now_ms } });
+}
+
+/// When a tablet last asked for this account's manifest; null: never.
+pub fn tabletListedAt(db: sqlite.Db, user_id: u64) sqlite.Error!?i64 {
+    var r = (try db.rowCached("SELECT tablet_listed_at FROM digest_sync_state WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return null;
+    defer r.finalize();
+    return r.intOpt(0);
+}
+
+/// The live digests the browser changed at or after `after` (null: ever), in
+/// id order: what no tablet has fetched yet. At counts as after: an edit in the
+/// same millisecond as a tablet's listing waits for the next one.
+pub fn changedSince(db: sqlite.Db, arena: std.mem.Allocator, user_id: u64, after: ?i64) Error![]u64 {
+    var st = try db.prepareCached(
+        \\SELECT id FROM digests WHERE user_id = ?1 AND is_group = 0 AND deleted = 0
+        \\  AND web_changed_at IS NOT NULL AND web_changed_at >= ?2 ORDER BY id;
+    );
+    defer st.finalize();
+    st.bindInt(1, @intCast(user_id));
+    st.bindInt(2, after orelse std.math.minInt(i64));
+    var out: std.ArrayList(u64) = .empty;
+    while (try st.step()) try out.append(arena, @intCast(st.columnInt(0)));
+    return out.items;
 }
 
 // ---- retention ----
@@ -634,4 +685,42 @@ test "metadata without a unique_identifier, or not JSON, has no uid" {
     try testing.expectEqual(@as(?[]const u8, null), uidOfMetadata(a, "{\"author\":\"x\"}"));
     try testing.expectEqual(@as(?[]const u8, null), uidOfMetadata(a, "{\"unique_identifier\":\"\"}"));
     try testing.expectEqualStrings("u1", uidOfMetadata(a, "{\"unique_identifier\":\"u1\"}").?);
+}
+
+test "the browser's comment: a new md5, a time past the row's own, waiting until a tablet lists; a tablet's update clears it" {
+    var db = try testDb();
+    defer db.close();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The tablet's clock runs ahead of the server's: its time is later than "now".
+    var sent = nomadDigest(a);
+    sent.last_modified_time = 5_000;
+    const id = try addDigest(db, 1, sent, 1000);
+    try testing.expect(try setComment(db, 1, id, "Learn it by heart", "0123456789abcdef0123456789abcdef", 2_000));
+    {
+        const d = (try digestsByIds(db, a, 1, &.{id}))[0];
+        try testing.expectEqualStrings("Learn it by heart", d.comment_str.?);
+        try testing.expectEqualStrings("0123456789abcdef0123456789abcdef", d.md5_hash);
+        try testing.expectEqual(@as(i64, 5_001), d.last_modified_time);
+        // The handwritten note stays as the tablet sent it.
+        try testing.expectEqualStrings(sent.handwrite_md5.?, d.handwrite_md5.?);
+    }
+    try testing.expectEqualSlices(u64, &.{id}, try changedSince(db, a, 1, try tabletListedAt(db, 1)));
+    try testing.expectEqual(@as(usize, 0), (try changedSince(db, a, 2, null)).len);
+
+    try markTabletListed(db, 1, 3_000);
+    try testing.expectEqual(@as(?i64, 3_000), try tabletListedAt(db, 1));
+    try testing.expectEqual(@as(usize, 0), (try changedSince(db, a, 1, 3_000)).len);
+
+    // Changed again, then the tablet sends the digest back: its copy is the one now.
+    try testing.expect(try setComment(db, 1, id, "again", "fedcba9876543210fedcba9876543210", 4_000));
+    try testing.expect(try putDigest(db, 1, id, sent, 4_500));
+    try testing.expectEqual(@as(usize, 0), (try changedSince(db, a, 1, null)).len);
+
+    // Not someone else's, not a deleted one.
+    try testing.expect(!try setComment(db, 2, id, "x", "00000000000000000000000000000000", 5_000));
+    try deleteDigest(db, 1, id, 6_000);
+    try testing.expect(!try setComment(db, 1, id, "x", "00000000000000000000000000000000", 7_000));
 }

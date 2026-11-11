@@ -527,6 +527,19 @@ pub const ddl_v24 =
     \\WHERE is_group = 1 AND deleted = 0 AND (uid IS NULL OR uid = '');
 ;
 
+// v25: what the browser changed in a digest (its typed comment) that a tablet
+// has not fetched yet, as To-Do's v21. A digest's `web_changed_at` is set by
+// the browser's edit and cleared when a tablet sends the digest;
+// `digest_sync_state` keeps, per account, when a tablet last asked for the
+// manifest, after which its sync takes every change.
+pub const ddl_v25 =
+    \\ALTER TABLE digests ADD COLUMN web_changed_at INTEGER;
+    \\CREATE TABLE digest_sync_state (
+    \\  user_id          INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    \\  tablet_listed_at INTEGER
+    \\);
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

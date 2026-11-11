@@ -2,7 +2,8 @@
 //! read for a person rather than a tablet. The app keeps where a digest came
 //! from in its metadata JSON, in a shape that depends on the kind of source
 //! (decompiled `SummaryDO`, and the rows the Nomad sent): this reads it into
-//! one `Source`. Read only; the tablet's app stays the only writer.
+//! one `Source`. The one change the browser makes, a comment, is
+//! `digest.setComment`.
 
 const std = @import("std");
 const digest = @import("digest.zig");

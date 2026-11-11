@@ -9,7 +9,7 @@ extra:
 
 # HTTP API
 
-Every route Inkhold serves, 126 of them, in the order of the route table.
+Every route Inkhold serves, 127 of them, in the order of the route table.
 **Who** is the caller's scope: `public` needs no session, `device` is a
 tablet, `controlplane` the browser app, `pending` a first sign-in that
 must still change its password. A caller outside a route's scopes gets 403.
@@ -50,7 +50,7 @@ The device routes' behaviour is in [Device protocol](@/contributor/device-protoc
 | POST | `/api/file/2/users/get_space_usage` | device | `device.getSpaceUsage` | read-only |
 | POST | `/api/file/2/files/synchronous/start` | device | `device.syncStart` |  |
 | POST | `/api/file/2/files/synchronous/end` | device | `device.syncEnd` |  |
-| POST | `/api/file/query/summary/hash` | device | `device.digestHash` | read-only |
+| POST | `/api/file/query/summary/hash` | device | `device.digestHash` |  |
 | POST | `/api/file/query/summary/id` | device | `device.digestById` | read-only |
 | POST | `/api/file/query/summary` | device | `device.digestQuery` | read-only |
 | POST | `/api/file/add/summary` | device | `device.digestAdd` |  |
@@ -205,6 +205,7 @@ The device routes' behaviour is in [Device protocol](@/contributor/device-protoc
 | PUT | `/api/controlplane/todo/order` | controlplane | `todoweb.reorder` |  |
 | GET | `/api/controlplane/digests` | controlplane | `digestweb.list` | read-only |
 | GET | `/api/controlplane/digests/:id/note/:md5` | controlplane | `digestweb.note` | streams |
+| PUT | `/api/controlplane/digests/:id` | controlplane | `digestweb.setComment` |  |
 | GET | `/api/backup-notice` | controlplane | `backups.notice` | read-only |
 | GET | `/api/admin/backups` | controlplane | `backups.list` | elevated admin |
 | PUT | `/api/admin/backups/dismissed` | controlplane | `backups.setDismissed` | elevated admin |
