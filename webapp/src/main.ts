@@ -21,6 +21,7 @@ import type { Api } from "./api/types";
 import type { NoteRenderer } from "./render/types";
 import type { LiveChannel } from "./sync/types";
 import { forgetListings, registerServiceWorker } from "./pwa/register";
+import { forgetPerson } from "./cache/forget";
 
 // Re-apply the pinned theme (index.html already did, pre-paint) before the
 // shell exists: render cache keys include the theme.
@@ -78,23 +79,33 @@ let profile: Me | null = null;
 // subscription); run on every route change.
 let disposePage: (() => void) | null = null;
 
+/**
+ * Leaves nothing of the person in this browser (#17): the session, the stored
+ * listings and every database built from their library, then the page itself,
+ * reloaded into sign-in so nothing held in memory carries over to whoever
+ * signs in next.
+ */
+async function forgetAndReload(): Promise<void> {
+  session.clear();
+  forgetListings();
+  await forgetPerson();
+  history.replaceState(null, "", `${location.pathname}${location.search}#/login`);
+  location.reload();
+}
+
 function onSignOut(): void {
-  const finish = () => {
-    session.clear();
-    forgetListings();
-    go("/login");
-  };
+  // The server's answer also empties the browser's HTTP cache (`Clear-Site-Data`).
+  const finish = () => void forgetAndReload();
   auth.logout().then(finish, finish);
 }
 
 /**
  * The session cookie expired (an API call came back 401/403). Like sign-out
- * minus `logout()`; the login route tears down the shell.
+ * minus `logout()`: there is no answer to empty the HTTP cache, whose files
+ * need a session again to be fetched.
  */
 function onSessionExpired(): void {
-  session.clear();
-  forgetListings();
-  go("/login");
+  void forgetAndReload();
 }
 
 function ensureShell(email: string, isAdmin: boolean): AppShell {

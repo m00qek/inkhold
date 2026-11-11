@@ -4,6 +4,7 @@
 // because the next diff asks for whatever is missing.
 
 import { budgetForQuota, planEviction, type PersistedMeta } from "./idb";
+import { yieldOnVersionChange } from "./idbLife";
 import type { TermsDocument, TermsPage } from "../search/termsStream";
 
 export interface TermsKey {
@@ -52,7 +53,9 @@ export interface TermsStoreOptions {
   budgetBytes?: number;
 }
 
-const DB_NAME = "sn-terms";
+/** The search index's input, every searchable page's words. Cleared at sign-out (`forget.ts`). */
+export const TERMS_DB = "sn-terms";
+const DB_NAME = TERMS_DB;
 const STORE = "terms";
 const VERSION = 1;
 
@@ -146,7 +149,7 @@ export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
           const d = open.result;
           if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE, { keyPath: "key" });
         };
-        open.onsuccess = () => resolve(open.result);
+        open.onsuccess = () => resolve(yieldOnVersionChange(open.result));
         open.onerror = () => reject(open.error);
       });
       await seedMetas(db);

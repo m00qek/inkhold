@@ -78,6 +78,8 @@ test "control-plane first login is limited, change-password revokes it and unloc
         const resp = try requestWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/user/logout", &web_tok, "");
         try std.testing.expectEqual(@as(u16, 200), resp.status);
         try std.testing.expect(std.mem.indexOf(u8, resp.set_cookie.?, "Max-Age=0") != null);
+        // The browser drops its cached pages and files with the session (#17).
+        try harness.expectHeaderContains(resp.head, "clear-site-data: \"cache\"");
     }
     try expectStatusWithCookie(ctx, &obuf, &reqbuf, "POST", "/api/controlplane/equipment/unlink", &web_tok, "{\"equipmentNo\":\"X\"}", 401);
 }

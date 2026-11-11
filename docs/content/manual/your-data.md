@@ -27,7 +27,8 @@ all. Over the internet, put it [behind HTTPS](@/manual/https.md) so those
 connections are private too.
 
 The browser keeps some things to be fast: page images, the search index, the
-app itself. They stay in that browser, for that person.
+app itself. They stay in that browser, for that person, and signing out removes
+everything but the app and your preferences (the theme, the sort order).
 
 ## Who can see what
 

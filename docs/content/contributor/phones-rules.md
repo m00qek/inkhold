@@ -137,8 +137,15 @@ code. Production builds only; development never registers one.
   to-dos always come from the server. The wasm decoders are not kept either;
   only reading needs them.
 - **Forgetting.** Signing out, or the server refusing the session (a 401 or
-  403 on any listing), deletes the stored listings. `server-info` is not kept,
-  because the sign-in page reads it.
+  403 on any listing), deletes the stored listings and everything else of the
+  person's in the browser: the IndexedDB databases built from their library
+  (`cache/forget.ts`, `PERSON_DATABASES`) and the one localStorage entry about
+  their files. Every store closes its connection when asked
+  (`cache/idbLife.ts`), or a delete would wait for ever. The app then reloads
+  into sign-in, so nothing held in memory carries over. A sign-out's answer
+  also empties the HTTP cache (`Clear-Site-Data: "cache"`); an expired session
+  has no answer to do that with. The device's preferences (theme, sort) stay.
+  `server-info` is not kept, because the sign-in page reads it.
 - **Offline.** The app opens and browses what this device has seen. Opening a
   file, a version or To-Do says it needs a connection and stays where it is
   (`libraryRoutes.ts`, `offline()`), instead of showing a viewer that never
