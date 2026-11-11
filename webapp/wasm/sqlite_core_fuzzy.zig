@@ -148,15 +148,28 @@ fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
         const vterm = std.mem.span(raw_term);
         for (tokens, s.tokens) |*t, st| {
             const term = t.term orelse continue;
-            // While typing, compare against the vocabulary term truncated to the
-            // typed length, or a typo mid-word is out of reach.
-            const cand = if (st.prefix) truncCodepoints(vterm, t.len) else vterm;
-            const d = editDistance(term, cand, t.budget) orelse continue;
-            if (d == 0) continue;
+            // While typing, also against the vocabulary term truncated to the
+            // typed length, or a typo in a half-typed word is out of reach;
+            // the whole term still answers a word typed in full but misspelt.
+            var cand: []const u8 = vterm;
+            var d = editDistance(term, vterm, t.budget);
+            if (st.prefix) {
+                const cut = truncCodepoints(vterm, t.len);
+                if (editDistance(term, cut, t.budget)) |dc| {
+                    // Its start as typed: the exact pass would have found it.
+                    if (dc == 0) continue;
+                    if (d == null or dc < d.?) {
+                        d = dc;
+                        cand = cut;
+                    }
+                }
+            }
+            const dist = d orelse continue;
+            if (dist == 0) continue;
             const cand_len = cpLen(cand);
             offer(arena, t, max_fuzzy_terms, .{
                 .term = vterm,
-                .dist = d,
+                .dist = dist,
                 .delta = if (cand_len > t.term_len) cand_len - t.term_len else t.term_len - cand_len,
             }) catch return -c.SQLITE_NOMEM;
         }

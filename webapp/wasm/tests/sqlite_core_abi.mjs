@@ -249,6 +249,13 @@ equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
   equal(r.expansion, "calugraf>caligrafia", "...to the term it was truncated against");
 }
 
+// No space after it, but typed in full and a letter short: the whole term answers.
+{
+  const r = fuzzy("caligafia");
+  equal(r.total, 2, "a whole word missing a letter, not yet followed by a space, is still corrected");
+  equal(r.expansion, "caligafia>caligrafia", "...to the whole term");
+}
+
 for (const junk of ["", "   ", "-", "..."]) {
   equal(fuzzy(junk).total, 0, `fuzzy ${JSON.stringify(junk)} is no results rather than an error`);
   equal(fuzzy(junk).expansion, "", `...and substitutes nothing`);
