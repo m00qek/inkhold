@@ -1,4 +1,12 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+// Zig skips `minimum_zig_version` for the project it builds, so it is held here.
+comptime {
+    const min = std.SemanticVersion.parse(@import("build.zig.zon").minimum_zig_version) catch unreachable;
+    if (builtin.zig_version.order(min) == .lt)
+        @compileError("Inkhold needs Zig " ++ @import("build.zig.zon").minimum_zig_version ++ " or newer, not " ++ builtin.zig_version_string);
+}
 
 const build_mupdf = @import("build_mupdf.zig");
 const buildMupdfNative = build_mupdf.buildMupdfNative;
