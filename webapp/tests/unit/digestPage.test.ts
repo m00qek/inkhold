@@ -25,7 +25,7 @@ function host(digests: () => Promise<DigestSnapshot>, digestEdit: (id: string, c
     onChanged: () => void h.changed++,
     go: () => {},
     ink,
-    thumbs: { holder: () => null, forget: () => {} },
+    thumbs: { holder: () => null, refresh: () => {} },
     openFile: () => {},
     changed: 0,
     toasts: [] as string[],
@@ -174,6 +174,49 @@ describe("the Digest page", () => {
     to!.click();
     await vi.waitFor(() => expect(h.toasts.at(-1)).toMatch(/Couldn't move the digest/));
     expect(h.content.querySelector(".digest-panel__category")!.textContent).toContain("Uncategorized");
+    page.destroy();
+  });
+
+  it("a save's repaint is not lost to a re-read that answers first", async () => {
+    let release: () => void = () => {};
+    let calls = 0;
+    const h = host(
+      async () => {
+        calls++;
+        // The save's own re-read is slow; a poll's, after it, is not.
+        if (calls === 2) await new Promise<void>((r) => (release = r));
+        return structuredClone(one);
+      },
+      async () => {},
+    );
+    const page = createDigestPage(h);
+    page.open({ ...ALL, digest: "1" });
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-comment-edit")).not.toBeNull());
+    h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.click();
+    const box = h.content.querySelector<HTMLTextAreaElement>("#digest-comment")!;
+    box.value = "new";
+    box.dispatchEvent(new Event("input"));
+    h.content.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+    await vi.waitFor(() => expect(calls).toBe(2));
+    await page.load(); // answers alike, and first
+    expect(h.content.querySelector("#digest-comment")).toBeNull();
+    release();
+    page.destroy();
+  });
+
+  it("a comment's spaces around it are the server's to drop, nothing inside", async () => {
+    const server = { ...structuredClone(one), digests: [{ ...one.digests[0]!, comment: "kept" }] };
+    const sent: DigestEdit[] = [];
+    const h = host(async () => structuredClone(server), async (_id, c) => void sent.push(c));
+    const page = createDigestPage(h);
+    page.open({ ...ALL, digest: "1" });
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-comment-edit")).not.toBeNull());
+    h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.click();
+    const box = h.content.querySelector<HTMLTextAreaElement>("#digest-comment")!;
+    box.value = "kept\u00a0";
+    box.dispatchEvent(new Event("input"));
+    h.content.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+    await vi.waitFor(() => expect(sent).toEqual([{ comment: "kept\u00a0" }]));
     page.destroy();
   });
 

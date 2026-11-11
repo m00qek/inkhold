@@ -10,7 +10,7 @@
 import { el, keepingFocus } from "../../ui/dom";
 import { openBarMenu, type BarRow } from "../../ui/barMenu";
 import type { Api } from "../../api/types";
-import type { Digest, DigestSnapshot } from "../../api/digestTypes";
+import { trimComment, type Digest, type DigestSnapshot } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
 import type { DigestThumbs } from "./digestThumbs";
 import { categoryRows, opensAtPage, placePath, sameView, type DigestPlace } from "./digestModel";
@@ -81,37 +81,44 @@ export function createDigestPage(host: DigestHost): DigestPage {
   /** A comment's save in flight. */
   let busy = false;
   /**
+   * The page's own change is done: the next answer repaints, even one like
+   * the last, so its form or busy state goes. Whichever load answers first.
+   */
+  let repaintDue = false;
+  /**
    * Where focus goes after the next paint: the panel just opened, the card of
    * the one just closed, or the comment's box or its Edit button.
    */
   let focusNext: "panel" | "comment-box" | "comment-edit" | "move" | { card: string } | null = null;
 
-  /**
-   * Re-reads the server. An answer like the last one repaints nothing, so
-   * nothing on screen moves; `repaint` asks for one anyway, after the page's
-   * own change, whose form or busy state must go even when nothing changed.
-   */
-  async function load(repaint = false): Promise<void> {
+  /** Re-reads the server. An answer like the last one repaints nothing (unless one is due), so nothing on screen moves. */
+  async function load(): Promise<void> {
     const mine = ++loadToken;
     try {
       const s = await host.api.digests();
       if (mine !== loadToken) return;
       answeredAt = Date.now();
       if (snap !== null && !failed && sameSnapshot(snap, s)) {
-        if (repaint && open_) paint();
+        if (repaintDue && open_) {
+          repaintDue = false;
+          paint();
+        }
         return;
       }
       snap = s;
       failed = false;
       // A file's pages may have changed with it.
-      host.thumbs.forget();
+      host.thumbs.refresh();
     } catch (e) {
       if (mine !== loadToken || host.handled(e)) return;
       failed = snap === null;
     }
     host.onChanged();
     // A comment being written is never repainted away; its save re-reads.
-    if (open_ && editing === null) paint();
+    if (open_ && editing === null) {
+      repaintDue = false;
+      paint();
+    }
   }
 
   /** The shell's topbar dressed for Digest (`mine`), or handed back to the library. */
@@ -167,7 +174,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
       if (!editing || busy) return;
       const text = editing.draft;
       // What the server would keep is what is there: nothing to send.
-      if (text.trim() === (d.comment ?? "")) {
+      if (trimComment(text) === (d.comment ?? "")) {
         editing = null;
         focusNext = "comment-edit";
         paint();
@@ -180,7 +187,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
           busy = false;
           editing = null;
           focusNext = "comment-edit";
-          await load(true);
+          repaintDue = true;
+          await load();
         },
         (e: unknown) => {
           busy = false;
@@ -201,7 +209,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
       async () => {
         busy = false;
         host.toast(`Moved to ${name}.`);
-        await load(true);
+        repaintDue = true;
+        await load();
       },
       (e: unknown) => {
         busy = false;

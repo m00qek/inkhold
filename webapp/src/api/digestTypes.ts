@@ -34,7 +34,10 @@ export interface Digest {
   author: string | null;
   /** Epoch ms, by the tablet's clock. */
   createdAt: number;
-  /** Epoch ms of its last change, here or on the tablet. */
+  /**
+   * Epoch ms of its last change, here or on the tablet. Not shown: it is how
+   * two answers differ when an edit changed nothing else on screen.
+   */
   modifiedAt: number;
   source: DigestSource;
   /** The handwritten note's md5, which names its page; null: none. */
@@ -53,6 +56,11 @@ export interface DigestEdit {
 
 /** The app's own limit on a comment, in characters. */
 export const MAX_COMMENT = 2000;
+
+/** A comment as the server keeps it: without the spaces, tabs and line breaks around it (`handlers/digest.zig`). */
+export function trimComment(text: string): string {
+  return text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+}
 
 export interface DigestSnapshot {
   /** False when the server keeps no digests (`digest_sync` off); everything else is empty then. */

@@ -11,7 +11,7 @@ import { delay } from "./fake";
 import { fakeHash } from "./fakeHash";
 import { DEMO_GRAMMAR_ID, demoNotesOn } from "./demoNotes";
 import { ApiError } from "./errors";
-import { MAX_COMMENT, type Digest, type DigestCategory, type DigestEdit, type DigestSnapshot, type DigestSource } from "./digestTypes";
+import { MAX_COMMENT, trimComment, type Digest, type DigestCategory, type DigestEdit, type DigestSnapshot, type DigestSource } from "./digestTypes";
 
 const DAY = 86_400_000;
 
@@ -120,7 +120,7 @@ export function fakeDigestMethods(latency: number) {
     },
     async digestEdit(id: string, change: DigestEdit): Promise<void> {
       await delay(latency);
-      const text = change.comment?.trim();
+      const text = change.comment === undefined ? undefined : trimComment(change.comment);
       if (text !== undefined && [...text].length > MAX_COMMENT) throw new ApiError("BAD_COMMENT", "a comment holds at most 2000 characters of text", 400);
       const uid = change.categoryUid;
       if (uid !== undefined && uid !== "" && !categories.some((c) => c.uid === uid)) throw new ApiError("NO_SUCH_CATEGORY", "there is no such category", 404);

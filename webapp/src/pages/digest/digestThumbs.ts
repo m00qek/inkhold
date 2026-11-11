@@ -24,32 +24,39 @@ export interface DigestThumbs {
    * library, or one no viewer opens at a page.
    */
   holder(d: Digest, className: string): HTMLElement | null;
-  /** Forget what was read and drawn: the digests changed, and a file's pages may have too. */
-  forget(): void;
+  /**
+   * The digests changed, and a file may have with them: its metadata is read
+   * again. A page whose file is the same keeps its picture, shown at once; a
+   * changed file's page is drawn again.
+   */
+  refresh(): void;
 }
 
 export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
-  /** One metadata read per file per visit; a failure is asked again next time. */
+  /** One metadata read per file until `refresh`; a failure is asked again next time. */
   const metas = new Map<string, Promise<NoteMeta>>();
-  /** One picture per page and theme per visit. */
+  /** One picture per page of a file's version, and theme. */
   const pictures = new Map<string, Promise<string | null>>();
-  /** The pictures in, so a repaint shows one at once instead of blinking. */
+  /** The pictures in, by the same key. */
   const drawn = new Map<string, string>();
-  /** Bumped by `forget`: a draw begun before it keeps nothing. */
-  let generation = 0;
+  /** A page's last picture shown (its versioned key), so a repaint shows it at once instead of blinking. */
+  const shown = new Map<string, string>();
+
+  /** `map`'s entry for `key`, dropped if it is still `p`: a newer one stays. */
+  const dropIfSame = <T>(map: Map<string, T>, key: string, p: T) => void (map.get(key) === p && map.delete(key));
 
   const meta = (id: string): Promise<NoteMeta> => {
     let m = metas.get(id);
     if (!m) {
-      m = deps.api.getNoteMeta(id);
-      m.catch(() => metas.delete(id));
-      metas.set(id, m);
+      const mine = deps.api.getNoteMeta(id);
+      mine.catch(() => dropIfSame(metas, id, mine));
+      metas.set(id, mine);
+      m = mine;
     }
     return m;
   };
 
-  async function draw(fileId: string, page: number): Promise<string | null> {
-    const m = await meta(fileId);
+  async function draw(m: NoteMeta, fileId: string, page: number): Promise<string | null> {
     // A page the file no longer has: no picture, never another page's.
     if (m.pages.length > 0 && page >= m.pages.length) return null;
     const notePage = m.pages[page];
@@ -64,9 +71,45 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
     return blob ? URL.createObjectURL(blob) : null;
   }
 
-  function show(holder: HTMLElement, url: string): void {
-    holder.replaceChildren(el("img", { src: url, alt: "" }));
-    holder.classList.add("has-thumb");
+  function picture(m: NoteMeta, fileId: string, page: number, key: string): Promise<string | null> {
+    let p = pictures.get(key);
+    if (!p) {
+      const mine: Promise<string | null> = draw(m, fileId, page).then(
+        (url) => {
+          if (url) drawn.set(key, url);
+          return url;
+        },
+        () => {
+          dropIfSame(pictures, key, mine);
+          return null;
+        },
+      );
+      pictures.set(key, mine);
+      p = mine;
+    }
+    return p;
+  }
+
+  function show(holder: HTMLElement, url: string | null): void {
+    holder.replaceChildren(...(url ? [el("img", { src: url, alt: "" })] : []));
+    holder.classList.toggle("has-thumb", url !== null);
+  }
+
+  /** The page's picture for the file as it is now; the one it replaces is let go. */
+  async function fill(holder: HTMLElement, fileId: string, page: number, place: string): Promise<void> {
+    const m = await meta(fileId);
+    const key = `${place}:${m.fileHash ?? ""}`;
+    if (shown.get(place) === key && drawn.has(key)) return;
+    const url = await picture(m, fileId, page, key);
+    const before = shown.get(place);
+    if (before !== undefined && before !== key) {
+      const old = drawn.get(before);
+      if (old) URL.revokeObjectURL(old);
+      drawn.delete(before);
+      pictures.delete(before);
+    }
+    shown.set(place, key);
+    if (holder.isConnected) show(holder, url);
   }
 
   return {
@@ -74,39 +117,16 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
       const fileId = d.source.fileId;
       if (fileId === null || !opensAtPage(d)) return null;
       const page = Math.max(0, (d.source.page ?? 1) - 1);
-      const key = `${fileId}:${page}:${currentTheme()}`;
+      const place = `${fileId}:${page}:${currentTheme()}`;
       const h = el("span", { class: className, "aria-hidden": "true" });
-      const known = drawn.get(key);
-      if (known) {
-        show(h, known);
-        return h;
-      }
-      let p = pictures.get(key);
-      if (!p) {
-        const mine = generation;
-        p = draw(fileId, page).then(
-          (url) => {
-            if (url && mine === generation) drawn.set(key, url);
-            return url;
-          },
-          () => {
-            pictures.delete(key);
-            return null;
-          },
-        );
-        pictures.set(key, p);
-      }
-      void p.then((url) => {
-        if (url && h.isConnected) show(h, url);
-      });
+      const last = shown.get(place);
+      const known = last === undefined ? undefined : drawn.get(last);
+      if (known) show(h, known);
+      void fill(h, fileId, page, place).catch(() => {});
       return h;
     },
-    forget() {
-      generation++;
+    refresh() {
       metas.clear();
-      pictures.clear();
-      for (const url of drawn.values()) URL.revokeObjectURL(url);
-      drawn.clear();
     },
   };
 }
