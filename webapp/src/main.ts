@@ -178,6 +178,7 @@ async function renderRoute(route: Route): Promise<void> {
     case "search":
     case "destination":
     case "todo":
+    case "digest":
     case "account":
     case "note":
     case "note-version":
@@ -211,6 +212,9 @@ async function renderRoute(route: Route): Promise<void> {
           return;
         case "todo":
           shellInstance.showTodo(route.view);
+          return;
+        case "digest":
+          shellInstance.showDigest(route.place);
           return;
         default:
           shellInstance.showFolder(null);

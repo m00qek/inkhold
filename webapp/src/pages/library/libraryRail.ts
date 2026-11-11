@@ -9,7 +9,7 @@ import { createRail } from "../rail/rail";
 import { createRailView } from "../rail/railView";
 import { BIN_KEY } from "../bin/bin";
 import type { LibraryCtx } from "./libraryContext";
-import { ADMIN_KEY, TODO_KEY } from "./library";
+import { ADMIN_KEY, DIGEST_KEY, TODO_KEY } from "./library";
 import type { RailChildren } from "../rail/rail";
 import { FIXED_VIEWS, openCount, sameView, viewPath, type TodoView } from "../todo/todoModel";
 import type { IconName } from "../../ui/icons";
@@ -104,6 +104,11 @@ export function installLibraryRail(ctx: LibraryCtx): void {
           const snap = ctx.todo?.snapshot();
           return snap?.enabled ? openCount(snap, { kind: "all" }) : 0;
         }
+        // --- DIGEST COUNT --- every digest
+        case DIGEST_KEY: {
+          const snap = ctx.digest?.snapshot();
+          return snap?.enabled ? snap.digests.length : 0;
+        }
         // --- ADMIN COUNT ---
         // None: a household headcount is an ambient stat about housemates.
         default:
@@ -125,8 +130,9 @@ export function installLibraryRail(ctx: LibraryCtx): void {
       }
     },
     isAdmin: () => ctx.identity.isAdmin,
-    // To-Do only while the server keeps to-dos: an off switch is not a place to go.
-    destinationShown: (key) => key !== TODO_KEY || ctx.todo?.snapshot()?.enabled === true,
+    // The tablet's apps only while the server keeps their data: an off switch is not a place to go.
+    destinationShown: (key) =>
+      key === TODO_KEY ? ctx.todo?.snapshot()?.enabled === true : key === DIGEST_KEY ? ctx.digest?.snapshot()?.enabled === true : true,
     destinationChildren: (key) => (key === TODO_KEY ? todoChildren() : null),
     onSettled: () => ctx.render.renderGallery({ rail: false }),
     onLabelsSettled: () => ctx.render.relabelFolders(),

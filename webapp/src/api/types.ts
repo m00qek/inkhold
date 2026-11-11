@@ -14,6 +14,7 @@ import type { Entry, FileHistory, Hash, Id, Listing, NoteMeta, PageRef, PageText
 import type { Bin, Restored, Trashed } from "../core/binTypes";
 import type { AccountSecurity, MyDevice, StorageBreakdown, VersionPolicy, VersionPolicyChange } from "./accountTypes";
 import type { NewTodoTask, TodoSnapshot, TodoTaskPatch } from "./todoTypes";
+import type { DigestSnapshot } from "./digestTypes";
 import type { AdminDevice, AdminHealth, AdminQuota, AdminRetention, AdminUser, AdminBackups, BackupNotice } from "./adminTypes";
 import type { UploadConflictMode } from "./client";
 
@@ -203,6 +204,15 @@ export interface Api {
   todoDeleteTask(id: string): Promise<void>;
   /** The open tasks of one list (null: the Inbox), in this order. */
   todoReorder(listId: string | null, ids: string[]): Promise<void>;
+
+  // --- DIGEST ---
+  // The signed-in person's digests, as their tablet's Digest app synced them.
+  // Read only: the tablet is their writer. While the server keeps none,
+  // `digests()` answers `enabled: false`.
+
+  digests(): Promise<DigestSnapshot>;
+  /** A digest's handwritten note as SNPG page bytes, for the renderer. `md5` is the digest's `note`; 404 for any other. */
+  digestNoteBytes(id: string, md5: string): Promise<ArrayBuffer>;
 
   // --- HISTORY ---
   // Note-scoped by `:id` (the `/note/:id` ownership gate); per-version routes

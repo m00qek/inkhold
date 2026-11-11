@@ -10,6 +10,8 @@
 
 import type { Place } from "../../ui/place";
 import type { TodoPage } from "../todo/todoPage";
+import type { DigestPage } from "../digest/digestPage";
+import type { DestinationMode } from "./libraryModes";
 import type { Api } from "../../api/types";
 import type { ApiFailureSink } from "../../api/client";
 import type { NoteRenderer } from "../../render/types";
@@ -79,7 +81,7 @@ export interface LibraryCtx {
   * Which destination owns the surface. Tracked per destination because
   * `renderGallery()` runs on sync bumps and must not strip another's mode.
   */
-  destinationsOpen: { bin: boolean; admin: boolean; account: boolean; todo: boolean };
+  destinationsOpen: Record<DestinationMode, boolean>;
 
   // ---- collaborators, built once ----
   folderCache: FolderCache;
@@ -102,6 +104,8 @@ export interface LibraryCtx {
   adminDest: AdminDestination;
   /** The To-Do destination; built at start so the rail knows whether to show it. */
   todo: TodoPage;
+  /** The Digest destination; built at start, like To-Do. */
+  digest: DigestPage;
   bin: BinController;
 
   // ---- the parts ----
@@ -128,6 +132,7 @@ export interface LibraryCtx {
   leaveAccount(): void;
   leaveAdmin(): void;
   leaveTodo(): void;
+  leaveDigest(): void;
   openAdmin(): void;
 }
 
@@ -137,7 +142,7 @@ export type LibraryCtxSeed = Pick<
   | "deps" | "identity" | "renderer" | "cache" | "live" | "api" | "historyScope" | "binScope" | "st"
   | "gallery" | "content" | "place" | "toastEl" | "destinationsOpen"
   | "failures" | "handled" | "sessionDidExpire" | "toast"
-  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "openAdmin"
+  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "leaveDigest" | "openAdmin"
 >;
 
 /**

@@ -39,7 +39,8 @@ the bar is not a container, so its bottom row can be fixed to the screen.
   following a link closes it.
 - The bar keeps ☰, the place's name and ⋯, which holds the bar's tools as one
   menu and is shown only when there are some.
-- A tab bar holds Library, To-Do, Search and You. Its Search opens the box
+- A tab bar holds Library, To-Do, Search and You (Digest is in the ☰ drawer,
+  under Apps). Its Search opens the box
   across the bar, which stays while it holds a query. The tab bar gives way to
   a viewer's own bar.
 - Cards run in two columns.
@@ -147,9 +148,9 @@ code. Production builds only; development never registers one.
   has no answer to do that with. The device's preferences (theme, sort) stay.
   `server-info` is not kept, because the sign-in page reads it.
 - **Offline.** The app opens and browses what this device has seen. Opening a
-  file, a version or To-Do says it needs a connection and stays where it is
-  (`libraryRoutes.ts`, `offline()`), instead of showing a viewer that never
-  fills.
+  file, a version, To-Do or Digest says it needs a connection and stays where
+  it is (`libraryRoutes.ts`, `offline()`), instead of showing a viewer that
+  never fills.
 - **Updates.** A new build installs beside the old one and waits. The page
   offers "A new version of Inkhold is ready" with Reload, and only then does
   the new one take over (`src/pwa/register.ts`). It reloads once the new

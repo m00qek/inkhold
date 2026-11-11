@@ -12,7 +12,7 @@ import { createPhoneShell } from "./libraryPhone";
 import { createPlace } from "../../ui/place";
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
-import { binNotePageHref, current, destinationHref, folderHref, go, notePageHref, todoHref } from "../../router";
+import { binNotePageHref, current, destinationHref, digestHref, folderHref, go, notePageHref, todoHref } from "../../router";
 import { createBackupNotice } from "./backupNotice";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -46,6 +46,9 @@ import { createLibraryRoutes } from "./libraryRoutes";
 import { warmWasm } from "../../core/warmWasm";
 import { createTodoPage } from "../todo/todoPage";
 import { createTodoInk } from "../todo/todoInk";
+import { createDigestPage } from "../digest/digestPage";
+import { createDigestInk } from "../digest/digestInk";
+import { parsePlace, placePath } from "../digest/digestModel";
 
 export const ADMIN_KEY = "admin";
 /**
@@ -55,6 +58,8 @@ export const ADMIN_KEY = "admin";
 export const ACCOUNT_KEY = "account";
 /** The To-Do destination's rail key; its routes are `#/todo/<view>`. */
 export const TODO_KEY = "todo";
+/** The Digest destination's rail key; its routes are `#/digest/<place>`. */
+export const DIGEST_KEY = "digest";
 
 export interface AppDeps {
   api: Api;
@@ -86,6 +91,8 @@ export interface AppShell {
   showAccount(): void;
   /** To-Do at one of its views (`inbox`, `planned`, `list/<id>` …). */
   showTodo(view: string): void;
+  /** Digest at a place (`category/<uid>`, `sources/<key>/d/<id>` …). */
+  showDigest(place: string): void;
   /**
   * `page` is 0-based; the router converts from the URL's 1-based pages. `q`
   * primes find-in-note. All from the route, so reloads and links land exactly.
@@ -187,7 +194,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     content,
     place,
     toastEl,
-    destinationsOpen: { bin: false, admin: false, account: false, todo: false },
+    destinationsOpen: { bin: false, admin: false, account: false, todo: false, digest: false },
 
     // ---- failure routing ----
     failures: {
@@ -230,6 +237,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     leaveAccount: () => st.accountPage?.close(),
     leaveAdmin: () => ctx.adminDest.leave(),
     leaveTodo: () => ctx.todo?.close(),
+    leaveDigest: () => ctx.digest?.close(),
     openAdmin: () => ctx.adminDest.open(),
   });
 
@@ -298,6 +306,11 @@ export function createAppShell(deps: AppDeps): AppShell {
     up: () => {
       const r = current();
       if (r.name === "todo") return r.view === "" ? null : { href: todoHref(""), label: "Lists" };
+      // An open digest goes back to its list; a list is a top-level place.
+      if (r.name === "digest") {
+        const p = parsePlace(r.place);
+        return p.digest === null ? null : { href: digestHref(placePath({ view: p.view, digest: null })), label: "Digest" };
+      }
       if (r.name === "search") {
         // Back to where the search started, named as the rail names it.
         const here = st.listing?.folderId === st.folderId ? st.listing?.path.at(-1) : undefined;
@@ -350,6 +363,25 @@ export function createAppShell(deps: AppDeps): AppShell {
   });
   // Once at start: the rail shows To-Do only when the server keeps to-dos.
   void ctx.todo.load();
+
+  ctx.digest = createDigestPage({
+    api,
+    content,
+    gallery,
+    setPlace: (name) => ctx.place.overlay(name),
+    crumbs: ctx.topbar.crumbs,
+    sortWrap: ctx.topbar.sortWrap,
+    segmented: ctx.topbar.segmented,
+    setMode: (open) => ctx.modes.setDestinationMode("digest", open),
+    toast: ctx.toast,
+    handled: ctx.handled,
+    onChanged: () => ctx.rail.build(),
+    go: (path) => go(digestHref(path)),
+    ink: createDigestInk({ api, renderer, store: deps.persistentThumbs ?? null }),
+    openFile: (id, page) => go(notePageHref(id, page)),
+  });
+  // Once at start, like To-Do: the rail shows Digest only when the server keeps digests.
+  void ctx.digest.load();
 
   ctx.adminDest = createAdminDestination({
     api,
@@ -445,6 +477,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     showDestination: routes.showDestination,
     showAccount: routes.showAccount,
     showTodo: routes.showTodo,
+    showDigest: routes.showDigest,
     openNote: routes.openNote,
     openNoteVersion: routes.openNoteVersion,
     openBinNote: routes.openBinNote,
@@ -468,6 +501,7 @@ export function createAppShell(deps: AppDeps): AppShell {
       backupNotice.destroy();
       st.accountPage?.destroy();
       ctx.todo.destroy();
+      ctx.digest.destroy();
       // Aborts uploads and drops the document-level drag swallowers.
       ctx.features.uploadZone.destroy();
       ctx.galleryEngine.destroy();

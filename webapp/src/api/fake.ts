@@ -7,6 +7,7 @@ import { isAcceptedUpload, nextAvailableName, uploadExtension } from "../core/fi
 import { fakeAdminMethods } from "./fakeAdmin";
 import { fakeAccountMethods } from "./fakeAccount";
 import { fakeTodoMethods } from "./fakeTodo";
+import { fakeDigestMethods } from "./fakeDigest";
 
 export { FAKE_UPLOAD_HEADROOM, MARKED_PDF_ID, PDF_MARK_ID } from "./fakeFixtures";
 export { fakeFileHash } from "./fakeHash";
@@ -393,6 +394,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
     // --- account (self-service) ---
     ...fakeAccountMethods(latency),
     ...fakeTodoMethods(latency),
+    ...fakeDigestMethods(latency),
 
     // Every `.note` is written on every page; a recognized one has text from
     // its first recognized page on, an unrecognized one has recognition off.

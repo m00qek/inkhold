@@ -33,6 +33,7 @@ export function createLibraryData(ctx: LibraryCtx): LibraryData {
     ctx.leaveAdmin();
     ctx.leaveAccount();
     ctx.leaveTodo();
+    ctx.leaveDigest();
     st.destination = null;
     st.folderId = null;
     st.listing = undefined;

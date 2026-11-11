@@ -37,6 +37,12 @@ export type Route =
    * router stays free of `pages/`.
    */
   | { name: "todo"; view: string }
+  /**
+   * Digest, at a place: a category or a source, maybe with a digest open
+   * (`category/<uid>`, `sources/<key>/d/<id>` …); `""` is All. Parsed by the
+   * page, like To-Do's views.
+   */
+  | { name: "digest"; place: string }
   | {
       name: "note";
       id: string;
@@ -96,6 +102,8 @@ export function parseRoute(raw: string): Route {
   // Before the destination fallback, which would read `/todo` alone and drop the view.
   const todo = p.match(/^\/todo(?:\/(.*))?$/);
   if (todo) return { name: "todo", view: todo[1] ?? "" };
+  const digest = p.match(/^\/digest(?:\/(.*))?$/);
+  if (digest) return { name: "digest", place: digest[1] ?? "" };
   // Ids are percent-encoded, so `[^/]+` can't swallow a separator.
   const folder = p.match(/^\/folder\/([^/]+)$/);
   if (folder) return { name: "folder", id: decodeURIComponent(folder[1]!) };
@@ -165,6 +173,11 @@ export function destinationHref(key: string): string {
 /** Hash href for a To-Do view (`inbox`, `planned`, `list/<id>` …). */
 export function todoHref(view: string): string {
   return view === "" ? "#/todo" : `#/todo/${view}`;
+}
+
+/** Hash href for a Digest place (`category/<uid>`, `sources/<key>` …). */
+export function digestHref(place: string): string {
+  return place === "" ? "#/digest" : `#/digest/${place}`;
 }
 
 /** Hash href for your own account page. */
