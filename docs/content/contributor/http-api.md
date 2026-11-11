@@ -9,7 +9,7 @@ extra:
 
 # HTTP API
 
-Every route Inkhold serves, 124 of them, in the order of the route table.
+Every route Inkhold serves, 126 of them, in the order of the route table.
 **Who** is the caller's scope: `public` needs no session, `device` is a
 tablet, `controlplane` the browser app, `pending` a first sign-in that
 must still change its password. A caller outside a route's scopes gets 403.
@@ -203,6 +203,8 @@ The device routes' behaviour is in [Device protocol](@/contributor/device-protoc
 | PUT | `/api/controlplane/todo/tasks/:id` | controlplane | `todoweb.updateTask` |  |
 | DELETE | `/api/controlplane/todo/tasks/:id` | controlplane | `todoweb.deleteTask` |  |
 | PUT | `/api/controlplane/todo/order` | controlplane | `todoweb.reorder` |  |
+| GET | `/api/controlplane/digests` | controlplane | `digestweb.list` | read-only |
+| GET | `/api/controlplane/digests/:id/note/:md5` | controlplane | `digestweb.note` | streams |
 | GET | `/api/backup-notice` | controlplane | `backups.notice` | read-only |
 | GET | `/api/admin/backups` | controlplane | `backups.list` | elevated admin |
 | PUT | `/api/admin/backups/dismissed` | controlplane | `backups.setDismissed` | elevated admin |

@@ -85,6 +85,8 @@ test "manual_db_lock is set on EXACTLY the /oss and /api/oss byte routes, the pa
         "/api/controlplane/text/:md5",
         // A digest's handwritten note: streamed bytes, like `/oss/get/:id`.
         "/api/oss/summary/:id",
+        // Its page in the browser: locks to check the digest and plan, streams unlocked.
+        "/api/controlplane/digests/:id/note/:md5",
     };
     var found: usize = 0;
     for (app.routes) |r| {

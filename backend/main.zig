@@ -75,6 +75,7 @@ test {
     _ = @import("services/digest.zig");
     _ = @import("services/todo_web.zig");
     _ = @import("services/tablet_path.zig");
+    _ = @import("services/digest_web.zig");
     _ = @import("services/backup.zig");
     _ = @import("services/health.zig");
     _ = @import("services/note_index.zig");
@@ -104,6 +105,7 @@ test {
     _ = @import("test/http/device_todo_test.zig");
     _ = @import("test/http/device_digest_test.zig");
     _ = @import("test/http/todo_web_test.zig");
+    _ = @import("test/http/digest_web_test.zig");
     _ = @import("test/http/device_list_test.zig");
     _ = @import("test/http/device_upload_test.zig");
     _ = @import("test/http/device_cap_test.zig");

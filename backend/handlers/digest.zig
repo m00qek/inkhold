@@ -1,0 +1,129 @@
+//! The browser's Digest: `/api/controlplane/digests…`, the signed-in person's
+//! own digests and categories, as their tablet's app synced them
+//! (`services/digest_web.zig`). Read only: the app decides every merge from
+//! md5s only it computes, so the tablet stays the only writer. Off with
+//! `config.digest_sync`, like the tablet's side: the listing then says
+//! `enabled: false`.
+
+const std = @import("std");
+const router = @import("../http/router.zig");
+const context = @import("../http/context.zig");
+const json = @import("../http/json.zig");
+const reply = @import("../http/reply.zig");
+const digest = @import("../services/digest.zig");
+const digestweb = @import("../services/digest_web.zig");
+const tablet_path = @import("../services/tablet_path.zig");
+const controlplane = @import("../services/controlplane.zig");
+const read = @import("controlplane/read.zig");
+
+const Context = context.Context;
+const Request = router.Request;
+const Params = router.Params;
+const badRequest = reply.badRequest;
+const serverError = reply.serverError;
+
+// ---- bodies ----
+
+const CategoryVO = struct { uid: []const u8, name: []const u8 };
+
+const SourceVO = struct {
+    kind: digestweb.Kind,
+    /// The file's path under the tablet's storage, as the app sent it.
+    path: ?[]const u8 = null,
+    /// That file in the library, when it is found there.
+    fileId: ?u64 = null,
+    /// 1-based.
+    page: ?i64 = null,
+};
+
+const DigestVO = struct {
+    id: u64,
+    text: []const u8,
+    comment: ?[]const u8,
+    /// '' is Uncategorized.
+    categoryUid: []const u8,
+    author: ?[]const u8,
+    /// Epoch ms, the tablet's clock.
+    createdAt: i64,
+    modifiedAt: i64,
+    source: SourceVO,
+    /// The handwritten note's md5, which names its page; absent: none.
+    note: ?[]const u8,
+};
+
+const DigestsVO = struct {
+    success: bool = true,
+    enabled: bool,
+    categories: []const CategoryVO = &.{},
+    digests: []const DigestVO = &.{},
+};
+
+// ---- handlers ----
+
+/// GET /api/controlplane/digests
+pub fn list(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    if (!ctx.config.digest_sync) return json.respond(ctx.gpa, req, .ok, DigestsVO{ .enabled = false }, null);
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const user_id = ctx.caller.?.user_id;
+
+    const groups = digest.groups(ctx.db, a, user_id) catch return serverError(ctx, req);
+    var categories: std.ArrayList(CategoryVO) = .empty;
+    // A category without an id can hold no digest (v24 gave every stored one an id).
+    for (groups) |g| if (g.uid) |uid| try categories.append(a, .{ .uid = uid, .name = g.name orelse "" });
+
+    const rows = digest.digestsPage(ctx.db, a, user_id, null, 1, std.math.maxInt(u32)) catch return serverError(ctx, req);
+    const digests = try a.alloc(DigestVO, rows.len);
+    for (rows, digests) |d, *o| {
+        const src = digestweb.sourceOf(a, d);
+        o.* = .{
+            .id = d.id,
+            .text = d.content orelse "",
+            .comment = if (d.comment_str) |c| (if (c.len == 0) null else c) else null,
+            .categoryUid = d.parent_uid,
+            .author = digestweb.authorOf(a, d),
+            .createdAt = if (d.creation_time > 0) d.creation_time else d.created_at,
+            .modifiedAt = if (d.last_modified_time > 0) d.last_modified_time else d.updated_at,
+            .source = .{ .kind = src.kind, .path = src.path, .page = src.page, .fileId = fileOf(ctx, a, user_id, src.path) },
+            .note = digestweb.servableNote(d),
+        };
+    }
+    try json.respond(ctx.gpa, req, .ok, DigestsVO{ .enabled = true, .categories = categories.items, .digests = digests }, null);
+}
+
+/// GET /api/controlplane/digests/:id/note/:md5 -> the handwritten note's page,
+/// as SNPG bytes like any note page. `{md5}` pins the note, so the page is
+/// immutable; a replaced note is a new md5 and so a new URL. `manual_db_lock`,
+/// streamed unlocked.
+pub fn note(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    const id = reply.pathId(params) orelse return badRequest(ctx, req);
+    const md5 = params.get("md5") orelse return badRequest(ctx, req);
+    if (!ctx.config.digest_sync) return reply.notFound(req);
+    var svc = controlplane.ControlPlaneService.init(ctx.files);
+
+    const planned = blk: {
+        ctx.lockDb();
+        defer ctx.unlockDb();
+        var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+        defer arena.deinit();
+        const rows = digest.digestsByIds(ctx.db, arena.allocator(), ctx.caller.?.user_id, &.{id}) catch return serverError(ctx, req);
+        if (rows.len == 0) break :blk null;
+        const held = digestweb.servableNote(rows[0]) orelse break :blk null;
+        if (!std.mem.eql(u8, held, md5)) break :blk null;
+        // A digest's note is a one-page `.mark`.
+        break :blk svc.pagePlanForMd5(held, 0) catch return serverError(ctx, req);
+    } orelse return reply.notFound(req);
+
+    return read.writePageResponse(ctx, req, svc, planned);
+}
+
+// ---- helpers ----
+
+/// The library's id for a file the tablet names by its storage path; null
+/// when it is not in the library (not synced, or moved since).
+fn fileOf(ctx: *Context, a: std.mem.Allocator, user_id: u64, path: ?[]const u8) ?u64 {
+    const p = tablet_path.fromStorage(a, path orelse return null) orelse return null;
+    return ctx.files.resolvePath(user_id, p) catch null;
+}

@@ -8,6 +8,7 @@ const controlplane = @import("handlers/controlplane.zig");
 const admin = @import("handlers/admin.zig");
 const backups = @import("handlers/backups.zig");
 const todoweb = @import("handlers/todo.zig");
+const digestweb = @import("handlers/digest.zig");
 
 /// Smoke-test API version (distinct from the package version).
 pub const api_version = auth.api_version;
@@ -251,6 +252,10 @@ pub const routes = [_]router.Route{
     .{ .method = .PUT, .path = "/api/controlplane/todo/tasks/:id", .scopes = &.{.controlplane}, .handler = todoweb.updateTask },
     .{ .method = .DELETE, .path = "/api/controlplane/todo/tasks/:id", .scopes = &.{.controlplane}, .handler = todoweb.deleteTask },
     .{ .method = .PUT, .path = "/api/controlplane/todo/order", .scopes = &.{.controlplane}, .handler = todoweb.reorder },
+    // The signed-in person's digests (`handlers/digest.zig`), read only: the tablet stays their only writer.
+    .{ .method = .GET, .path = "/api/controlplane/digests", .scopes = &.{.controlplane}, .handler = digestweb.list, .read_only = true },
+    // A note's page: it reads and may backfill `note_index`, so it stays on the writer.
+    .{ .method = .GET, .path = "/api/controlplane/digests/:id/note/:md5", .scopes = &.{.controlplane}, .handler = digestweb.note, .manual_db_lock = true },
     .{ .method = .GET, .path = "/api/backup-notice", .scopes = &.{.controlplane}, .handler = backups.notice, .read_only = true },
     .{ .method = .GET, .path = "/api/admin/backups", .scopes = &.{.controlplane}, .require_admin = true, .handler = backups.list },
     // "I back up another way": silences `never`, never `failed`.
