@@ -4,6 +4,7 @@
 // dropping the index means dropping the instance.
 
 import type { Expansion } from "./localSearch";
+import { ITEM_KINDS, ItemTable, kindCode, type ItemKind, type ItemRow, type SnapshotItem } from "./itemRows";
 
 /** The `idx_*` half of `sqlite-core.wasm` (`webapp/wasm/sqlite_core.zig`). */
 export interface SearchCoreExports {
@@ -19,7 +20,11 @@ export interface SearchCoreExports {
   idx_commit(): number;
   idx_add(rowid: number, ptr: number, len: number): number;
   idx_query(ptr: number, len: number, limit: number): number;
+  /** Buffered hits, up to `limit` of each kind; -1 past them. */
   idx_hit(i: number): number;
+  /** The last query's exact total for one kind of row (`itemRows.ts`). */
+  idx_kind_total(kind: number): number;
+  idx_delete(rowid: number): number;
   /** `idx_query` plus the typo ladder, which fires only on a total of 0. */
   idx_fuzzy(ptr: number, len: number, limit: number): number;
   /** `typed \t matched \n` pairs, rewritten by every query of either kind. */
@@ -34,7 +39,7 @@ export interface SearchCoreExports {
 }
 
 /** How this file spells a rowid table. Bump when `SnapshotDoc` changes shape. */
-export const MAPPING_FORMAT_VERSION = 1;
+export const MAPPING_FORMAT_VERSION = 2;
 
 export const DEFAULT_WASM_URL = "/sqlite-core.wasm";
 
@@ -58,11 +63,22 @@ export interface PageRef {
   page: number;
 }
 
-/** A query's answer. `total` is EXACT and independent of `limit` (§9.5). */
+/** An item row that matched: its kind and its key there. */
+export interface ItemRef {
+  kind: ItemKind;
+  key: string;
+}
+
+/** A query's answer. Totals are EXACT and independent of `limit` (§9.5). */
 export interface QueryResult {
+  /** Matching pages. */
   total: number;
   /** bm25 rank order, capped at `limit`. Reordering is the caller's business. */
   hits: PageRef[];
+  /** Matching item rows, each kind capped at `limit`, in bm25 rank order within it. */
+  items: ItemRef[];
+  /** Matching item rows of each kind. */
+  itemTotals: Record<ItemKind, number>;
   /** Typo-ladder substitutions; non-empty only for a fuzzy query whose exact pass found nothing. */
   expansions: Expansion[];
 }
@@ -82,6 +98,7 @@ export interface IndexSnapshot {
   mappingVersion: number;
   image: Uint8Array;
   docs: SnapshotDoc[];
+  items: SnapshotItem[];
 }
 
 /** An `idx_*` call refused. `rc` is the module's return, `-rc` of a SQLite code. */
@@ -209,6 +226,9 @@ class RowidTable {
 export class SearchIndex {
   private readonly core: SearchCoreExports;
   private table: RowidTable;
+  private items = new ItemTable();
+  /** False once a reset emptied the index of the item rows `items` holds; the next build writes them. */
+  private itemsIn = true;
   /** Reused UTF-8 staging buffer. */
   private scratchPtr = 0;
   private scratchCap = 0;
@@ -257,6 +277,7 @@ export class SearchIndex {
   reset(): void {
     this.assertOpen();
     this.table = new RowidTable();
+    this.itemsIn = false;
     this.check("idx_open", this.core.idx_open());
   }
 
@@ -269,6 +290,7 @@ export class SearchIndex {
     this.check("idx_begin", this.core.idx_begin());
     try {
       for (const doc of docs) this.addDocument(doc);
+      if (!this.itemsIn) for (const row of this.items.all()) this.addPage(row.rowid, row.text);
     } catch (err) {
       // A failing reset must not replace the original error.
       try {
@@ -279,12 +301,38 @@ export class SearchIndex {
       throw err;
     }
     this.check("idx_commit", this.core.idx_commit());
+    this.itemsIn = true;
   }
 
+  /** Pages from `docs`, and the item rows already held. */
   rebuild(docs: Iterable<TermsDocument>): void {
     this.assertOpen();
-    if (this.table.documentCount > 0) this.reset();
+    this.reset();
     this.build(docs);
+  }
+
+  /**
+   * Replaces one kind's rows with `rows`: only what changed is written, so a
+   * saved to-do is found at once. Not yet built: kept for the build. A
+   * failure empties the index, which then needs a rebuild.
+   */
+  setItems(kind: ItemKind, rows: readonly ItemRow[]): void {
+    this.assertOpen();
+    const diff = this.items.diff(kind, rows);
+    if (!this.itemsIn || (diff.remove.length === 0 && diff.add.length === 0)) return;
+    try {
+      this.check("idx_begin", this.core.idx_begin());
+      for (const rowid of diff.remove) this.check("idx_delete", this.core.idx_delete(rowid));
+      for (const row of diff.add) this.addPage(row.rowid, row.text);
+      this.check("idx_commit", this.core.idx_commit());
+    } catch (err) {
+      try {
+        this.reset();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
   }
 
   /** Repeated md5s are refused here: rowids are fresh, so the wasm cannot catch a document added twice. */
@@ -299,7 +347,7 @@ export class SearchIndex {
     }
   }
 
-  /** One FTS5 row. Terms arrive server-folded; re-tokenizing them is a no-op. */
+  /** One FTS5 row. A page's terms arrive server-folded; re-tokenizing them is a no-op. */
   addPage(rowid: number, terms: string): void {
     this.assertOpen();
     const len = this.stage(terms);
@@ -323,15 +371,21 @@ export class SearchIndex {
     this.check(call, total);
     const expansions = this.expansions();
     const hits: PageRef[] = [];
-    const n = Math.min(total, limit);
-    for (let i = 0; i < n; i++) {
+    const items: ItemRef[] = [];
+    for (let i = 0; ; i++) {
       const rowid = this.core.idx_hit(i);
       if (rowid < 0) break;
+      const item = this.items.lookup(rowid);
+      if (item) {
+        items.push(item);
+        continue;
+      }
       const ref = this.table.lookup(rowid);
-      if (!ref) throw new Error(`rowid ${rowid} is not in the index's rowid table`);
+      if (!ref) throw new Error(`rowid ${rowid} is not in the index's rowid tables`);
       hits.push(ref);
     }
-    return { total, hits, expansions };
+    const itemTotals = Object.fromEntries(ITEM_KINDS.map((k) => [k, this.core.idx_kind_total(kindCode(k))])) as Record<ItemKind, number>;
+    return { total: this.core.idx_kind_total(0), hits, items, itemTotals, expansions };
   }
 
   /** Parses `typed \t matched \n`; a line without both halves is dropped. */
@@ -362,6 +416,7 @@ export class SearchIndex {
       mappingVersion: MAPPING_FORMAT_VERSION,
       image,
       docs: this.table.snapshot(),
+      items: this.items.snapshot(),
     };
   }
 
@@ -384,6 +439,8 @@ export class SearchIndex {
     new Uint8Array(this.core.memory.buffer, dst, len).set(snapshot.image);
     this.check("idx_deserialize", this.core.idx_deserialize(dst, len));
     this.table = RowidTable.from(snapshot.docs);
+    this.items = ItemTable.from(snapshot.items);
+    this.itemsIn = true;
   }
 
   /** The instance and its memory survive; drop every reference to free them. */

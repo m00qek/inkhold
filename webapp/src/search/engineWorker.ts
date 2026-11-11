@@ -2,7 +2,8 @@
 // instantiated on the first `build`. There is no queue or cancel message here;
 // a running `idx_fuzzy` is synchronous, so abort is `searchEngine.ts`'s.
 
-import { SearchIndex, type PageRef, type TermsDocument } from "./indexEngine";
+import { SearchIndex, type ItemRef, type PageRef, type TermsDocument } from "./indexEngine";
+import type { ItemKind, ItemRow } from "./itemRows";
 import type { Expansion } from "./localSearch";
 
 // The protocol. Types only, so `searchEngine.ts` imports them without bundling
@@ -11,12 +12,22 @@ import type { Expansion } from "./localSearch";
 
 export type EngineRequest =
   | { kind: "build"; id: number; docs: readonly TermsDocument[] }
+  /** Replaces one kind's item rows; before a build, they wait for it. */
+  | { kind: "items"; id: number; of: ItemKind; rows: readonly ItemRow[] }
   /** `fuzzy` adds the typo ladder, which the wasm runs only on zero hits. */
   | { kind: "query"; id: number; text: string; limit: number; fuzzy: boolean };
 
 export type EngineResponse =
   | { kind: "built"; id: number }
-  | { kind: "result"; id: number; total: number; hits: PageRef[]; expansions: Expansion[] }
+  | {
+      kind: "result";
+      id: number;
+      total: number;
+      hits: PageRef[];
+      items: ItemRef[];
+      itemTotals: Record<ItemKind, number>;
+      expansions: Expansion[];
+    }
   /** `name` travels separately: callers read `err.name`, which a structured clone drops. */
   | { kind: "error"; id: number; name: string; message: string };
 
@@ -37,6 +48,12 @@ async function handle(req: EngineRequest): Promise<EngineResponse> {
       engine.rebuild(req.docs);
       return { kind: "built", id: req.id };
     }
+    case "items": {
+      const engine = index ?? (await SearchIndex.open());
+      index = engine;
+      engine.setItems(req.of, req.rows);
+      return { kind: "built", id: req.id };
+    }
     case "query": {
       // A query before a build is a client bug; zero results would hide it.
       if (!index) throw new Error("this search engine has nothing built to query");
@@ -46,6 +63,8 @@ async function handle(req: EngineRequest): Promise<EngineResponse> {
         id: req.id,
         total: answer.total,
         hits: answer.hits,
+        items: answer.items,
+        itemTotals: answer.itemTotals,
         expansions: answer.expansions,
       };
     }

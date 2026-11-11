@@ -15,10 +15,13 @@ import {
   type TermsDocument,
 } from "./indexEngine";
 import type { EngineRequest, EngineResponse } from "./engineWorker";
+import type { ItemKind, ItemRow } from "./itemRows";
 
 /** Narrower than `SearchIndex`: no `serialize`, so no 10 MB image crosses the wire. */
 export interface SearchEngine {
   build(docs: readonly TermsDocument[]): Promise<void>;
+  /** Replaces one kind's item rows (`itemRows.ts`); kept across builds. Never superseded. */
+  setItems(kind: ItemKind, rows: readonly ItemRow[]): Promise<void>;
   /** Rejects with `AbortError` on `signal`, or when superseded before posting. */
   query(text: string, limit: number, fuzzy: boolean, signal?: AbortSignal): Promise<QueryResult>;
   /** Terminate the worker or close the instance, freeing its memory. */
@@ -70,6 +73,7 @@ export function createSearchEngine(opts: SearchEngineOptions = {}): SearchEngine
 
   return {
     build: (docs) => target().build(docs),
+    setItems: (kind, rows) => target().setItems(kind, rows),
     query: (text, limit, fuzzy, signal) => target().query(text, limit, fuzzy, signal),
     close() {
       delegate?.close();
@@ -188,10 +192,13 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
     async build(docs) {
       expect(await enqueue({ kind: "build", id: nextId++, docs }, false), "built");
     },
+    async setItems(of, rows) {
+      expect(await enqueue({ kind: "items", id: nextId++, of, rows }, false), "built");
+    },
     async query(text, limit, fuzzy, signal) {
       const req: EngineRequest = { kind: "query", id: nextId++, text, limit, fuzzy };
       const res = expect(await enqueue(req, true, signal), "result");
-      return { total: res.total, hits: res.hits, expansions: res.expansions };
+      return { total: res.total, hits: res.hits, items: res.items, itemTotals: res.itemTotals, expansions: res.expansions };
     },
     close() {
       dead ??= new Error("this search engine is closed");
@@ -212,6 +219,11 @@ function inThreadEngine(load?: CoreLoader): SearchEngine {
       const engine = index ?? (await SearchIndex.open(load));
       index = engine;
       engine.rebuild(docs);
+    },
+    async setItems(kind, rows) {
+      const engine = index ?? (await SearchIndex.open(load));
+      index = engine;
+      engine.setItems(kind, rows);
     },
     async query(text, limit, fuzzy, signal) {
       if (signal?.aborted) throw abortError();

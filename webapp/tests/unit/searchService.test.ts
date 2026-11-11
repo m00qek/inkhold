@@ -14,6 +14,7 @@ function fakeCore(): SearchCoreExports {
   const decoder = new TextDecoder();
   const rows = new Map<number, string>();
   let hits: number[] = [];
+  let totals: number[] = [];
   let brk = 1024;
 
   const read = (ptr: number, len: number) => decoder.decode(new Uint8Array(memory.buffer, ptr, len));
@@ -21,12 +22,15 @@ function fakeCore(): SearchCoreExports {
   const run = (ptr: number, len: number, limit: number) => {
     const terms = read(ptr, len).toLowerCase().split(/\s+/).filter(Boolean);
     hits = [];
+    totals = [];
     if (terms.length === 0) return 0;
     let total = 0;
     for (const [rowid, text] of rows) {
       const words = text.split(/\s+/);
       if (!terms.every((t) => words.includes(t))) continue;
-      if (hits.length < limit) hits.push(rowid);
+      const kind = Math.floor(rowid / 2 ** 28);
+      if (hits.filter((h) => Math.floor(h / 2 ** 28) === kind).length < limit) hits.push(rowid);
+      totals[kind] = (totals[kind] ?? 0) + 1;
       total += 1;
     }
     return total;
@@ -60,6 +64,11 @@ function fakeCore(): SearchCoreExports {
     idx_expansion_ptr: () => 0,
     idx_expansion_len: () => 0,
     idx_hit: (i) => (i < hits.length ? hits[i]! : -1),
+    idx_kind_total: (k) => totals[k] ?? 0,
+    idx_delete(rowid) {
+      rows.delete(rowid);
+      return 0;
+    },
     idx_serialize: () => 0,
     idx_image_ptr: () => 0,
     idx_image_alloc: () => 0,

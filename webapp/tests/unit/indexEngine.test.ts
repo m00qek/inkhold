@@ -50,6 +50,7 @@ const PLAN: TermsDocument = {
   pages: [{ p: 7, t: "orcamento anual dados" }],
 };
 const LIBRARY = [NOTES, BOOK, PLAN];
+const NO_ITEMS = { name: 0, todo: 0, digest: 0 };
 
 /** An index holding `LIBRARY`, built the way a first search would build it. */
 async function built(): Promise<SearchIndex> {
@@ -101,7 +102,7 @@ describe("SearchIndex build and query", () => {
       const r = index.query("reuniao ", 1);
       expect(r.total).toBe(2);
       expect(r.hits).toHaveLength(1);
-      expect(index.query("reuniao ", 0)).toEqual({ total: 2, hits: [], expansions: [] });
+      expect(index.query("reuniao ", 0)).toEqual({ total: 2, hits: [], items: [], itemTotals: NO_ITEMS, expansions: [] });
     } finally {
       index.close();
     }
@@ -164,7 +165,7 @@ describe("SearchIndex query folding to nothing", () => {
     const index = await built();
     try {
       for (const junk of ["", "   ", "-", '"', '""', "...", "( )", "*", "^", "-- ", "()"]) {
-        expect({ junk, ...index.query(junk, 10) }).toEqual({ junk, total: 0, hits: [], expansions: [] });
+        expect({ junk, ...index.query(junk, 10) }).toEqual({ junk, total: 0, hits: [], items: [], itemTotals: NO_ITEMS, expansions: [] });
       }
     } finally {
       index.close();
@@ -279,7 +280,7 @@ describe("SearchIndex lifecycle and refusals", () => {
       index.reset();
       expect(index.documentCount).toBe(0);
       expect(index.pageCount).toBe(0);
-      expect(index.query("caligrafia ", 10)).toEqual({ total: 0, hits: [], expansions: [] });
+      expect(index.query("caligrafia ", 10)).toEqual({ total: 0, hits: [], items: [], itemTotals: NO_ITEMS, expansions: [] });
       index.build([BOOK]);
       expect(index.query("caligrafia ", 10).total).toBe(1);
     } finally {
@@ -381,6 +382,101 @@ describe("SearchIndex scale", () => {
       ]);
     } finally {
       index.close();
+    }
+  });
+});
+
+describe("SearchIndex item rows", () => {
+  const keys = (r: { items: { kind: string; key: string }[] }): string[] => r.items.map((i) => `${i.kind}:${i.key}`).sort();
+
+  it("answers pages and items in one query, each with its own total", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [
+        { key: "t1", text: "Rever o orçamento" },
+        { key: "t2", text: "Comprar pão" },
+      ]);
+      index.setItems("digest", [{ key: "d1", text: "O orçamento anual\nUm comentário" }]);
+      const r = index.query("orcamento ", 10);
+      expect(r.total).toBe(2);
+      expect(places(r)).toEqual(["a0", "c7"]);
+      expect(keys(r)).toEqual(["digest:d1", "todo:t1"]);
+      expect(r.itemTotals).toEqual({ name: 0, todo: 1, digest: 1 });
+    } finally {
+      index.close();
+    }
+  });
+
+  it("rewrites only what changed, so a saved item is found at once", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [{ key: "t1", text: "Comprar pão" }]);
+      expect(keys(index.query("pao ", 10))).toEqual(["todo:t1"]);
+      index.setItems("todo", [{ key: "t1", text: "Comprar leite" }]);
+      expect(keys(index.query("pao ", 10))).toEqual([]);
+      expect(keys(index.query("leite ", 10))).toEqual(["todo:t1"]);
+      index.setItems("todo", []);
+      expect(index.query("leite ", 10).itemTotals.todo).toBe(0);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("keeps the item rows across a rebuild, and writes ones set before the first build", async () => {
+    const index = await SearchIndex.open(loadCore);
+    try {
+      index.setItems("name", [{ key: "f1", text: "Caligrafia" }]);
+      index.build(LIBRARY);
+      expect(index.query("caligrafia ", 10).itemTotals.name).toBe(1);
+      index.rebuild([BOOK]);
+      const r = index.query("caligrafia ", 10);
+      expect(places(r)).toEqual(["b0"]);
+      expect(keys(r)).toEqual(["name:f1"]);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("holds a quoted phrase to its order in an item, not on a page of words", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [
+        { key: "in-order", text: "notas sobre o projeto" },
+        { key: "apart", text: "sobre as notas" },
+      ]);
+      const r = index.query('"notas sobre" ', 10);
+      expect(places(r)).toEqual(["b1"]);
+      expect(keys(r)).toEqual(["todo:in-order"]);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("corrects a typo over the items' words too", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [{ key: "t1", text: "Ligar para a farmácia" }]);
+      const r = index.query("farmacai ", 10, true);
+      expect(keys(r)).toEqual(["todo:t1"]);
+      expect(r.expansions).toEqual([{ typed: "farmacai", matched: "farmacia" }]);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("round-trips its items through a snapshot", async () => {
+    const source = await built();
+    source.setItems("digest", [{ key: "d1", text: "Moby Dick" }]);
+    const snapshot = source.serialize();
+    source.close();
+    const restored = await SearchIndex.restore(snapshot, loadCore);
+    try {
+      expect(keys(restored.query("moby ", 10))).toEqual(["digest:d1"]);
+      restored.setItems("digest", [{ key: "d2", text: "Ahab" }]);
+      expect(keys(restored.query("moby ", 10))).toEqual([]);
+      expect(keys(restored.query("ahab ", 10))).toEqual(["digest:d2"]);
+    } finally {
+      restored.close();
     }
   });
 });
