@@ -5,7 +5,7 @@
 
 import { cardList } from "./galleryCards";
 import { el } from "../ui/dom";
-import { coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
+import { answerFor, coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail/railPlaces";
 import { insideQuery, matchesName } from "../search/match";
 import type { ItemRow } from "../search/itemRows";
@@ -63,7 +63,7 @@ export interface GallerySearchCtx {
   * frame, or `null` if unknown. Read at paint time.
   */
   indexPending: () => number | null;
-  /** Another group of results painted after the notes (the to-dos); null: none. */
+  /** The digests' and to-dos' groups, painted among the notes (see `renderSearch`); null: none. */
   moreResults?: (q: string) => Node | null;
   /** How much handwriting search can find (`searchCoverage.ts`); absent: not said. */
   coverage?: SearchCoverage;
@@ -93,18 +93,13 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /**
-  * Joins index hits (md5, file id, ordinals; no names) to the cached tree and
-  * drops hits the tree doesn't name: the local index may be a superset of the
-  * live library. Name matches first; otherwise the engine's order is kept.
-  */
-  /**
    * The names the index matched for `q`, once it answered. Only when none
    * matched as typed, the typed text anywhere in a name ("style" in
    * "MyStyle"), then the typo ladder's: fallbacks, never a widening.
    */
   function nameHits(q: string): NameHits {
-    const s = ctx.getSearchState();
-    if (s.kind !== "results" || s.query !== q) return { notes: new Set(), folders: new Set() };
+    const s = answerFor(ctx.getSearchState(), q);
+    if (!s) return { notes: new Set(), folders: new Set() };
     const notes = new Set<Id>();
     const folders = new Set<Id>();
     for (const key of s.items.name) {
@@ -125,6 +120,11 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     return inNotes.size > 0 || inFolders.size > 0 ? { notes: inNotes, folders: inFolders } : { notes, folders };
   }
 
+  /**
+  * Joins index hits (md5, file id, ordinals; no names) to the cached tree and
+  * drops hits the tree doesn't name: the local index may be a superset of the
+  * live library. Name matches first; otherwise the engine's order is kept.
+  */
   function searchResults(names: NameHits): SearchResult[] {
     const searchState = ctx.getSearchState();
     const cached = allCachedNotes();
@@ -250,11 +250,11 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       if (searchState.kind === "error" && ctx.treeLoaded()) {
         // Gated on the walk: the index raises while the tree cache is still empty,
         // which is early, not failed.
-        gallery.append(ctx.emptyState("Couldn't search", "The recognised text couldn't be searched. Keep typing to retry."));
+        gallery.append(ctx.emptyState("Couldn't search", "Something went wrong in this browser's search. Keep typing to try again."));
       } else if (searchState.kind === "searching" || searchState.kind === "idle" || !ctx.treeLoaded()) {
         // No "No matches" until the walk lands (`rail.settle()` repaints); the empty
         // transcript answer usually arrives before the tree the name half needs.
-        gallery.append(ctx.emptyState("Searching…", "Looking through every note — names, typing and handwriting."));
+        gallery.append(ctx.emptyState("Searching…", "Looking through names, handwriting, typed text, to-dos and digests."));
       } else {
         const still = pendingLine(pending);
         // The coverage block says the rest, with numbers, once it has them.

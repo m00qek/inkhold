@@ -19,6 +19,7 @@ import { digestHits, foundDigests } from "../digest/digestSearch";
 import { placePath } from "../digest/digestModel";
 import { homeView, viewPath } from "../todo/todoModel";
 import { type AccountHost } from "../account/account";
+import { answerFor } from "../noteSearch";
 import type { LibraryCtx } from "./libraryContext";
 
 export interface LibraryFeatures {
@@ -135,18 +136,17 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
       // Read at start, they can be stale: a search asks again (`load` repaints).
       ctx.todo.freshen();
       void ctx.digest.freshen();
-      const s = st.searchState;
-      const answered = s.kind === "results" && s.query === q.trim() ? s : null;
-      const expansions = answered?.expansions ?? [];
+      // Like the names, only from the index's answer to this query: no group before it, or over a failure.
+      const s = answerFor(st.searchState, q);
+      if (!s) return null;
       const digests = ctx.searchItems.digest();
       const dHits = digests?.enabled
-        ? digestHits(digests, foundDigests(digests, answered?.items.digest ?? []), q, expansions, (place) => go(digestHref(placePath(place))))
+        ? digestHits(digests, foundDigests(digests, s.items.digest), q, s.expansions, (place) => go(digestHref(placePath(place))))
         : null;
       const snap = ctx.searchItems.todo();
-      const found = snap?.enabled ? findTodos(snap, q, answered?.items.todo ?? [], expansions) : null;
-      const tHits = snap && found && (found.tasks.length > 0 || found.lists.length > 0) ? todoHits(
+      const tHits = snap?.enabled ? todoHits(
         snap,
-        found,
+        findTodos(snap, q, s.items.todo, s.expansions),
         Date.now(),
         (t) => {
           ctx.todo.reveal(t.id);

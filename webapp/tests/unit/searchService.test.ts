@@ -181,7 +181,6 @@ describe("createIndexSearch", () => {
     // Nothing here may allocate the 16.13 MB engine.
     expect(loads()).toBe(0);
     await local.sync();
-    expect(local.ready).toBe(true);
     expect(loads()).toBe(0);
 
     await local.search("reuniao");
@@ -315,16 +314,6 @@ describe("createIndexSearch", () => {
     expect(loads()).toBe(1);
   });
 
-  it("is not ready before the first sync, or where IndexedDB is absent", async () => {
-    const { load } = spyLoader();
-    const fresh = createIndexSearch({ sync: fakeSync().sync, load });
-    expect(fresh.ready).toBe(false);
-
-    const degraded = createIndexSearch({ sync: fakeSync({ available: false }).sync, load });
-    await degraded.sync();
-    expect(degraded.ready).toBe(false);
-  });
-
   it("answers a session that never synced, from the cached listing alone", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();
@@ -334,7 +323,6 @@ describe("createIndexSearch", () => {
     ];
     const local = createIndexSearch({ sync, load, listing });
 
-    expect(local.ready).toBe(true);
     const results = await local.search("reuniao");
     expect(results.documents.map((d) => d.md5)).toEqual([BRAVO, ALFA]);
     // Offline: no manifest, so no tier; nothing is penalised for it.
@@ -345,7 +333,6 @@ describe("createIndexSearch", () => {
   it("raises when there is neither a manifest nor a listing to intersect with", async () => {
     const { load } = spyLoader();
     const local = createIndexSearch({ sync: fakeSync().sync, load });
-    expect(local.ready).toBe(false);
     await expect(local.search("reuniao")).rejects.toThrow();
   });
 
@@ -417,7 +404,6 @@ describe("createSearchService", () => {
     const service = createSearchService({ sync: failing, load, coalesceMs: 0 });
 
     await expect(service.syncNow()).resolves.toBeUndefined();
-    expect(service.ready).toBe(false);
     // No server fallback: the query raises, never a quiet "no matches".
     await expect(service.search("reuniao")).rejects.toThrow();
     service.dispose();

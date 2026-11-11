@@ -93,16 +93,15 @@ function ordered(s: TodoSnapshot, hit: TodoTask[]): TodoTask[] {
   return [...open, ...done];
 }
 
-/** Null when nothing matched (or To-Do is off): the search says nothing about to-dos. */
+/** The To-dos group of the library's search; null when nothing matched: the search says nothing about to-dos. */
 export function todoHits(
-  snap: TodoSnapshot | null,
+  snap: TodoSnapshot,
   found: TodoFind,
   now: number,
   open: (task: TodoTask) => void,
   chip: (task: TodoTask) => HTMLElement | null,
   openList: (view: TodoView) => void,
 ): HTMLElement | null {
-  if (!snap?.enabled) return null;
   if (found.tasks.length === 0 && found.lists.length === 0) return null;
 
   const listRows = found.lists.map((l) => {

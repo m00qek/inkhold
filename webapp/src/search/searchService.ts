@@ -92,9 +92,6 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
   }
 
   return {
-    get ready() {
-      return local.ready;
-    },
     search: (query, signal) => local.search(query, signal).then(phraseCheck),
 
     refresh,

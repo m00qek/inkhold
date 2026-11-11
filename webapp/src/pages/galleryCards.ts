@@ -4,7 +4,8 @@
 
 import { onPlainClick } from "../ui/link";
 import type { SearchExcerpts } from "./searchExcerpts";
-import { insideQuery, nameMarks, nameQuery } from "../search/match";
+import { insideQuery, nameMarks, nameQuery, wordMarks } from "../search/match";
+import { fold } from "../search/fold";
 import { el } from "../ui/dom";
 import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
 import { ICONS, svg, type IconName } from "../ui/icons";
@@ -148,15 +149,18 @@ function cardMarks(note: NoteSummary): HTMLElement {
 
 /**
 * Marks the query's words as text nodes and `<mark>`, never markup: names are
-* raw device text. A marked title is how a name match shows itself. The words
-* are the ones `search/match.ts` matched on, accents and order aside.
+* raw device text. A marked title is how a name match shows itself: by the
+* typed words, accents and order aside, else the typed text inside the name,
+* else the typo ladder's spelling of them.
 */
-function markedText(text: string, q: string): Node[] {
+function markedText(text: string, q: string, expansions: readonly Expansion[]): Node[] {
   const out: Node[] = [];
   let from = 0;
-  // The word rule's marks, or the fallback's when the name matched only that way.
+  const matched = new Set(expansions.map((e) => fold(e.matched)));
   const strict = nameMarks(text, nameQuery(q));
-  for (const [start, end] of strict.length > 0 ? strict : nameMarks(text, insideQuery(q))) {
+  const inside = strict.length > 0 ? strict : nameMarks(text, insideQuery(q));
+  const marks = inside.length > 0 || matched.size === 0 ? inside : wordMarks(text, (w) => matched.has(w));
+  for (const [start, end] of marks) {
     if (start > from) out.push(document.createTextNode(text.slice(from, start)));
     out.push(el("mark", { text: text.slice(start, end) }));
     from = end;
@@ -388,7 +392,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
         el(
           "div",
           { class: "card__main" },
-          el("div", { class: "card__title" }, ...(result.nameMatched ? markedText(note.name, q) : [document.createTextNode(note.name)])),
+          el("div", { class: "card__title" }, ...(result.nameMatched ? markedText(note.name, q, expansions) : [document.createTextNode(note.name)])),
           el(
             "div",
             { class: "card__meta" },

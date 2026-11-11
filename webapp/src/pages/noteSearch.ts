@@ -35,6 +35,11 @@ export type SearchState =
     }
   | { kind: "error"; query: string };
 
+/** The index's answer to `q` (trimmed), or null before it, after a failure, or for another query. */
+export function answerFor(state: SearchState, q: string): Extract<SearchState, { kind: "results" }> | null {
+  return state.kind === "results" && state.query === q.trim() ? state : null;
+}
+
 export interface SearchView {
   setState(state: SearchState): void;
 }
@@ -55,7 +60,6 @@ export interface NoteSearchController {
 }
 
 export const noLocalSearch: LocalSearch = {
-  ready: false,
   search: (query) => Promise.resolve({ query, totalPages: 0, documents: [], expansions: [], items: NO_ITEM_HITS }),
 };
 

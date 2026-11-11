@@ -53,11 +53,7 @@ export type ItemHits = Readonly<Record<ItemKind, readonly string[]>>;
 export const NO_ITEM_HITS: ItemHits = { name: [], todo: [], digest: [] };
 
 export interface LocalSearch {
-  /**
-   * False before the first sync or without IndexedDB. A search against a
-   * not-ready engine throws, so the box shows an error, not "no matches".
-   */
-  readonly ready: boolean;
+  /** Throws when it has nothing to answer from, so the box shows an error, not "no matches". */
   search(query: string, signal?: AbortSignal): Promise<LocalResults>;
 }
 

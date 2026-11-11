@@ -126,11 +126,6 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   }
 
   return {
-    get ready() {
-      // Names, to-dos and digests answer on their own, without a stored page.
-      return ((live !== null || (listing?.().length ?? 0) > 0) && sync.store.available) || hasItems();
-    },
-
     async sync(signal) {
       const outcome = await sync.sync({ signal });
       const next = new Map<string, ManifestRow>();
@@ -171,7 +166,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     },
 
     async search(query, signal): Promise<LocalResults> {
-      // The same two sources `ready` accepts, so an offline cold start works.
+      // The manifest, or offline the cached listing, or the browser's own rows: an offline cold start works.
       if (!live && (listing?.().length ?? 0) === 0 && !hasItems()) throw new Error("local search has nothing to answer from");
       const idx = await engine();
       // The build is not abortable; a superseded search must just not paint.

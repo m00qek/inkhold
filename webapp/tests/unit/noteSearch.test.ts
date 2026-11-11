@@ -36,7 +36,6 @@ function deferredSearch() {
   const pending: { query: string; resolve: (r: LocalResults) => void; reject: (e: unknown) => void }[] = [];
 
   const engine: LocalSearch = {
-    ready: true,
     search(query: string, signal?: AbortSignal): Promise<LocalResults> {
       calls.push(query);
       signals.push(signal);
@@ -339,10 +338,9 @@ describe("createNoteSearch", () => {
     });
   });
 
-  // The default engine, so the controller has no "no engine" branch; never `ready`.
+  // The default engine, so the controller has no "no engine" branch.
   describe("noLocalSearch", () => {
-    it("is never ready and answers every query with nothing", async () => {
-      expect(noLocalSearch.ready).toBe(false);
+    it("answers every query with nothing", async () => {
       await expect(noLocalSearch.search("anything")).resolves.toEqual({
         query: "anything",
         totalPages: 0,
