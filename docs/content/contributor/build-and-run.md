@@ -12,7 +12,7 @@ extra:
 In this tutorial you build Inkhold from source, start the server, and then run
 the browser app on its own demo library, the way you will while changing it.
 
-You need [Zig](https://ziglang.org) 0.17.0, Node.js with npm, and `git`.
+You need [Zig](https://ziglang.org) 0.17.1, Node.js with npm, and `git`.
 
 ## 1. Get the code
 

@@ -32,7 +32,7 @@ npx playwright install --with-deps chromium webkit
 
 The suite needs the WebAssembly decoders built from the Zig sources. Build them
 on your machine first (`npm run build:wasm` in `webapp/`, which writes them
-into `webapp/public/`), or install Zig 0.17.0 in the container too.
+into `webapp/public/`), or install Zig 0.17.1 in the container too.
 
 ## Run it
 
