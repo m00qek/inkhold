@@ -69,6 +69,10 @@ pub const Config = struct {
     /// Off until it is proven on a tablet: while off, the To-Do app's calls are
     /// refused and its sync stops with an error, touching nothing.
     todo_sync: bool = false,
+    /// Store and serve the tablet's digests (`handlers/device/digest.zig`).
+    /// Off until it is proven on a tablet: while off, the Digest app's calls
+    /// are refused and its sync stops with an error, touching nothing.
+    digest_sync: bool = false,
     tls: Tls = .{},
     history: History = .{},
 };

@@ -32,6 +32,7 @@ which lists them all, and change what you need.
 | `trusted_proxy` | `""` | The address of a reverse proxy that handles HTTPS in front of Inkhold. Requests from it are rate-limited by each visitor's address (from X-Real-IP, or the last X-Forwarded-For) instead of all as one. Empty trusts no such header. |
 | `backup_warn_after_hours` | `48` | Admins see a notice in the library when the newest successful backup is older than this many hours. |
 | `todo_sync` | `false` | Sync the tablet's To-Do lists and tasks. New, so off: while off, the tablet's To-Do app shows a sync error and nothing is touched. Copy the tablet first, and when it asks how to treat its digest and to-do data, choose "Retain locally". |
+| `digest_sync` | `false` | Sync the tablet's digests: excerpts, their categories and annotations. New, so off: while off, the tablet's Digest app shows a sync error and nothing is touched. Copy the tablet first, and when it asks how to treat its digest and to-do data, choose "Retain locally". |
 | `history.keep` | `5` | How many earlier versions of each file are kept. 0 keeps none. |
 | `history.max_keep` | `15` | The most versions a person may choose to keep of their own files. |
 | `history.max_bytes` | `500000000` | Bytes all the household's versions may take together. Past it, the oldest versions of whoever is saving go first. |

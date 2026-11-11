@@ -116,3 +116,35 @@ fn blobRowExists(self: Files, md5: []const u8) !bool {
     s.bindText(1, md5);
     return try s.step();
 }
+
+// ---- uploads that are not files: the Digest app's handwritten notes ----
+
+/// The `path` of an upload session that is not a file in the tree, but a
+/// digest's handwritten note (`upload/apply/summary`). It never starts with
+/// `/`, so `upload/finish` refuses it rather than filing it as a document.
+pub const digest_upload_path = "digest:";
+
+/// Takes the blob an upload session holds as one more reference (the session
+/// is dropped) and returns its md5, owned by `alloc`. Null when the session is
+/// unknown or nothing was uploaded yet. The caller's transaction decides: on
+/// rollback the reference and the session come back.
+pub fn claimUploadedBlob(self: Files, alloc: std.mem.Allocator, user_id: u64, inner_name: []const u8) !?[]const u8 {
+    const session = (try self.uploadSession(alloc, user_id, inner_name)) orelse return null;
+    const md5 = session.blob_md5 orelse return null;
+    const size = try self.blobs.sizeOf(md5);
+    try internal.ensureBlobRow(self, md5, size);
+    try internal.incref(self, md5);
+    try self.deleteUploadSession(inner_name);
+    return md5;
+}
+
+/// Gives up one reference taken by `claimUploadedBlob`. True means: call
+/// `removeBlobFiles` once the transaction has committed.
+pub fn releaseBlob(self: Files, md5: []const u8) !bool {
+    return internal.decref(self, md5);
+}
+
+/// Removes a released blob's bytes and derived files (after commit).
+pub fn removeBlobFiles(self: Files, md5: []const u8) void {
+    internal.removeBlobFiles(self, md5);
+}

@@ -48,9 +48,25 @@ pub const routes = [_]router.Route{
     .{ .method = .POST, .path = "/api/file/2/users/get_space_usage", .scopes = &.{.device}, .handler = device.getSpaceUsage, .read_only = true },
     .{ .method = .POST, .path = "/api/file/2/files/synchronous/start", .scopes = &.{.device}, .handler = device.syncStart },
     .{ .method = .POST, .path = "/api/file/2/files/synchronous/end", .scopes = &.{.device}, .handler = device.syncEnd },
-    .{ .method = .POST, .path = "/api/file/query/summary/hash", .scopes = &.{.device}, .handler = device.summaryHash, .read_only = true },
-    .{ .method = .POST, .path = "/api/file/query/summary/id", .scopes = &.{.device}, .handler = device.summaryById, .read_only = true },
-    .{ .method = .POST, .path = "/api/file/query/summary/group", .scopes = &.{.device}, .handler = device.summaryGroup, .read_only = true },
+    // The Digest app's sync (`handlers/device/digest.zig`): refused unless
+    // `digest_sync`. The manifest and the categories are always answered
+    // whole; deletes never fail.
+    .{ .method = .POST, .path = "/api/file/query/summary/hash", .scopes = &.{.device}, .handler = device.digestHash, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/query/summary/id", .scopes = &.{.device}, .handler = device.digestById, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/query/summary", .scopes = &.{.device}, .handler = device.digestQuery, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/add/summary", .scopes = &.{.device}, .handler = device.digestAdd },
+    .{ .method = .PUT, .path = "/api/file/update/summary", .scopes = &.{.device}, .handler = device.digestUpdate },
+    .{ .method = .DELETE, .path = "/api/file/delete/summary", .scopes = &.{.device}, .handler = device.digestDelete },
+    .{ .method = .POST, .path = "/api/file/download/summary", .scopes = &.{.device}, .handler = device.digestDownload, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/upload/apply/summary", .scopes = &.{.device}, .handler = device.digestUploadApply },
+    .{ .method = .POST, .path = "/api/file/query/summary/group", .scopes = &.{.device}, .handler = device.digestGroupQuery, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/add/summary/group", .scopes = &.{.device}, .handler = device.digestGroupAdd },
+    .{ .method = .PUT, .path = "/api/file/update/summary/group", .scopes = &.{.device}, .handler = device.digestGroupUpdate },
+    .{ .method = .DELETE, .path = "/api/file/delete/summary/group", .scopes = &.{.device}, .handler = device.digestGroupDelete },
+    .{ .method = .GET, .path = "/api/file/query/summary/tag", .scopes = &.{.device}, .handler = device.digestTagQuery, .read_only = true },
+    .{ .method = .POST, .path = "/api/file/add/summary/tag", .scopes = &.{.device}, .handler = device.digestTagAdd },
+    .{ .method = .PUT, .path = "/api/file/update/summary/tag", .scopes = &.{.device}, .handler = device.digestTagUpdate },
+    .{ .method = .DELETE, .path = "/api/file/delete/summary/tag", .scopes = &.{.device}, .handler = device.digestTagDelete },
     // /oss/get is `.public`: the device sends no x-access-token on the download GET;
     // it is authorized by the `?t=` token download_v3 mints, so a tokenless GET is
     // 403, never 401 (a 401 logs the device out). list_folder locks the DB only
@@ -71,10 +87,17 @@ pub const routes = [_]router.Route{
     // The /oss byte routes stream multi-MB bodies and lock the DB only around their
     // own DB calls. Set `manual_db_lock` only on a handler audited to do that.
     .{ .method = .GET, .path = "/oss/get/:id", .scopes = &.{.public}, .handler = device.ossGet, .manual_db_lock = true },
+    // A digest's handwritten note, by the token `download/summary` mints. Under
+    // /api/oss/ because the Digest app rewrites only such URLs onto the address
+    // it was given; any other keeps our scheme, and behind TLS that is a 301.
+    .{ .method = .GET, .path = "/api/oss/summary/:id", .scopes = &.{.public}, .handler = device.digestServeNote, .manual_db_lock = true },
     // apply reserves an upload and returns an /oss/put URL; finish commits it. The
     // device sends x-access-token to all three.
     .{ .method = .POST, .path = "/api/file/3/files/upload/apply", .scopes = &.{.device}, .handler = device.uploadApply },
     .{ .method = .POST, .path = "/oss/put/:innerName", .scopes = &.{.device}, .handler = device.ossPut, .manual_db_lock = true },
+    // The same, for the Digest app's notes (`upload/apply/summary`): /api/oss/ for
+    // the reason above.
+    .{ .method = .POST, .path = "/api/oss/put/:innerName", .scopes = &.{.device}, .handler = device.ossPut, .manual_db_lock = true },
     .{ .method = .POST, .path = "/api/file/2/files/upload/finish", .scopes = &.{.device}, .handler = device.uploadFinish },
     // The tablet's auto-sync channel (Socket.IO 2 over a websocket). `.public`: the
     // device token arrives in the query, and the handler checks it. Held for as

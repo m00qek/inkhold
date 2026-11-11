@@ -121,3 +121,22 @@ test "v19: files keep their ids, rows, history and indexes, and a purged top id 
     try db.exec("INSERT INTO files(user_id, parent_id, name, md5, size, created_at, updated_at) VALUES(1, 1, 'c.note', 'cc', 3, 0, 0);");
     try std.testing.expectEqual(@as(i64, 8), try count(db, "SELECT MAX(id) FROM files;"));
 }
+
+test "v24: categories stored without an id get one and a fresh md5; others are untouched" {
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try schema.migrateTo(db, 23);
+    try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@home', '', 0);");
+    try db.exec(
+        \\INSERT INTO digests(id, user_id, is_group, uid, name, md5_hash, created_at, updated_at) VALUES
+        \\ (1, 1, 1, NULL, 'Français', 'g1', 0, 0),
+        \\ (2, 1, 1, '', 'Note', 'g2', 0, 0),
+        \\ (3, 1, 1, 'kb-work', 'Work', 'g3', 0, 0),
+        \\ (4, 1, 0, NULL, 'a digest, not a category', 'd1', 0, 0);
+    );
+    try schema.migrateTo(db, 24);
+    try std.testing.expectEqual(@as(i64, 24), try schema.userVersion(db));
+    try std.testing.expectEqual(@as(i64, 2), try count(db, "SELECT COUNT(*) FROM digests WHERE id IN (1, 2) AND length(uid) = 32 AND md5_hash NOT IN ('g1', 'g2');"));
+    try std.testing.expectEqual(@as(i64, 1), try count(db, "SELECT COUNT(*) FROM digests WHERE id = 3 AND uid = 'kb-work' AND md5_hash = 'g3';"));
+    try std.testing.expectEqual(@as(i64, 1), try count(db, "SELECT COUNT(*) FROM digests WHERE id = 4 AND uid IS NULL AND md5_hash = 'd1';"));
+}

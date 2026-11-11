@@ -467,6 +467,66 @@ pub const ddl_v22 =
     \\UPDATE todo_tasks SET link_text = title WHERE links IS NOT NULL;
 ;
 
+// v23: the tablet's Digest app (services/digest.zig). One table for digests
+// AND their categories (`is_group`), as the official server keeps them, so
+// every field the app sends has a column and comes back exactly as sent. Ids
+// are the app's `serviceId`: AUTOINCREMENT, never reused, because the app
+// deletes a synced digest whose id the manifest lacks and must never match
+// a stale id to a different digest. `parent_uid` '' is the app's built-in
+// Uncategorized, never a row. Deletion is soft: a row leaves every listing
+// at once and is purged after the bin's retention.
+pub const ddl_v23 =
+    \\CREATE TABLE digests (
+    \\  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    \\  user_id                INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  is_group               INTEGER NOT NULL DEFAULT 0,
+    \\  uid                    TEXT,
+    \\  parent_uid             TEXT    NOT NULL DEFAULT '',
+    \\  name                   TEXT,
+    \\  description            TEXT,
+    \\  content                TEXT,
+    \\  source_path            TEXT,
+    \\  source_type            INTEGER,
+    \\  data_source            TEXT,
+    \\  author                 TEXT,
+    \\  tags                   TEXT,
+    \\  metadata               TEXT,
+    \\  comment_str            TEXT,
+    \\  comment_handwrite_name TEXT,
+    \\  handwrite_inner_name   TEXT,
+    \\  handwrite_md5          TEXT,
+    \\  md5_hash               TEXT    NOT NULL DEFAULT '',
+    \\  creation_time          INTEGER NOT NULL DEFAULT 0,
+    \\  last_modified_time     INTEGER NOT NULL DEFAULT 0,
+    \\  created_at             INTEGER NOT NULL,
+    \\  updated_at             INTEGER NOT NULL,
+    \\  deleted                INTEGER NOT NULL DEFAULT 0,
+    \\  deleted_at             INTEGER
+    \\);
+    \\CREATE INDEX digests_live ON digests(user_id, is_group, id) WHERE deleted = 0;
+    \\CREATE INDEX digests_uid ON digests(user_id, is_group, uid) WHERE deleted = 0;
+    \\CREATE INDEX digests_parent ON digests(user_id, parent_uid) WHERE deleted = 0 AND is_group = 0;
+    \\CREATE INDEX digests_deleted_at ON digests(deleted_at) WHERE deleted = 1;
+    \\CREATE TABLE digest_tags (
+    \\  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    \\  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    \\  name       TEXT    NOT NULL,
+    \\  created_at INTEGER NOT NULL
+    \\);
+    \\CREATE INDEX digest_tags_user ON digest_tags(user_id, id);
+;
+
+// v24: categories stored without an id get one. The Digest app's category
+// picker crashes on a category whose id is null, and on Nov 2026 hardware 12
+// such categories existed: imported from folders by a pre-Digest Inkhold, then
+// uploaded with no `uniqueIdentifier`. A fresh `md5_hash` makes the app see the
+// server's copy as changed, so its next sync copies the id onto the tablet
+// (`KnowledgeBaseSyncWorker.updateLocalKnowledgeBaseFromServer`).
+pub const ddl_v24 =
+    \\UPDATE digests SET uid = lower(hex(randomblob(16))), md5_hash = lower(hex(randomblob(16)))
+    \\WHERE is_group = 1 AND deleted = 0 AND (uid IS NULL OR uid = '');
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

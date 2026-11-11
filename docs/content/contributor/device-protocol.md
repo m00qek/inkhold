@@ -180,4 +180,47 @@ trusting it.
   `soldOutCount` at sign-in) skips the prompt, and Settings does the Retain
   itself (`SwitchCloudHelper.clearSyncState`); Inkhold never sends a
   `soldOutCount`, so that path does not arise.
-- Digest stays refused.
+- **Digest sync** (schema v23, `services/digest.zig`,
+  `handlers/device/digest.zig`; decompiled `com.ratta.supernote.knowledge`
+  1.00.133) stores digests and their categories in one table, as the official
+  server does: a category is a row with `is_group`, a digest names it by uid in
+  `parent_uid`, and `''` is the app's built-in Uncategorized, never a row. The
+  app compares `query/summary/hash` against its own digests
+  (`processKnowledgeHash`): a synced digest (server id above 0) the manifest
+  lacks is **deleted on the tablet** unless edited there since; an empty
+  manifest deletes them all. So the manifest and `query/summary/group` come as
+  one call (page 0, size 0) and are answered whole; ids are AUTOINCREMENT,
+  never reused; deletes always succeed; deleting a category deletes its
+  digests. `query/summary` is paged by the app, 1-based, 1000 a page, until a
+  short page.
+- **Retain locally** for digests is the provider URI
+  `knowledge/update_all_to_add_state`: every digest and every category but the
+  default one goes back to server id 0 and state new, so the next sync uploads
+  them all and deletes none. A restore therefore loses no digest when the
+  docs' advice is followed.
+- A digest from a document records its exact span: `metadata` (a JSON string)
+  holds `document_location_data` (itself a JSON string: page from 0, chapter,
+  start and end character), `source_size` and `unique_identifier`;
+  `sourcePath` is the file's path in the tablet's own tree.
+- A handwritten note is a `.mark` file. The app asks `upload/apply/summary`
+  for a place, POSTs it multipart to `/api/oss/put` (a session whose path is
+  `digest:`, which `upload/finish` refuses), and names the upload in its add
+  or update; the server claims the blob then. A digest holds a blob reference
+  exactly when `handwrite_inner_name` is set, and releases it when the note is
+  replaced or the digest purged. `download/summary` gives a token URL for
+  `/api/oss/summary/:id`; its token is minted for `id | 2^62`, so it never
+  fetches a file.
+- **A category always has an id.** The app's category picker reads every
+  category's `uniqueIdentifier` and crashes on a null one, and a tablet can
+  hold such categories (imported from folders by a pre-Digest Inkhold). So a
+  category added or updated without one, or with `""`, which is the app's own
+  Uncategorized, gets a random id and an `md5Hash` the tablet lacks. The app
+  then sees the server's copy as changed, and its next sync copies the id onto
+  the tablet (`updateLocalKnowledgeBaseFromServer`). Schema v24 did the same
+  once for categories already stored.
+- Both byte URLs sit under `/api/oss/` because the app moves only such URLs
+  onto the address it was given (`replaceHost`). Any other keeps the scheme
+  the server wrote, `http` behind a TLS proxy, and the proxy's 301 fails the
+  sync.
+- Digest sync is behind `config.digest_sync`, off by default. Not yet tested
+  on a tablet.

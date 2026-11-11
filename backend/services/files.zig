@@ -422,6 +422,10 @@ pub const Files = struct {
     pub const uploadSession = uploads.uploadSession;
     pub const deleteUploadSession = uploads.deleteUploadSession;
     pub const sweepUploadSessions = uploads.sweepUploadSessions;
+    pub const claimUploadedBlob = uploads.claimUploadedBlob;
+    pub const releaseBlob = uploads.releaseBlob;
+    pub const removeBlobFiles = uploads.removeBlobFiles;
+    pub const digest_upload_path = uploads.digest_upload_path;
 
     // ---- quota (`files/quota.zig`) ----
     pub const Cap = quota.Cap;

@@ -54,5 +54,5 @@ Nothing is overwritten.
 
 ## To-Do and Digest
 
-The tablet's To-Do and Digest apps sync separately. To-Do sync works and is
-[off until you turn it on](@/manual/todo-sync.md); Digest isn't implemented.
+The tablet's To-Do and Digest apps sync separately, and each is off until you
+turn it on: [To-Do](@/manual/todo-sync.md) and [Digest](@/manual/digest-sync.md).
