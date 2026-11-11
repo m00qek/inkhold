@@ -47,10 +47,17 @@ export function createCopyControl(selectedText: () => string): CopyControl {
 /** Pages, Outline and Digests share the left dock, so one value makes two open unrepresentable. */
 export type LeftDock = "pages" | "outline" | "digests";
 
+/** A panel the docks open and shut, its element what a docked one takes from the page. */
+interface DockPanel {
+  el: HTMLElement;
+  setOpen(open: boolean): void;
+}
+
+/** The panels and their toggles; a toggle's click opens or shuts its panel. */
 export interface PdfDocksDeps {
-  pagesPanel: { setOpen(open: boolean): void };
-  outlinePanel: { setOpen(open: boolean): void };
-  digestsPanel: { setOpen(open: boolean): void };
+  pagesPanel: DockPanel;
+  outlinePanel: DockPanel;
+  digestsPanel: DockPanel;
   layersPanel: { el: HTMLElement };
   pagesToggle: HTMLElement;
   outlineToggle: HTMLElement;
@@ -66,6 +73,8 @@ export interface PdfDocks {
   set(left: LeftDock | null, right: boolean, asked: "left" | "right" | null, repaint?: boolean): void;
   left(): LeftDock | null;
   right(): boolean;
+  /** The panels open now, left to right. */
+  open(): HTMLElement[];
 }
 
 export function createPdfDocks(deps: PdfDocksDeps): PdfDocks {
@@ -124,5 +133,15 @@ export function createPdfDocks(deps: PdfDocksDeps): PdfDocks {
     if (repaint) deps.repaint();
   }
 
-  return { set: setDocks, left: () => leftDock, right: () => rightDock };
+  const lefts: [LeftDock, HTMLElement][] = [["pages", deps.pagesToggle], ["outline", deps.outlineToggle], ["digests", deps.digestsToggle]];
+  for (const [dock, toggle] of lefts) toggle.addEventListener("click", () => setDocks(leftDock === dock ? null : dock, rightDock, "left"));
+  deps.layersToggle.addEventListener("click", () => setDocks(leftDock, !rightDock, "right"));
+
+  const leftPanel = { pages: deps.pagesPanel, outline: deps.outlinePanel, digests: deps.digestsPanel };
+  return {
+    set: setDocks,
+    left: () => leftDock,
+    right: () => rightDock,
+    open: () => [leftDock === null ? null : leftPanel[leftDock].el, rightDock ? deps.layersPanel.el : null].filter((p): p is HTMLElement => p !== null),
+  };
 }

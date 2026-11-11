@@ -263,19 +263,11 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   });
   const pagesPanel = thumbs.panel;
 
-
-  pagesToggle.addEventListener("click", () =>
-    docks.set(docks.left() === "pages" ? null : "pages", docks.right(), "left"),
-  );
-
   // ---- outline ----
   const outlinePanel = createPdfOutlinePanel({
     onPick: (page) => void ctx.nav.go(page),
     onClose: closeWith(outlineOpener.el),
   });
-  outlineOpener.el.addEventListener("click", () =>
-    docks.set(docks.left() === "outline" ? null : "outline", docks.right(), "left"),
-  );
 
   // ---- digests ----
   const digests = createDigestViewerPanel({
@@ -287,12 +279,8 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       if (docks.left() === "digests") docks.set(null, docks.right(), null, false);
     },
   });
-  digests.opener.el.addEventListener("click", () =>
-    docks.set(docks.left() === "digests" ? null : "digests", docks.right(), "left"),
-  );
 
-  layersToggle.addEventListener("click", () => docks.set(docks.left(), !docks.right(), "right"));
-
+  // Each toggle opens and shuts its panel.
   const docks = createPdfDocks({
     pagesPanel,
     outlinePanel,
@@ -392,15 +380,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       markPages: () => markPages,
       // Mounted panels only; {@link tooTight} weighs hypothetical ones.
       // A phone's panels are sheets below the page, beside nothing.
-      dockedPanels: () =>
-        isPhone()
-          ? []
-          : [
-              docks.left() === "pages" ? pagesPanel.el : null,
-              docks.left() === "outline" ? outlinePanel.el : null,
-              docks.left() === "digests" ? digests.panel.el : null,
-              docks.right() ? layersPanel.el : null,
-            ].filter((panel): panel is HTMLElement => panel !== null),
+      dockedPanels: () => (isPhone() ? [] : docks.open()),
     },
     dom: { main, stage, canvas, body, markCtl, linkLayer, selectLayer, layersPanel },
     // Through arrows: find is a part, built from the context below.
