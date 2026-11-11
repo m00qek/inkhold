@@ -9,6 +9,7 @@ import {
   searchHref,
   destinationHref,
   todoHref,
+  digestHref,
 } from "../../src/router";
 import { DESTINATIONS } from "../../src/pages/rail/railPlaces";
 
@@ -79,11 +80,11 @@ describe("the four places that used to have no URL", () => {
   });
 
   it("routes a destination by the rail's own key", () => {
-    // To-Do has its own route, which carries the view (`#/todo/planned`).
-    for (const dest of DESTINATIONS.filter((d) => d.key !== "todo")) {
+    // To-Do and Digest have their own routes, which carry the view (`#/todo/planned`).
+    for (const dest of DESTINATIONS.filter((d) => d.key !== "todo" && d.key !== "digest")) {
       expect(parseRoute(destinationHref(dest.key).slice(1))).toEqual({ name: "destination", key: dest.key });
     }
-    expect(DESTINATIONS.map((d) => d.key)).toEqual(["bin", "todo", "admin"]);
+    expect(DESTINATIONS.map((d) => d.key)).toEqual(["bin", "todo", "digest", "admin"]);
   });
 
   it("routes To-Do with its view; the rail's bare key lands on the default view", () => {
@@ -92,6 +93,14 @@ describe("the four places that used to have no URL", () => {
     expect(parseRoute("/todo/list/abc")).toEqual({ name: "todo", view: "list/abc" });
     expect(todoHref("list/abc")).toBe("#/todo/list/abc");
     expect(todoHref("")).toBe("#/todo");
+  });
+
+  it("routes Digest with its place; the rail's bare key lands on All", () => {
+    expect(parseRoute(destinationHref("digest").slice(1))).toEqual({ name: "digest", place: "" });
+    expect(parseRoute("/digest/category/kb-phon/d/12")).toEqual({ name: "digest", place: "category/kb-phon/d/12" });
+    expect(parseRoute("/digest/sources/MyStyle%2Fa.pdf")).toEqual({ name: "digest", place: "sources/MyStyle%2Fa.pdf" });
+    expect(digestHref("sources")).toBe("#/digest/sources");
+    expect(digestHref("")).toBe("#/digest");
   });
 
   it("never lets a destination key shadow a fixed route", () => {

@@ -33,6 +33,7 @@ const immutable_routes = [_][]const u8{
     "/api/controlplane/bin/note/:id/history/:md5/page/:n",
     "/api/controlplane/bin/note/:id/history/:md5/raw",
     "/api/controlplane/text/:md5",
+    "/api/controlplane/digests/:id/note/:md5",
 };
 
 /// Every other route; an unlisted route fails the test. JSON belongs here: its
@@ -81,6 +82,8 @@ const non_immutable_routes = [_][]const u8{
     // may differ.
     "/api/controlplane/search-index/stream",
     "/api/controlplane/server-info",
+    "/api/controlplane/digests",
+    "/api/controlplane/digests/:id",
     "/api/controlplane/todo",
     "/api/controlplane/todo/lists",
     "/api/controlplane/todo/lists/:id",
@@ -167,7 +170,7 @@ test "cache policy: every route is classified, and only the byte routes may be i
             return error.StaleCachePolicyEntry;
         }
     }
-    try std.testing.expectEqual(@as(usize, 11), immutable_routes.len);
+    try std.testing.expectEqual(@as(usize, 12), immutable_routes.len);
 }
 
 test "cache policy: the served responses match the classification, route by route" {

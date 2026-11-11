@@ -12,7 +12,7 @@ import { createPhoneShell } from "./libraryPhone";
 import { createPlace } from "../../ui/place";
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
-import { binNotePageHref, current, destinationHref, folderHref, go, notePageHref, todoHref } from "../../router";
+import { binNotePageHref, current, destinationHref, folderHref, go } from "../../router";
 import { createBackupNotice } from "./backupNotice";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -44,8 +44,7 @@ import { createLibraryFeatures } from "./libraryFeatures";
 import { createLibraryPreviews } from "./libraryPreviews";
 import { createLibraryRoutes } from "./libraryRoutes";
 import { warmWasm } from "../../core/warmWasm";
-import { createTodoPage } from "../todo/todoPage";
-import { createTodoInk } from "../todo/todoInk";
+import { appUp, installAppInks, installAppPages } from "./libraryApps";
 
 export const ADMIN_KEY = "admin";
 /**
@@ -55,6 +54,8 @@ export const ADMIN_KEY = "admin";
 export const ACCOUNT_KEY = "account";
 /** The To-Do destination's rail key; its routes are `#/todo/<view>`. */
 export const TODO_KEY = "todo";
+/** The Digest destination's rail key; its routes are `#/digest/<place>`. */
+export const DIGEST_KEY = "digest";
 
 export interface AppDeps {
   api: Api;
@@ -86,6 +87,8 @@ export interface AppShell {
   showAccount(): void;
   /** To-Do at one of its views (`inbox`, `planned`, `list/<id>` …). */
   showTodo(view: string): void;
+  /** Digest at a place (`category/<uid>`, `sources/<key>/d/<id>` …). */
+  showDigest(place: string): void;
   /**
   * `page` is 0-based; the router converts from the URL's 1-based pages. `q`
   * primes find-in-note. All from the route, so reloads and links land exactly.
@@ -187,7 +190,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     content,
     place,
     toastEl,
-    destinationsOpen: { bin: false, admin: false, account: false, todo: false },
+    destinationsOpen: { bin: false, admin: false, account: false, todo: false, digest: false },
 
     // ---- failure routing ----
     failures: {
@@ -230,6 +233,13 @@ export function createAppShell(deps: AppDeps): AppShell {
     leaveAccount: () => st.accountPage?.close(),
     leaveAdmin: () => ctx.adminDest.leave(),
     leaveTodo: () => ctx.todo?.close(),
+    leaveDigest: () => ctx.digest?.close(),
+    leaveDestinations(keep) {
+      if (keep !== "admin") ctx.leaveAdmin();
+      if (keep !== "account") ctx.leaveAccount();
+      if (keep !== "todo") ctx.leaveTodo();
+      if (keep !== "digest") ctx.leaveDigest();
+    },
     openAdmin: () => ctx.adminDest.open(),
   });
 
@@ -265,7 +275,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   ctx.pdfThumbs = createPdfThumbs();
   installLibraryEngines(ctx);
   ctx.exporter = createExporter({ api, renderer });
-  ctx.todoInk = createTodoInk({ api, renderer, store: deps.persistentThumbs ?? null });
+  installAppInks(ctx);
 
   // ---- viewers ----
   ctx.viewers = createViewerSet(createLibraryViewerDeps(ctx), content, gallery);
@@ -297,7 +307,8 @@ export function createAppShell(deps: AppDeps): AppShell {
     section: () => (st.destination === TODO_KEY ? "todo" : st.destination === ACCOUNT_KEY ? "you" : "library"),
     up: () => {
       const r = current();
-      if (r.name === "todo") return r.view === "" ? null : { href: todoHref(""), label: "Lists" };
+      const inApp = appUp(r);
+      if (inApp !== undefined) return inApp;
       if (r.name === "search") {
         // Back to where the search started, named as the rail names it.
         const here = st.listing?.folderId === st.folderId ? st.listing?.path.at(-1) : undefined;
@@ -323,33 +334,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     if (here) ctx.place.set(here.textContent ?? "");
   }).observe(ctx.topbar.crumbs, { childList: true });
 
-  ctx.todo = createTodoPage({
-    api,
-    content,
-    gallery,
-    setPlace: (name) => ctx.place.overlay(name),
-    crumbs: ctx.topbar.crumbs,
-    sortWrap: ctx.topbar.sortWrap,
-    segmented: ctx.topbar.segmented,
-    status: ctx.topbar.todoStatus,
-    listBtn: ctx.topbar.todoListBtn,
-    downloadBtn: ctx.topbar.todoDownloadBtn,
-    newListBtn: ctx.topbar.todoNewListBtn,
-    openNote: (id, page) => go(notePageHref(id, page)),
-    ink: ctx.todoInk,
-    setMode: (open) => ctx.modes.setDestinationMode("todo", open),
-    setSearchShown: (shown) => ctx.root.classList.toggle("is-todo-browse", shown),
-    toast: ctx.toast,
-    handled: ctx.handled,
-    onChanged: () => {
-      ctx.rail.build();
-      // New to-dos reach an open search too.
-      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
-    },
-    go: (view) => go(todoHref(view)),
-  });
-  // Once at start: the rail shows To-Do only when the server keeps to-dos.
-  void ctx.todo.load();
+  installAppPages(ctx);
 
   ctx.adminDest = createAdminDestination({
     api,
@@ -445,6 +430,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     showDestination: routes.showDestination,
     showAccount: routes.showAccount,
     showTodo: routes.showTodo,
+    showDigest: routes.showDigest,
     openNote: routes.openNote,
     openNoteVersion: routes.openNoteVersion,
     openBinNote: routes.openBinNote,
@@ -468,6 +454,7 @@ export function createAppShell(deps: AppDeps): AppShell {
       backupNotice.destroy();
       st.accountPage?.destroy();
       ctx.todo.destroy();
+      ctx.digest.destroy();
       // Aborts uploads and drops the document-level drag swallowers.
       ctx.features.uploadZone.destroy();
       ctx.galleryEngine.destroy();

@@ -110,6 +110,32 @@ export const SCREENS: Screen[] = [
       await barButton(p, "New list");
     },
   },
+  { name: "digest", ownTitle: true, open: async (p) => { await p.goto("/#/digest"); } },
+  { name: "digest-open", ownTitle: true, open: async (p) => { await p.goto("/#/digest/category/c0ffee00000000000000000000000001/d/1"); } },
+  { name: "digest-sources", ownTitle: true, open: async (p) => { await p.goto("/#/digest/sources"); } },
+  {
+    name: "reader-digests",
+    ownTitle: true,
+    open: async (p) => {
+      await p.goto("/#/note/121");
+      // A phone keeps it under ⋯, which lists it once the note's digests are in.
+      if ((p.viewportSize()?.width ?? 1280) < 700) {
+        await p.locator('[aria-controls="note-digests-panel"]:not([disabled])').waitFor({ state: "attached" });
+        await p.locator(".reader__bar").getByRole("button", { name: "More" }).click();
+        await p.locator(".menu__pop--float.is-open").getByRole("menuitemcheckbox", { name: "Digests" }).click();
+        return;
+      }
+      await p.getByRole("button", { name: "Digests", exact: true }).click();
+    },
+  },
+  {
+    name: "digest-comment",
+    ownTitle: true,
+    open: async (p) => {
+      await p.goto("/#/digest/d/1");
+      await p.getByRole("button", { name: "Edit" }).click();
+    },
+  },
   {
     name: "card-menu",
     ownTitle: true,

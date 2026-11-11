@@ -6,6 +6,8 @@ import type { NoteRenderer } from "../../render/types";
 import type { RenderCache } from "../../cache/types";
 import type { DocSearch } from "../../search/docSearch";
 import type { Id, NoteMeta, NoteSummary, Theme } from "../../core/types";
+import type { Digest } from "../../api/digestTypes";
+import type { DigestInk } from "../digest/digestInk";
 // Type-only import, so the cycle with `reader.ts` is erased at emit.
 import type { ReaderOrigin } from "../reader/reader";
 
@@ -39,6 +41,19 @@ export interface VersionSubject {
   annotationsOn?: Id;
 }
 
+/** The digests a viewer's Digests panel lists, and how their handwritten notes are drawn. */
+export interface ViewerDigests {
+  /** A library file's digests, in page order; null while the server keeps none (no panel then). */
+  of(fileId: Id): Promise<Digest[] | null>;
+  /**
+   * Whether the server keeps digests, as last heard (true before anything
+   * is); asked as a viewer opens, so the bar has its opener from the first
+   * frame instead of shifting later.
+   */
+  kept(): boolean;
+  ink: DigestInk;
+}
+
 /** Shared by every viewer, so universal actions (Back, Move to bin) cannot drift. */
 export interface ViewerDeps {
   api: Api;
@@ -65,4 +80,6 @@ export interface ViewerDeps {
    * `#/note/:id`). Mutually exclusive.
    */
   onPosition?: (noteId: Id, page: number, query: string, versionMd5?: string, bin?: boolean) => void;
+  /** Absent: the viewers show no Digests panel. */
+  digests?: ViewerDigests;
 }

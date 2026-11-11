@@ -1,7 +1,8 @@
 // The library's route handlers: each place a URL names, and opening notes, versions and trashed files.
 
 import { parseView, viewPath } from "../todo/todoModel";
-import { destinationHref, folderHref, notePageHref, redirect, replaceRoute, searchHref, todoHref } from "../../router";
+import { parsePlace, placePath } from "../digest/digestModel";
+import { destinationHref, digestHref, folderHref, notePageHref, redirect, replaceRoute, searchHref, todoHref } from "../../router";
 import { resolveVersionShort } from "../versionShort";
 import type { Api } from "../../api/types";
 import type { Id, NoteMeta, NoteSummary } from "../../core/types";
@@ -9,10 +10,10 @@ import type { ReaderOrigin } from "../reader/reader";
 import { crumbPath } from "../rail/railPlaces";
 import { BIN_KEY } from "../bin/bin";
 import type { LibraryCtx } from "./libraryContext";
-import { type AppShell, ADMIN_KEY, ACCOUNT_KEY, TODO_KEY, synthesizeSummary } from "./library";
+import { type AppShell, ADMIN_KEY, ACCOUNT_KEY, DIGEST_KEY, TODO_KEY, synthesizeSummary } from "./library";
 
 /** The route handlers of `AppShell`, plus the folder path the reader shows. */
-export interface LibraryRoutes extends Pick<AppShell, "showFolder" | "showSearch" | "showDestination" | "showAccount" | "showTodo" | "openNote" | "openNoteVersion" | "openBinNote"> {
+export interface LibraryRoutes extends Pick<AppShell, "showFolder" | "showSearch" | "showDestination" | "showAccount" | "showTodo" | "showDigest" | "openNote" | "openNoteVersion" | "openBinNote"> {
   /** Null at the root. Names via `rail.labelFor`, never `folder.name`. */
   currentFolderPath(): string | null;
 }
@@ -60,6 +61,9 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
     // A task's notebook link: Back returns to the To-Do page it was on.
     const todoView = ctx.todo?.view();
     if (todoView) return { origin: { kind: "todo", folderPath: folderPathOf(noteId) }, href: todoHref(viewPath(todoView)) };
+    // A digest's source: Back returns to that digest.
+    const digestPlace = ctx.digest?.place();
+    if (digestPlace) return { origin: { kind: "digest", folderPath: folderPathOf(noteId) }, href: digestHref(placePath(digestPlace)) };
     // The shell's `query`, never the route's `?q=`, which is in-note find.
     const q = st.query.trim();
     if (q) return { origin: { kind: "search", folderPath: folderPathOf(noteId) }, href: searchHref(q) };
@@ -76,12 +80,12 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
 
   /**
    * Browsing works offline (the listings are kept on the device, `sw/sw.js`);
-   * opening a file, a version or To-Do needs the server. Say so instead of
+   * opening a file, a version, To-Do or Digest needs the server. Say so instead of
    * showing a viewer that can never fill, and stay where the person was.
    */
   function offline(): boolean {
     if (navigator.onLine) return false;
-    ctx.toast("You're offline. Opening files and To-Do needs a connection.");
+    ctx.toast("You're offline. Opening files, To-Do or Digest needs a connection.");
     // Back to the folder or search on screen; never to To-Do, which would
     // refuse again.
     redirect(st.query ? searchHref(st.query) : folderHref(st.folderId));
@@ -93,9 +97,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
 
     showFolder(id: Id | null): void {
       enterPlace();
-      ctx.leaveAdmin();
-      ctx.leaveAccount();
-      ctx.leaveTodo();
+      ctx.leaveDestinations();
       st.destination = null;
       void ctx.data.navigate(id);
       requestAnimationFrame(() => ctx.galleryEngine.repaintVisible());
@@ -126,8 +128,8 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
 
     showDestination(key: string): void {
       enterPlace();
-      ctx.leaveAccount();
-      ctx.leaveTodo();
+      // The console stays until its own arm decides: the bin's leaves it.
+      ctx.leaveDestinations("admin");
       st.query = "";
       ctx.topbar.searchInput.value = "";
       ctx.search.reset();
@@ -138,7 +140,6 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
         // --- BIN ROUTE ---
         case BIN_KEY:
           ctx.leaveAdmin(); // one st.destination at a time
-          ctx.leaveTodo();
           st.destination = key;
           ctx.bin.open();
           ctx.rail.build(); // the ctx.bin is open now; repaint the highlight
@@ -148,7 +149,6 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
           // The bin closes by being repainted over; do it while `destination` is null so
           // the guard lets it through.
           if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
-          ctx.leaveTodo();
           st.destination = key;
           ctx.openAdmin();
           return;
@@ -164,8 +164,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
       enterPlace();
       // Same as the account arm: repaint over a mounted bin while `destination` is null.
       if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
-      ctx.leaveAdmin();
-      ctx.leaveAccount();
+      ctx.leaveDestinations("todo");
       st.query = "";
       ctx.topbar.searchInput.value = "";
       ctx.search.reset();
@@ -174,12 +173,25 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
       ctx.rail.build();
     },
 
+    showDigest(place: string): void {
+      if (offline()) return;
+      enterPlace();
+      // Same as the account arm: repaint over a mounted bin while `destination` is null.
+      if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
+      ctx.leaveDestinations("digest");
+      st.query = "";
+      ctx.topbar.searchInput.value = "";
+      ctx.search.reset();
+      st.destination = DIGEST_KEY;
+      ctx.digest.open(parsePlace(place));
+      ctx.rail.build();
+    },
+
     showAccount(): void {
       enterPlace();
       // Same as the admin arm.
       if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
-      ctx.leaveAdmin();
-      ctx.leaveTodo();
+      ctx.leaveDestinations("account");
       st.query = "";
       ctx.topbar.searchInput.value = "";
       ctx.search.reset();
@@ -214,6 +226,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
         st.readerBack = href;
         // To-Do covers the content area; the note opens in its place.
         if (origin.kind === "todo") ctx.leaveTodo();
+        if (origin.kind === "digest") ctx.leaveDigest();
         const v = ctx.viewers.viewerFor(summary.fileType);
         ctx.viewers.activate(v);
         v.open(summary, metaPromise, page, origin, q);

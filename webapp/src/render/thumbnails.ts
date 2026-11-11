@@ -26,6 +26,8 @@ export interface ThumbSource {
   fileId?: Id;
   noteId?: Id;
   page?: PageRef;
+  /** A PDF's page other than its cover, 0-based (a digest's source page). */
+  pdfPage?: number;
   /**
    * Trashed file: raw-file strategies must use the bin-scoped route (live
    * `/file/{id}` 404s for deleted files). `/thumbnail/{hash}` serves trashed
@@ -120,7 +122,7 @@ export interface ThumbnailsDeps {
    * exceptions or wiring, the `pdf-page` arm falls back to the glyph. No theme:
    * MuPDF's pixels are the same in both.
    */
-  renderPdfPage?(fileId: Id, hash: Hash, opts?: { bin?: boolean }): Promise<PdfPageThumb>;
+  renderPdfPage?(fileId: Id, hash: Hash, opts?: { bin?: boolean; page?: number }): Promise<PdfPageThumb>;
   /** Record an image document's true dims (cache/dimsMemo.ts); advisory. */
   setDims?(hash: string, dims: ImageDims): Promise<void>;
   /**
@@ -271,13 +273,15 @@ export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
         const hash = source.fileHash;
         const fileId = source.fileId;
         const bin = source.bin;
+        const page = source.pdfPage ?? 0;
         // Theme-free (MuPDF draws on white; re-rendering per toggle would be the
-        // facade's costliest produce) and keyed by file md5.
-        return memo(`${hash}:pdf:b${bucket}`, async () => {
-          const frame = await renderPdfPage(fileId, hash, { bin });
+        // facade's costliest produce) and keyed by file md5; the cover's key
+        // has no page, as before pages other than the cover were drawn.
+        return memo(page === 0 ? `${hash}:pdf:b${bucket}` : `${hash}:pdf:p${page}:b${bucket}`, async () => {
+          const frame = await renderPdfPage(fileId, hash, { bin, page });
           try {
-            // Record page 0's aspect for the masonry memo; fire-and-forget.
-            if (frame.pageW > 0 && frame.pageH > 0) {
+            // Record the cover's aspect for the masonry memo; fire-and-forget.
+            if (page === 0 && frame.pageW > 0 && frame.pageH > 0) {
               void recordDims(hash, { w: frame.pageW, h: frame.pageH }).catch(() => {});
             }
             return await painter.fromBitmap(frame.bitmap);

@@ -30,9 +30,7 @@ export function createLibraryData(ctx: LibraryCtx): LibraryData {
   function enterPendingCategory(): void {
     ctx.hideActiveViewer();
     ctx.setReading(false);
-    ctx.leaveAdmin();
-    ctx.leaveAccount();
-    ctx.leaveTodo();
+    ctx.leaveDestinations();
     st.destination = null;
     st.folderId = null;
     st.listing = undefined;

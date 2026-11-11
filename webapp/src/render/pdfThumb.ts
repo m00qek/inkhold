@@ -42,7 +42,8 @@ function defaultPdfThumbSeam(): PdfThumbSeam {
 export type RenderPdfPage = (
   fileId: Id,
   hash: Hash,
-  opts?: { bin?: boolean },
+  /** `page`: 0-based, page 0 (the cover) by default; past the end, the last page. */
+  opts?: { bin?: boolean; page?: number },
 ) => Promise<PdfPageThumb>;
 
 export interface PdfThumbsOptions {
@@ -111,17 +112,18 @@ export function createPdfThumbs(
     (idleTimer as unknown as { unref?: () => void }).unref?.();
   }
 
-  async function job(url: string): Promise<PdfPageThumb> {
+  async function job(url: string, want: number): Promise<PdfPageThumb> {
     cancelRelease();
     let s: PdfSession | null = null;
     try {
       s = session ??= seam.createSession();
       const { pageCount } = await s.open(url, SIZE_UNKNOWN);
       if (pageCount <= 0) throw new Error("this PDF has no pages");
-      const size = await s.pageSize(0);
+      const page = Math.max(0, Math.min(pageCount - 1, Math.floor(want)));
+      const size = await s.pageSize(page);
       const scale = tileScale(size.width, size.height, targetWidth());
-      if (scale === 0) throw new Error("page 0 has no measurable box");
-      const frame = await s.render(0, scale);
+      if (scale === 0) throw new Error(`page ${page} has no measurable box`);
+      const frame = await s.render(page, scale);
       // The page's own box (rotation applied), which the masonry memo wants.
       return { bitmap: frame.bitmap, pageW: size.width, pageH: size.height };
     } finally {
@@ -137,7 +139,7 @@ export function createPdfThumbs(
     const url = rawFileUrl(fileId, hash, { bin: o.bin });
     if (!url) throw new Error("this file has no readable address");
     queued++;
-    const run = chain.then(() => job(url));
+    const run = chain.then(() => job(url, o.page ?? 0));
     // Chain on the settled job so the next open never overlaps this close.
 
     chain = run.then(

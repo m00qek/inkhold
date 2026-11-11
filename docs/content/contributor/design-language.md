@@ -61,8 +61,8 @@ same on every screen.
   viewer puts focus on ‹ when it opens.
 - A place in the shell that is not a folder reads "Library / place" (the bin,
   your account, the admin console). Search reads "Search" and highlights no
-  folder in the rail, since results span the library. To-Do, an app, titles
-  itself.
+  folder in the rail, since results span the library. To-Do and Digest, the
+  tablet's apps, title themselves.
 - Buttons speak in sentence case everywhere; capitals are for small labels.
 - On a phone, a top bar's buttons are quiet glyphs (‹ ☰ 🔍 ⋯), framed only in
   the bottom bar's controls. The Search tab on a page without a search box goes

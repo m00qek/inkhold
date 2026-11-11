@@ -132,7 +132,7 @@ describe("thumbnail facade", () => {
     const t = build();
     const blob = await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
     expect(await tagOf(blob)).toBe("note");
-    expect(t.renderPdfPage).toHaveBeenCalledWith("p1", "pdfh", { bin: undefined });
+    expect(t.renderPdfPage).toHaveBeenCalledWith("p1", "pdfh", { bin: undefined, page: 0 });
     // A PDF has no cover, so no `/thumbnail/{hash}` round trip.
     expect(t.net.bytes).not.toHaveBeenCalled();
     expect(t.painter.fromBitmap).toHaveBeenCalledTimes(1);
@@ -165,10 +165,21 @@ describe("thumbnail facade", () => {
     expect(t.renderPdfPage).toHaveBeenCalledTimes(1);
   });
 
+  it("a .pdf's other page (a digest's source) renders that page, keyed apart from the cover, and leaves the cover's aspect alone", async () => {
+    const t = build();
+    await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1", pdfPage: 2 }, "pdf");
+    expect(t.renderPdfPage).toHaveBeenCalledWith("p1", "pdfh", { bin: undefined, page: 2 });
+    expect(t.setDims).not.toHaveBeenCalled();
+    await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
+    expect(t.renderPdfPage).toHaveBeenCalledTimes(2);
+    await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1", pdfPage: 2 }, "pdf");
+    expect(t.renderPdfPage).toHaveBeenCalledTimes(2);
+  });
+
   it("a TRASHED .pdf renders off the bin-scoped route, so its tile is not a 404", async () => {
     const t = build();
     await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1", bin: true }, "pdf");
-    expect(t.renderPdfPage).toHaveBeenCalledWith("p1", "pdfh", { bin: true });
+    expect(t.renderPdfPage).toHaveBeenCalledWith("p1", "pdfh", { bin: true, page: 0 });
   });
 
   it("a .pdf that will not render falls back to the glyph, never an empty tile", async () => {

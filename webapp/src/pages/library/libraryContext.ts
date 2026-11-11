@@ -10,6 +10,9 @@
 
 import type { Place } from "../../ui/place";
 import type { TodoPage } from "../todo/todoPage";
+import type { DigestPage } from "../digest/digestPage";
+import type { DigestInk } from "../digest/digestInk";
+import type { DestinationMode } from "./libraryModes";
 import type { Api } from "../../api/types";
 import type { ApiFailureSink } from "../../api/client";
 import type { NoteRenderer } from "../../render/types";
@@ -79,7 +82,7 @@ export interface LibraryCtx {
   * Which destination owns the surface. Tracked per destination because
   * `renderGallery()` runs on sync bumps and must not strip another's mode.
   */
-  destinationsOpen: { bin: boolean; admin: boolean; account: boolean; todo: boolean };
+  destinationsOpen: Record<DestinationMode, boolean>;
 
   // ---- collaborators, built once ----
   folderCache: FolderCache;
@@ -95,6 +98,8 @@ export interface LibraryCtx {
   exporter: Exporter;
   /** Lassoed to-dos' handwriting, cut from their note pages (the To-Do page and search). */
   todoInk: TodoInk;
+  /** Digests' handwritten notes (the Digest page and the viewers' Digests panels). */
+  digestInk: DigestInk;
   masonry: Masonry;
   viewers: ViewerSet;
   /** Where you are: the tab's title and the page's <h1> (`ui/place.ts`). */
@@ -102,6 +107,8 @@ export interface LibraryCtx {
   adminDest: AdminDestination;
   /** The To-Do destination; built at start so the rail knows whether to show it. */
   todo: TodoPage;
+  /** The Digest destination; built at start, like To-Do. */
+  digest: DigestPage;
   bin: BinController;
 
   // ---- the parts ----
@@ -128,8 +135,18 @@ export interface LibraryCtx {
   leaveAccount(): void;
   leaveAdmin(): void;
   leaveTodo(): void;
+  leaveDigest(): void;
+  /**
+   * Leave every place that covers the gallery (the console, the account page,
+   * To-Do, Digest) but `keep`: one at a time, and a new one added here only.
+   * The bin closes by being repainted over, so it is not one of them.
+   */
+  leaveDestinations(keep?: CoveringPlace): void;
   openAdmin(): void;
 }
+
+/** The places that cover the gallery and are left by `leaveDestinations`. */
+export type CoveringPlace = "admin" | "account" | "todo" | "digest";
 
 /** The members the shell has before any part is built. */
 export type LibraryCtxSeed = Pick<
@@ -137,7 +154,7 @@ export type LibraryCtxSeed = Pick<
   | "deps" | "identity" | "renderer" | "cache" | "live" | "api" | "historyScope" | "binScope" | "st"
   | "gallery" | "content" | "place" | "toastEl" | "destinationsOpen"
   | "failures" | "handled" | "sessionDidExpire" | "toast"
-  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "openAdmin"
+  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "leaveDigest" | "leaveDestinations" | "openAdmin"
 >;
 
 /**

@@ -27,6 +27,14 @@
   position: relative;
   z-index: var(--z-raised);
 }
+/* A crowded bar closes its controls up before anything goes: a document with
+   annotations, history and digests fills a bar beside the rail on a 1280px
+   screen. */
+@container bar (width < 70rem) {
+  .toolbar > .toolbar__group {
+    gap: var(--sp-1);
+  }
+}
 /* Too narrow for words beside the icons: Back and the file's actions keep
    their icon and are named by their (still announced) label. Narrower still,
    the zones wrap (`flex-wrap` above). */
@@ -42,10 +50,6 @@
   }
   .toolbar__group--file .btn__label {
     display: none;
-  }
-  /* Controls within a zone sit closer; the zones keep the bar's gap. */
-  .toolbar > .toolbar__group {
-    gap: var(--sp-1);
   }
 }
 /* Pushes the two zones to the trailing edge. */

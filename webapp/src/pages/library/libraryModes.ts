@@ -1,11 +1,15 @@
-// Destination modes in the library shell: which tools a bin, console or account page leaves on the topbar, and applying a query.
+// Destination modes in the library shell: which tools a bin, console, account page or app leaves on the topbar, and applying a query.
 
 import type { LibraryCtx } from "./libraryContext";
+
+/** The places that cover the gallery, one at a time. */
+export type DestinationMode = "bin" | "admin" | "account" | "todo" | "digest";
+const MODES: readonly DestinationMode[] = ["bin", "admin", "account", "todo", "digest"];
 
 export interface LibraryModes {
   /** Shared by keystrokes and the `#/search?q=` route; doesn't touch the URL. */
   applyQuery(next: string): void;
-  setDestinationMode(which: "bin" | "admin" | "account" | "todo", open: boolean): void;
+  setDestinationMode(which: DestinationMode, open: boolean): void;
   setBinMode(open: boolean, count: number, busy?: boolean): void;
 }
 
@@ -14,9 +18,7 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
   /** Shared by keystrokes and the `#/search?q=` route; doesn't touch the URL. */
   function applyQuery(next: string): void {
     // The results belong in the gallery, which the console or account page covers.
-    ctx.leaveAdmin();
-    ctx.leaveAccount();
-    ctx.leaveTodo();
+    ctx.leaveDestinations();
     st.query = next;
     // Names paint on the keystroke from the cached tree; transcripts arrive after
     // the debounce. `rail: false`: typing can't change the tree.
@@ -24,15 +26,15 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
     ctx.render.renderGallery({ rail: false });
   }
 
-  function setDestinationMode(which: "bin" | "admin" | "account" | "todo", open: boolean): void {
+  function setDestinationMode(which: DestinationMode, open: boolean): void {
     // Mutually exclusive: opening one closes the rest, so flags describe one screen.
     if (open) {
-      for (const other of ["bin", "admin", "account", "todo"] as const) {
+      for (const other of MODES) {
         if (other !== which) ctx.destinationsOpen[other] = false;
       }
     }
     ctx.destinationsOpen[which] = open;
-    const anyOpen = ctx.destinationsOpen.bin || ctx.destinationsOpen.admin || ctx.destinationsOpen.account || ctx.destinationsOpen.todo;
+    const anyOpen = MODES.some((m) => ctx.destinationsOpen[m]);
     ctx.root.classList.toggle("is-destination", anyOpen);
     if (!ctx.destinationsOpen.todo) ctx.root.classList.remove("is-todo-browse");
 

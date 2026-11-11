@@ -6,6 +6,7 @@ import { shortMd5 } from "../versionShort";
 import type { ViewerDeps } from "../viewer/viewer";
 import { createDocSearch } from "../../search/docSearch";
 import type { LibraryCtx } from "./libraryContext";
+import { fileDigests } from "../digest/digestModel";
 
 export function createLibraryViewerDeps(ctx: LibraryCtx): ViewerDeps {
   const { st } = ctx;
@@ -65,6 +66,18 @@ export function createLibraryViewerDeps(ctx: LibraryCtx): ViewerDeps {
         : versionMd5
           ? replaceNoteVersionPosition(noteId, shortMd5(versionMd5), page)
           : replaceNotePosition(noteId, page, q),
+    // The Digest page's own snapshot, re-read only when it is not fresh: a
+    // file opened after another reads nothing.
+    digests: {
+      of: async (fileId) => {
+        await ctx.digest.freshen();
+        const s = ctx.digest.snapshot();
+        return s?.enabled ? fileDigests(s, fileId) : null;
+      },
+      // Not heard yet counts as kept: a dimmed opener that may go beats a bar that shifts under a fitted page.
+      kept: () => ctx.digest?.snapshot()?.enabled ?? true,
+      ink: ctx.digestInk,
+    },
   };
 
   return viewerDeps;

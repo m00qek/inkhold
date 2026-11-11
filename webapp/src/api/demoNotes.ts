@@ -31,6 +31,13 @@ const NOTES: DemoNote[] = [
   { id: "192", slug: "ozymandias", name: "Ozymandias", ageHours: 26, meta: wire(ozymandias) },
 ];
 
+/**
+ * The demo's German grammar sheet: a real three-page PDF
+ * (`demo/german-pdf.mjs`) that the demo's digests quote, so opening one
+ * lands on its passage. The dev server serves its bytes (vite.config.ts).
+ */
+export const DEMO_GRAMMAR_ID: Id = "193";
+
 /** Whether the demo notebooks are in the library. */
 export function demoNotesOn(): boolean {
   if (import.meta.env.VITE_DEMO === "1") return true;

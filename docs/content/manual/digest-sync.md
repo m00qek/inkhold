@@ -31,5 +31,5 @@ and nothing is touched.
    deleted. **Delete locally** removes them from the tablet.
 
 The digests are kept on the server and in your
-[backups](@/manual/back-up.md). Reading them in the browser is not there yet:
-see [What doesn't work yet](@/manual/limits.md).
+[backups](@/manual/back-up.md), and you can
+[read them in the browser](@/manual/digest.md).

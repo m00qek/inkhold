@@ -14,6 +14,10 @@ A PDF opens in its own viewer, with what makes long documents manageable.
 - **Outline** shows the PDF's own table of contents: choose an entry to go
   there.
 - **Pages** lists every page, and marks the ones you wrote on with the tablet.
+- **Digests** lists the passages you took from the PDF on the tablet, in page
+  order, the ones on the page you are on marked: choose one to go to its page,
+  or **Open in Digest** to see it, and change its comment, on the
+  [Digest page](@/manual/digest.md). It is there when Digest sync is on.
 - **Page**: type a page number to go straight to it. Home and End go to the
   first and last page.
 - **Select text** on the page, and **Copy selected text** puts it on the

@@ -1,0 +1,663 @@
+/*
+ * Digest (src/pages/digest/). An overlay on the content area like To-Do: the
+ * Categories | Sources tabs, then three columns, as on the tablet: the
+ * groups, the digests of the one picked, and the digest open in a side panel.
+ * A tablet's width gives the open digest the list's column; a phone shows one
+ * column at a time. The accent marks the open digest and focus only.
+ */
+
+.digest {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-cover);
+  overflow-y: auto;
+  background: var(--desk);
+  padding: var(--sp-6) var(--sp-6) 6rem;
+}
+.digest > * {
+  max-width: 1180px;
+  margin-inline: auto;
+}
+
+.digest-icon {
+  display: inline-flex;
+  flex: none;
+}
+.digest-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ---- in the shell's topbar: To-Do's title shape ---- */
+.digest-place {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  white-space: nowrap;
+}
+.digest-place__name {
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--ink);
+}
+.digest-place__sum {
+  font-size: var(--fs-eyebrow);
+  color: var(--ink-soft);
+}
+
+/* ---- the tabs: two links, the current one raised like a sheet ---- */
+/* At the columns' start edge, not centred like them. */
+.digest > .digest-tabs {
+  max-width: none;
+  margin-inline: max(0px, calc((100% - 1180px) / 2)) auto;
+}
+.digest-tabs {
+  display: flex;
+  gap: calc(var(--sp-1) / 2);
+  width: fit-content;
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-1);
+  border-radius: var(--radius-card);
+  background: var(--hover);
+}
+.digest-tab {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h);
+  padding: 0 var(--sp-4);
+  /* Inside the bar's corner, by its padding. */
+  border-radius: calc(var(--radius-card) - var(--sp-1));
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+.digest-tab:hover {
+  color: var(--ink);
+}
+.digest-tab[aria-current="page"] {
+  background: var(--sheet);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: var(--shadow-hairline);
+}
+
+/* ---- the three columns ---- */
+.digest-body {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr) var(--panel-w-wide);
+  gap: var(--sp-6);
+  align-items: start;
+}
+.digest-body:not(.has-open) {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+/* ---- the groups, the rail's row shape ---- */
+.digest-groups ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* A section of one, named by its row (what was typed on the tablet): no label, just room. */
+.digest-groups__alone {
+  margin-top: var(--sp-4);
+}
+.digest-groups__label {
+  margin-block: var(--sp-4) var(--sp-1);
+  padding-inline-start: var(--sp-3);
+  font: var(--fs-eyebrow) var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.digest-group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border-inline-start: 2px solid transparent;
+  border-radius: 3px;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+.digest-group:hover {
+  background: var(--hover-fill);
+  color: var(--ink);
+}
+.digest-group[aria-current="page"] {
+  border-inline-start-color: var(--accent);
+  background: var(--hover);
+  color: var(--ink);
+  font-weight: 500;
+}
+.digest-group__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.digest-group__count {
+  font: var(--fs-caption) var(--font-mono);
+  color: var(--ink-soft);
+}
+
+/* ---- the list ---- */
+.digest-list__title {
+  margin-block: 0 var(--sp-3);
+  font: 500 var(--fs-heading) var(--font-display);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.digest-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.digest-list__source h3 {
+  margin-block: var(--sp-4) 0;
+  font: 600 var(--fs-body) var(--font-body);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.digest-list__source:first-child h3 {
+  margin-top: 0;
+}
+
+/*
+ * A card: its page (by source), the text, the comment and when, and its
+ * handwritten note at the end. The text's link covers the card, so the whole
+ * card opens the digest, and the card draws the link's focus.
+ */
+.digest-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-auto-flow: dense;
+  align-items: start;
+  /* No column gap: the note's column is empty for a digest without one. */
+  gap: var(--sp-2) 0;
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--sheet);
+  color: var(--ink);
+  transition: border-color 0.12s ease;
+}
+.digest-card--paged {
+  grid-template-columns: 3.5rem minmax(0, 1fr) auto;
+}
+.digest-card:hover {
+  border-color: var(--ink-soft);
+}
+.digest-card.is-open {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.digest-card:has(.digest-card__link:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.digest-card__page {
+  grid-column: 1;
+  grid-row: 1 / span 3;
+  padding-top: 2px;
+  font: var(--fs-caption) var(--font-mono);
+  color: var(--ink-soft);
+}
+.digest-card__link,
+.digest-card__comment,
+.digest-card__meta {
+  grid-column: -3;
+}
+.digest-card__link {
+  color: inherit;
+  text-decoration: none;
+}
+.digest-card__link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+.digest-card__link:focus-visible {
+  outline: none;
+}
+.digest-card__text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  font-size: var(--fs-title);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.digest-card__comment {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 0;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.digest-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--sp-3);
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+.digest-card__tag {
+  padding-inline: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* ---- a handwritten note: its strokes, coloured by the theme ---- */
+.digest-ink {
+  display: block;
+  width: 100%;
+  aspect-ratio: var(--ink-ar);
+  background: var(--paper-ink);
+  -webkit-mask: var(--ink-src) center / contain no-repeat;
+  mask: var(--ink-src) center / contain no-repeat;
+}
+.digest-card__ink {
+  grid-column: -2;
+  grid-row: 1 / span 3;
+  margin-inline-start: var(--sp-4);
+  display: flex;
+  align-items: center;
+  width: 96px;
+  max-height: 72px;
+}
+/* Empty until its picture is in: no room taken, but still there to come into view. */
+.digest-card__ink:not(.has-ink) {
+  width: 0;
+  margin-inline-start: 0;
+}
+.digest-card__ink .digest-ink {
+  max-height: 72px;
+}
+.digest-panel__ink {
+  display: flex;
+  justify-content: center;
+  min-height: 3rem;
+  padding: var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--desk);
+}
+/* As tall as the note's strokes need, up to a few lines, never wider than the panel. */
+.digest-panel__ink .digest-ink {
+  width: min(100%, calc(160px * var(--ink-ar)));
+}
+
+/* ---- the open digest ---- */
+.digest-panel {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-4) var(--sp-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--sheet);
+  color: var(--ink);
+}
+.digest-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.digest-panel__title,
+.digest-panel__part h3 {
+  margin: 0;
+  font: var(--fs-eyebrow) var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.digest-panel__part h3 {
+  margin-bottom: var(--sp-2);
+}
+/* A comment is plain text, as on the tablet: its line breaks are its own. */
+.digest-panel__part p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+/* The passage against a rule, the way a quote sits in a notebook. */
+.digest-panel__text {
+  margin: 0;
+  padding-inline-start: var(--sp-3);
+  border-inline-start: 3px solid var(--ink-soft);
+  font: var(--fs-heading) / 1.35 var(--font-display);
+  overflow-wrap: anywhere;
+}
+.digest-panel__text p {
+  margin: 0;
+  white-space: pre-line;
+}
+/* The comment's heading with its Edit button at the end. */
+.digest-panel__parthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.digest-panel__parthead h3 {
+  margin-bottom: 0;
+}
+.digest-panel__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.digest-panel__label {
+  font: var(--fs-eyebrow) var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.digest-panel__comment {
+  width: 100%;
+  min-height: 6rem;
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--desk);
+  color: var(--ink);
+  font: var(--fs-body) / 1.45 var(--font-body);
+  resize: vertical;
+}
+.digest-panel__comment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* Touch keyboards zoom into smaller text. */
+@media (pointer: coarse) {
+  .digest-panel__comment {
+    font-size: var(--fs-field-touch);
+  }
+}
+.digest-panel__count {
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+.digest-panel__count.is-over {
+  color: var(--margin-ink);
+}
+.digest-panel__facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-1) var(--sp-4);
+  margin: 0;
+  font-size: var(--fs-caption);
+}
+.digest-panel__facts dt {
+  color: var(--ink-soft);
+}
+.digest-panel__facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+/* The source link, with the line saying its file has changed since. */
+.digest-panel__sourcebox {
+  display: grid;
+  gap: var(--sp-2);
+}
+/* The source page, small, and its caption: one link to that page. Room is
+   kept for the page while it is drawn, so nothing below it moves. */
+.digest-panel__source {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  text-decoration: none;
+}
+.digest-panel__source:hover {
+  border-color: var(--ink-soft);
+  background: var(--hover-fill);
+}
+.digest-panel__source:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.digest-panel__thumb {
+  flex: none;
+  display: block;
+  width: 72px;
+  aspect-ratio: 3 / 4;
+  border: 1px solid var(--line);
+  background: var(--desk);
+  overflow: hidden;
+}
+.digest-panel__thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--sheet);
+}
+.digest-panel__caption {
+  font-weight: 500;
+}
+.digest-panel__category {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+}
+.digest-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+.digest-panel__actions a.btn {
+  text-decoration: none;
+}
+.digest-panel__aside {
+  margin: 0;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+
+.digest-empty {
+  padding: var(--sp-6) var(--sp-4);
+  color: var(--ink-soft);
+  max-width: 52ch;
+}
+.digest-empty p {
+  margin-block: 0 var(--sp-2);
+}
+.digest-empty__title {
+  font: 500 var(--fs-title) var(--font-display);
+  color: var(--ink);
+}
+
+/* ---- a document's Digests panel, in its viewer: the outline's row shape ---- */
+.digest-doc {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.digest-doc__row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-2) 0 var(--sp-3);
+  border-bottom: 1px solid var(--row-rule);
+}
+.digest-doc__row:last-child {
+  border-bottom: 0;
+}
+/* The step to the page: the page number, then the passage. */
+.digest-doc__go {
+  display: grid;
+  grid-template-columns: 2.5rem minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--ink);
+  font: var(--fs-body) / 1.4 var(--font-body);
+  text-align: start;
+  cursor: pointer;
+}
+.digest-doc__go:hover {
+  background: var(--hover);
+}
+.digest-doc__go:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.digest-doc__go:disabled {
+  cursor: default;
+}
+.digest-doc__go:disabled:hover {
+  background: none;
+}
+.digest-doc__page {
+  font: var(--fs-eyebrow) var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-faint);
+}
+.digest-doc__text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+/* On the page on screen: the outline's accent stroke and number. */
+.digest-doc__row.is-current .digest-doc__go {
+  font-weight: 600;
+}
+.digest-doc__row.is-current .digest-doc__page {
+  color: var(--accent);
+}
+.digest-doc__row.is-current::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: var(--sp-2);
+  bottom: var(--sp-3);
+  width: 2px;
+  background: var(--accent);
+}
+.digest-doc__comment,
+.digest-doc__changed,
+.digest-doc__ink,
+.digest-doc__open {
+  margin-block: 0;
+  margin-inline: calc(2.5rem + var(--sp-4)) var(--sp-2);
+}
+.digest-doc__changed {
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+.digest-doc__comment {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+.digest-doc__ink {
+  display: flex;
+  max-width: 140px;
+}
+/* Empty until its picture is in: no room taken, but still there to come into view. */
+.digest-doc__ink:not(.has-ink) {
+  height: 0;
+}
+.digest-doc__ink .digest-ink {
+  max-height: 56px;
+  width: min(100%, calc(56px * var(--ink-ar)));
+}
+.digest-doc__open {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: var(--hit-target-min);
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+
+/* ---- a tablet's width: the open digest takes the list's place ---- */
+@media (max-width: 1099px) {
+  .digest-body,
+  .digest-body:not(.has-open) {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+  .digest-body.has-open .digest-list {
+    display: none;
+  }
+  .digest-panel {
+    position: static;
+  }
+}
+
+/* ---- a phone: one column; the groups scroll sideways above the list ---- */
+@media (max-width: 699px) {
+  .digest {
+    padding: var(--sp-4) var(--sp-4) 6rem;
+  }
+  .digest-body,
+  .digest-body:not(.has-open) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-4);
+  }
+  .digest-body.has-open .digest-groups {
+    display: none;
+  }
+  .digest-groups {
+    display: flex;
+    gap: var(--sp-2);
+    overflow-x: auto;
+  }
+  .digest-groups ul {
+    display: flex;
+    gap: var(--sp-2);
+  }
+  .digest-groups__label {
+    display: none;
+  }
+  .digest-group {
+    white-space: nowrap;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-card);
+  }
+  .digest-group[aria-current="page"] {
+    border-color: var(--accent);
+  }
+  .digest-card__ink {
+    width: 64px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .digest-card {
+    transition: none;
+  }
+}

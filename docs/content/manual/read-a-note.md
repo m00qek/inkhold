@@ -22,6 +22,9 @@ the pages, with the same ink as on the tablet.
   text's box is.
 - **Page text** shows the page's text: what the tablet recognised, and anything
   typed into a text box.
+- **Digests** lists what you took from the notebook into Digest on the tablet,
+  in page order: choose one to go to its page, or **Open in Digest** to see it
+  on the [Digest page](@/manual/digest.md). It is there when Digest sync is on.
 - **Layers** shows a page's layers, each on its own, to hide the ones you don't
   want to see. It is available when the page has more than one.
 

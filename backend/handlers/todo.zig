@@ -10,6 +10,7 @@ const json = @import("../http/json.zig");
 const reply = @import("../http/reply.zig");
 const todo = @import("../services/todo.zig");
 const web = @import("../services/todo_web.zig");
+const tablet_path = @import("../services/tablet_path.zig");
 
 const Context = context.Context;
 const Request = router.Request;
@@ -98,7 +99,7 @@ pub fn get(ctx: *Context, req: *Request, params: Params) anyerror!void {
             .linked = t.links != null,
             .waiting = w.waiting,
         };
-        if (t.links) |links| if (web.decodeLink(a, links)) |l| if (web.libraryPath(a, l.path)) |p| {
+        if (t.links) |links| if (web.decodeLink(a, links)) |l| if (tablet_path.fromAbsolute(a, l.path)) |p| {
             if (ctx.files.resolvePath(ctx.caller.?.user_id, p) catch null) |id| {
                 o.noteId = id;
                 o.notePage = l.page;

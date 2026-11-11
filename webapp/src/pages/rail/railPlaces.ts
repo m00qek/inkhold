@@ -105,7 +105,7 @@ export interface Destination {
   icon: IconName;
   /** Hidden from non-admins; a door, not a lock (the server gates admin routes). */
   adminOnly?: boolean;
-  /** The tablet's apps (To-Do) get their own "Apps" group; the rest sit under "Other". */
+  /** The tablet's apps (To-Do, Digest) get their own "Apps" group; the rest sit under "Other". */
   group?: "apps";
 }
 
@@ -114,6 +114,8 @@ export const DESTINATIONS: Destination[] = [
   { key: "bin", label: "Recycle bin", icon: "trash" },
   // The tablet's to-dos; shown only while the server keeps them (`destinationShown`).
   { key: "todo", label: "To-Do", icon: "todo", group: "apps" },
+  // The tablet's digests; shown only while the server keeps them, like To-Do.
+  { key: "digest", label: "Digest", icon: "digest", group: "apps" },
   // No count: a badge here would be a stat about housemates.
   { key: "admin", label: "Admin", icon: "users", adminOnly: true },
 ];

@@ -14,6 +14,7 @@ import { adminMethods } from "./httpAdmin";
 import { historyMethods } from "./httpHistory";
 import { accountMethods } from "./httpAccount";
 import { todoMethods } from "./httpTodo";
+import { digestMethods } from "./httpDigest";
 
 export {
   ApiError,
@@ -455,5 +456,6 @@ export function createHttpApi(): Api {
 
     ...accountMethods,
     ...todoMethods,
+    ...digestMethods,
   };
 }

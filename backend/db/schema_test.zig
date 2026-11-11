@@ -140,3 +140,16 @@ test "v24: categories stored without an id get one and a fresh md5; others are u
     try std.testing.expectEqual(@as(i64, 1), try count(db, "SELECT COUNT(*) FROM digests WHERE id = 3 AND uid = 'kb-work' AND md5_hash = 'g3';"));
     try std.testing.expectEqual(@as(i64, 1), try count(db, "SELECT COUNT(*) FROM digests WHERE id = 4 AND uid IS NULL AND md5_hash = 'd1';"));
 }
+
+test "v25: digests keep what the browser changed, unset until it changes something; accounts their tablet's last listing" {
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try schema.migrateTo(db, 24);
+    try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@home', '', 0);");
+    try db.exec("INSERT INTO digests(id, user_id, md5_hash, created_at, updated_at) VALUES (1, 1, 'd1', 0, 0);");
+    try schema.migrateTo(db, 25);
+    try std.testing.expectEqual(@as(i64, 1), try count(db, "SELECT COUNT(*) FROM digests WHERE id = 1 AND web_changed_at IS NULL AND md5_hash = 'd1';"));
+    try db.exec("INSERT INTO digest_sync_state(user_id, tablet_listed_at) VALUES (1, 5);");
+    try db.exec("DELETE FROM users WHERE id = 1;");
+    try std.testing.expectEqual(@as(i64, 0), try count(db, "SELECT COUNT(*) FROM digest_sync_state;"));
+}

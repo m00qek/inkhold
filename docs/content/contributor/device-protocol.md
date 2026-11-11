@@ -193,6 +193,19 @@ trusting it.
   never reused; deletes always succeed; deleting a category deletes its
   digests. `query/summary` is paged by the app, 1-based, 1000 a page, until a
   short page.
+- **A digest's comment or category, changed in the browser** (schema v25,
+  `digest.applyWebEdit`; decompiled 1.00.153 `processKnowledgeDetail`). The app
+  keeps, per digest, its data md5 now and as last synced. When only the
+  server's md5 differs from the one it last synced, it copies the server's
+  digest with no clock check; when both sides changed, the newer
+  `lastModifiedTime` wins, a tie the server's. So the browser's edit sets a new
+  random md5 and stamps `max(now, lastModifiedTime + 1)`, and touches nothing
+  else: the handwritten note stays the tablet's. The category is
+  `parentUniqueIdentifier`, which the app copies as the digest's
+  `knowledgeBaseUniqueAttribute`, Uncategorized when it lacks that category;
+  the server only moves a digest to one of the account's live categories. The
+  tablet asking for the manifest is what clears "Waiting for the tablet", which
+  puts that route on the writer.
 - **Retain locally** for digests is the provider URI
   `knowledge/update_all_to_add_state`: every digest and every category but the
   default one goes back to server id 0 and state new, so the next sync uploads

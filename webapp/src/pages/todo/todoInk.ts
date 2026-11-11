@@ -1,8 +1,7 @@
 // A lassoed task's handwriting: the strip of its notebook page where the words
 // it came from are written. Cut in the browser, not on the server: the page's
 // bytes come once (the reader's own `GET /note/{id}/page/{n}`), are rendered
-// by the same decoder, and only the strokes are kept: the paper and the
-// template's lines turn transparent, so the strip is a mask the theme colours.
+// by the same decoder, and only the strokes are kept (`render/inkMask.ts`).
 // It lives in the persistent thumbnail store (IndexedDB) under the note page's
 // version, so a changed page is cut again and an unchanged one is never
 // fetched twice. The words are found in the page's recognized text; no match,
@@ -15,6 +14,7 @@ import type { TodoTask } from "../../api/todoTypes";
 import type { Id, NoteMeta, WordBox } from "../../core/types";
 import type { DecodedPage, NoteRenderer } from "../../render/types";
 import type { PersistentThumbStore } from "../../cache/idb";
+import { cutStrokes } from "../../render/inkMask";
 
 /** A box in millimetres, the recognized words' own unit. */
 export interface MmBox {
@@ -55,31 +55,6 @@ export function findWords(words: readonly WordBox[], text: string): MmBox | null
 export function withMargin(b: MmBox): MmBox {
   const pad = b.hMm * 0.25;
   return { xMm: b.xMm - pad, yMm: b.yMm - pad, wMm: b.wMm + 2 * pad, hMm: b.hMm + 2 * pad };
-}
-
-/**
- * How opaque a page pixel is as ink, from its darkness (0 white, 255 black):
- * the paper and a template's light lines are gone, black and dark grey pens
- * stay. Light grey ink is lost with the template; there is no telling them apart.
- */
-export function inkAlpha(darkness: number): number {
-  const LO = 70;
-  const HI = 170;
-  return darkness <= LO ? 0 : darkness >= HI ? 255 : Math.round(((darkness - LO) * 255) / (HI - LO));
-}
-
-/** The smallest box around the pixels with any alpha; null when there are none. */
-export function inkBounds(alpha: (x: number, y: number) => number, w: number, h: number): { x: number; y: number; w: number; h: number } | null {
-  let x0 = w, y0 = h, x1 = -1, y1 = -1;
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++)
-      if (alpha(x, y) > 0) {
-        if (x < x0) x0 = x;
-        if (x > x1) x1 = x;
-        if (y < y0) y0 = y;
-        if (y > y1) y1 = y;
-      }
-  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 
 /** Widest strip kept, in px: several times the width it is shown at. */
@@ -171,33 +146,10 @@ export function createTodoInk(d: TodoInkDeps): TodoInk {
     const b = withMargin(box);
     const sx = Math.max(0, Math.floor(b.xMm * k));
     const sy = Math.max(0, Math.floor(b.yMm * k));
-    const sw = Math.min(out.width - sx, Math.ceil(b.wMm * k));
-    const sh = Math.min(out.height - sy, Math.ceil(b.hMm * k));
-    if (sw <= 0 || sh <= 0) return null;
-
-    // The strokes alone: black, with the page's darkness as their opacity.
-    const work = new OffscreenCanvas(sw, sh);
-    const wc = work.getContext("2d", { willReadFrequently: true })!;
-    wc.drawImage(out.bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
-    const img = wc.getImageData(0, 0, sw, sh);
-    const px = img.data;
-    for (let i = 0; i < px.length; i += 4) {
-      const dark = 255 - (0.3 * px[i]! + 0.59 * px[i + 1]! + 0.11 * px[i + 2]!);
-      px[i] = px[i + 1] = px[i + 2] = 0;
-      px[i + 3] = inkAlpha(dark);
-    }
-    const ink = inkBounds((x, y) => px[(y * sw + x) * 4 + 3]!, sw, sh);
-    if (!ink) return null;
-    wc.putImageData(img, 0, 0);
-
-    // Trimmed to the strokes, with an even rim of air.
-    const rim = Math.max(2, Math.round(ink.h * 0.08));
-    const scale = Math.min(1, MAX_W / (ink.w + 2 * rim));
-    const canvas = new OffscreenCanvas(Math.max(1, Math.round((ink.w + 2 * rim) * scale)), Math.max(1, Math.round((ink.h + 2 * rim) * scale)));
-    canvas.getContext("2d")!.drawImage(work, ink.x, ink.y, ink.w, ink.h, rim * scale, rim * scale, ink.w * scale, ink.h * scale);
-    const blob = await canvas.convertToBlob({ type: "image/webp", quality: 0.9 });
-    void d.store?.put(key, blob).catch(() => {});
-    return { url: URL.createObjectURL(blob), width: canvas.width, height: canvas.height };
+    const cut = await cutStrokes(out.bitmap, { x: sx, y: sy, w: Math.min(out.width - sx, Math.ceil(b.wMm * k)), h: Math.min(out.height - sy, Math.ceil(b.hMm * k)) }, MAX_W);
+    if (!cut) return null;
+    void d.store?.put(key, cut.blob).catch(() => {});
+    return { url: URL.createObjectURL(cut.blob), width: cut.width, height: cut.height };
   }
 
   async function strip(task: TodoTask): Promise<Strip | null> {

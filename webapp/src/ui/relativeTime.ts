@@ -1,5 +1,5 @@
-// Coarse relative ("2 days ago") and absolute date formatters for the file
-// history list.
+// Coarse relative ("2 days ago") and absolute date formatters, for the file
+// history list and digests.
 
 /** Coarse "time since" label; a future or just-now stamp clamps to "just now". */
 export function relativeTime(then: number, now: number = Date.now()): string {
@@ -17,10 +17,13 @@ export function relativeTime(then: number, now: number = Date.now()): string {
   return years <= 1 ? "1 year ago" : `${years} years ago`;
 }
 
+/** The day alone, en-GB like {@link absoluteTime}: "8 Nov 2026". */
+export function absoluteDate(then: number): string {
+  return new Date(then).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
+
 /** Full date and time, en-GB to match the recycle bin's stamps. */
 export function absoluteTime(then: number): string {
-  const d = new Date(then);
-  const date = d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
-  const time = d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  return `${date}, ${time}`;
+  const time = new Date(then).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  return `${absoluteDate(then)}, ${time}`;
 }

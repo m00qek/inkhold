@@ -292,6 +292,9 @@ pub fn hash(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var arena = std.heap.ArenaAllocator.init(ctx.gpa);
     defer arena.deinit();
     const a = arena.allocator();
+    // Before the manifest is read: an edit made after the mark is in this
+    // answer or still waiting, never marked fetched without being in it.
+    digest.markTabletListed(ctx.db, user_id, nowMs(ctx)) catch return serverError(ctx, req);
     const rows = digest.manifest(ctx.db, a, user_id) catch return serverError(ctx, req);
     const out = try a.alloc(InfoOut, rows.len);
     for (rows, out) |r, *o| o.* = .{

@@ -36,6 +36,7 @@ export function createPdfNav(ctx: PdfViewerCtx): PdfNav {
     ctx.pagesPanel.setCurrent(to);
     // Tracks the entry the page is inside, not the last one clicked.
     ctx.outlinePanel.setCurrent(to);
+    ctx.digests.setCurrent(to);
     // Before `syncUrl` and the raster, so URL and marks are already the new page's.
     ctx.find.setPage(to);
     syncUrl();

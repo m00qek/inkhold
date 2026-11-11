@@ -117,6 +117,18 @@ const SHOTS: Shot[] = [
   { name: "todo",
     crop: 700, open: async (p) => { await p.goto("/#/todo/all"); await settle(p); } },
   {
+    // Digest: the German learner's grammar digests, one open with its source page and handwritten note.
+    name: "digest",
+    crop: 760,
+    open: async (p) => {
+      await servePdf(p, readFileSync("tests/fixtures/demo/deutsch-lernen.pdf"));
+      await p.goto("/#/digest/d/11");
+      await settle(p);
+      await p.locator(".digest-panel__thumb.has-thumb img").waitFor({ timeout: 20_000 });
+      await p.locator(".digest-panel__ink.has-ink").waitFor();
+    },
+  },
+  {
     // The Server panel: memory, disk, the bin's window, the last backup and every backup folder.
     name: "admin-server",
     admin: true,

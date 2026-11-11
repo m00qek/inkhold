@@ -168,7 +168,7 @@ test("with no network, opening a note says it needs a connection and stays in th
   await expect(page.locator("#gallery").getByText("Weekly review")).toBeVisible();
   await context.setOffline(true);
   await page.locator("#gallery").getByText("Weekly review").click();
-  await expect(page.getByRole("status").filter({ hasText: "You're offline. Opening files and To-Do needs a connection." })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "You're offline. Opening files, To-Do or Digest needs a connection." })).toBeVisible();
   await expect(page).toHaveURL(/#\/folder\/note$/);
   await expect(page.locator(".reader.is-open")).toHaveCount(0);
   await context.setOffline(false);

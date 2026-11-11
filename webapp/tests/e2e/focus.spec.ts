@@ -6,7 +6,7 @@ import { settle } from "./helpers/screens";
 // (box-shadow) on the element or on a part of it (a card draws its ring on
 // its thumbnail).
 
-const SCREENS = ["/#/folder/files", "/#/todo/list/" + "1".padStart(32, "0"), "/#/note/101", "/#/account", "/#/bin"];
+const SCREENS = ["/#/folder/files", "/#/todo/list/" + "1".padStart(32, "0"), "/#/digest/d/1", "/#/note/101", "/#/account", "/#/bin"];
 
 test.use({ reducedMotion: "reduce" });
 

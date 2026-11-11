@@ -8,6 +8,7 @@ const controlplane = @import("handlers/controlplane.zig");
 const admin = @import("handlers/admin.zig");
 const backups = @import("handlers/backups.zig");
 const todoweb = @import("handlers/todo.zig");
+const digestweb = @import("handlers/digest.zig");
 
 /// Smoke-test API version (distinct from the package version).
 pub const api_version = auth.api_version;
@@ -50,8 +51,9 @@ pub const routes = [_]router.Route{
     .{ .method = .POST, .path = "/api/file/2/files/synchronous/end", .scopes = &.{.device}, .handler = device.syncEnd },
     // The Digest app's sync (`handlers/device/digest.zig`): refused unless
     // `digest_sync`. The manifest and the categories are always answered
-    // whole; deletes never fail.
-    .{ .method = .POST, .path = "/api/file/query/summary/hash", .scopes = &.{.device}, .handler = device.digestHash, .read_only = true },
+    // whole; deletes never fail. The manifest is on the writer: it notes that
+    // the tablet has fetched what the browser changed.
+    .{ .method = .POST, .path = "/api/file/query/summary/hash", .scopes = &.{.device}, .handler = device.digestHash },
     .{ .method = .POST, .path = "/api/file/query/summary/id", .scopes = &.{.device}, .handler = device.digestById, .read_only = true },
     .{ .method = .POST, .path = "/api/file/query/summary", .scopes = &.{.device}, .handler = device.digestQuery, .read_only = true },
     .{ .method = .POST, .path = "/api/file/add/summary", .scopes = &.{.device}, .handler = device.digestAdd },
@@ -251,6 +253,12 @@ pub const routes = [_]router.Route{
     .{ .method = .PUT, .path = "/api/controlplane/todo/tasks/:id", .scopes = &.{.controlplane}, .handler = todoweb.updateTask },
     .{ .method = .DELETE, .path = "/api/controlplane/todo/tasks/:id", .scopes = &.{.controlplane}, .handler = todoweb.deleteTask },
     .{ .method = .PUT, .path = "/api/controlplane/todo/order", .scopes = &.{.controlplane}, .handler = todoweb.reorder },
+    // The signed-in person's digests (`handlers/digest.zig`): read, their comments and categories changed.
+    .{ .method = .GET, .path = "/api/controlplane/digests", .scopes = &.{.controlplane}, .handler = digestweb.list, .read_only = true },
+    // A note's page: it reads and may backfill `note_index`, so it stays on the writer.
+    .{ .method = .GET, .path = "/api/controlplane/digests/:id/note/:md5", .scopes = &.{.controlplane}, .handler = digestweb.note, .manual_db_lock = true },
+    // Its typed comment and its category, all the browser changes; the tablet takes them at its next sync.
+    .{ .method = .PUT, .path = "/api/controlplane/digests/:id", .scopes = &.{.controlplane}, .handler = digestweb.edit },
     .{ .method = .GET, .path = "/api/backup-notice", .scopes = &.{.controlplane}, .handler = backups.notice, .read_only = true },
     .{ .method = .GET, .path = "/api/admin/backups", .scopes = &.{.controlplane}, .require_admin = true, .handler = backups.list },
     // "I back up another way": silences `never`, never `failed`.
