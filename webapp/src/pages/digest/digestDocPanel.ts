@@ -12,7 +12,7 @@ import { svg } from "../viewer/viewerIcons";
 import { ICONS } from "../../ui/icons";
 import type { Digest } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
-import { digestPlace, placePath, shorten } from "./digestModel";
+import { changedLine, digestPlace, placePath, shorten } from "./digestModel";
 
 export interface DigestDocPanel {
   /** The panel, also the scroll container. */
@@ -69,6 +69,7 @@ export function createDigestDocPanel(opts: DigestDocPanelOptions): DigestDocPane
       { class: "digest-doc__row", "data-page": page === null ? "" : String(page - 1) },
       step,
       d.comment ? el("p", { class: "digest-doc__comment", text: shorten(d.comment) }) : null,
+      d.source.changed ? el("p", { class: "digest-doc__changed", text: changedLine(d) }) : null,
       ink,
       open,
     );

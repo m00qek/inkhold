@@ -57,7 +57,7 @@
   gap: 2px;
   width: fit-content;
   margin-bottom: var(--sp-4);
-  padding: 3px;
+  padding: var(--sp-1);
   border-radius: var(--radius-card);
   background: var(--hover);
 }
@@ -157,7 +157,7 @@
   list-style: none;
 }
 .digest-list__source h3 {
-  margin: var(--sp-4) 0 0;
+  margin-block: var(--sp-4) 0;
   font: 600 var(--fs-body) var(--font-body);
   color: var(--ink);
   overflow-wrap: anywhere;
@@ -252,7 +252,7 @@
   color: var(--ink-soft);
 }
 .digest-card__tag {
-  padding: 0 6px;
+  padding-inline: var(--sp-2);
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
@@ -408,13 +408,13 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
-/* The source page, small, and its caption: one link to that page. Room is
-   kept for the page while it is drawn, so nothing below it moves. */
 /* The source link, with the line saying its file has changed since. */
 .digest-panel__sourcebox {
   display: grid;
   gap: var(--sp-2);
 }
+/* The source page, small, and its caption: one link to that page. Room is
+   kept for the page while it is drawn, so nothing below it moves. */
 .digest-panel__source {
   display: flex;
   align-items: center;
@@ -563,10 +563,15 @@
   background: var(--accent);
 }
 .digest-doc__comment,
+.digest-doc__changed,
 .digest-doc__ink,
 .digest-doc__open {
   margin-block: 0;
   margin-inline: calc(2.5rem + var(--sp-4)) var(--sp-2);
+}
+.digest-doc__changed {
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
 }
 .digest-doc__comment {
   display: -webkit-box;

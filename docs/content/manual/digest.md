@@ -22,8 +22,8 @@ ways in:
 - **Categories**: **All**, **Uncategorized** and the categories you made,
   newest digest first.
 - **Sources**: the documents and notes your digests come from, together and
-  by name, and what you typed on the tablet. A document's digests are in page order, so they read
-  like notes on it from top to bottom.
+  by name, and what you typed on the tablet. A document's digests are in page
+  order, so they read like notes on it from top to bottom.
 
 Choose a digest to open it beside the list: the whole passage, the page it is
 on, your comment, the note you wrote on it, its category and when you made it.
@@ -44,10 +44,11 @@ on, your comment, the note you wrote on it, its category and when you made it.
 
 A digest whose file is no longer in the library (it was never synced, or it
 moved) can't be opened, and says so. One from an EPUB offers **Open the file**
-instead: the browser can't open an EPUB at a page yet. If the file has changed
-since you took the digest, the digest says so: the page it names may no longer
-hold the passage.
+instead: the browser can't open an EPUB at a page yet. If a document's file
+has changed since you took the digest, the digest says so, here and in the
+document's **Digests**: the page it names may no longer hold the passage.
 
 The other way round, a PDF or a notebook lists its own digests: **Digests**, in
-its bar, shows them in page order beside the page, the ones on the page you are
-on marked. Choose one to go to its page; **Open in Digest** brings you back here.
+its bar, shows them in page order beside the page, the ones on the page you
+are on marked. Choose one to go to its page; **Open in Digest** brings you
+back here.

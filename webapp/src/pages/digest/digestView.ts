@@ -10,11 +10,11 @@ import { ICONS, svg } from "../../ui/icons";
 import { onPlainClick } from "../../ui/link";
 import { digestHref, noteHref, notePageHref } from "../../router";
 import { absoluteDate } from "../../ui/relativeTime";
-import { MAX_COMMENT, type Digest, type DigestSnapshot } from "../../api/digestTypes";
+import { MAX_COMMENT, trimComment, type Digest, type DigestSnapshot } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
 import type { DigestThumbs } from "./digestThumbs";
 import {
-  categoryName, categoryRows, digestsIn, opensAtPage, placePath, sameView, shorten, sourceGroups, sourceLine, SOURCE_SECTIONS, tabOf, viewTitle,
+  categoryName, categoryRows, changedLine, digestsIn, opensAtPage, placePath, sameView, shorten, sourceGroups, sourceLine, SOURCE_SECTIONS, tabOf, viewTitle,
   type DigestPlace, type DigestView,
 } from "./digestModel";
 
@@ -110,8 +110,7 @@ export function groups(p: DigestPaint, a: DigestActions): HTMLElement {
     ...SOURCE_SECTIONS.flatMap((sec) => {
       const mine = all.filter((g) => sec.kinds.includes(g.kind));
       if (mine.length === 0) return [];
-      // What was typed on the tablet is one group, its row named like its section.
-      if (sec.kinds.length === 1 && sec.kinds[0] === "manual") return [el("ul", { class: "digest-groups__alone" }, ...mine.map((g) => row({ kind: "source", key: g.key }, g.name, g.digests.length, glyph[g.kind])))];
+      if (sec.alone) return [el("ul", { class: "digest-groups__alone" }, ...mine.map((g) => row({ kind: "source", key: g.key }, g.name, g.digests.length, glyph[g.kind])))];
       return [
         el("p", { class: "digest-groups__label", text: sec.name }),
         el("ul", {}, ...mine.map((g) => row({ kind: "source", key: g.key }, g.name, g.digests.length, glyph[g.kind]))),
@@ -250,7 +249,7 @@ function commentForm(d: Digest, draft: string, busy: boolean, a: DigestActions, 
   const save = el("button", { class: "btn", type: "submit", text: busy ? "Saving…" : "Save comment" }) as HTMLButtonElement;
   const cancel = el("button", { class: "btn", type: "button", text: "Cancel" });
   const sync = () => {
-    const n = [...box.value.trim()].length;
+    const n = [...trimComment(box.value)].length;
     const over = n > MAX_COMMENT;
     count.textContent = over ? `${n - MAX_COMMENT} characters too many` : `${n} of ${MAX_COMMENT} characters`;
     count.classList.toggle("is-over", over);
@@ -306,7 +305,7 @@ function sourceLink(d: Digest, p: DigestPaint, a: DigestActions): HTMLElement | 
   );
   onPlainClick(link, () => a.openSource(d));
   if (!s.changed) return link;
-  const note = el("p", { class: "digest-panel__aside", text: `This file has changed since the digest was taken: page ${s.page ?? 1} may no longer hold the passage.` });
+  const note = el("p", { class: "digest-panel__aside", text: changedLine(d) });
   return el("div", { class: "digest-panel__sourcebox" }, link, note);
 }
 

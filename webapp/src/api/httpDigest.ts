@@ -40,6 +40,7 @@ export function digestsOf(r: Raw): DigestSnapshot {
         text: d.text ?? "",
         comment: str(d.comment),
         // A category the listing doesn't name is no place to show: Uncategorized, as the tablet does.
+        // The server may still hold the gone uid; Move to… Uncategorized then reads as done, as on the tablet.
         categoryUid: d.categoryUid && known.has(d.categoryUid) ? d.categoryUid : "",
         author: str(d.author),
         createdAt: num(d.createdAt) ?? 0,

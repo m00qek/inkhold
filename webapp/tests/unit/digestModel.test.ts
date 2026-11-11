@@ -3,7 +3,7 @@
 import { describe, it, expect } from "vitest";
 import type { Digest, DigestSnapshot } from "../../src/api/digestTypes";
 import {
-  categoryName, categoryRows, digestPlace, digestsIn, fileDigests, fileName, opensAtPage, parsePlace, placePath, shorten, sourceGroups, sourceLine, viewTitle,
+  categoryName, categoryRows, changedLine, digestPlace, digestsIn, fileDigests, fileName, opensAtPage, parsePlace, placePath, shorten, sourceGroups, sourceLine, viewTitle,
   type DigestPlace,
 } from "../../src/pages/digest/digestModel";
 
@@ -147,5 +147,12 @@ describe("a passage made short for a list", () => {
     const out = shorten(long, 22);
     expect(out).toBe("word word word word…");
     expect(out.length).toBeLessThanOrEqual(23);
+  });
+});
+
+describe("a digest from a changed file", () => {
+  it("names its page, or, without one, says the passage may have moved", () => {
+    expect(changedLine(d("1", { page: 4 }))).toBe("This file has changed since the digest was taken: page 4 may no longer hold the passage.");
+    expect(changedLine(d("1", { page: null }))).toBe("This file has changed since the digest was taken: the passage may have moved.");
   });
 });

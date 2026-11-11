@@ -41,6 +41,16 @@ describe("a viewer's Digests", () => {
     expect([...v.panel.el.querySelectorAll(".digest-doc__row.is-current")].map((r) => r.textContent)).toEqual([expect.stringContaining("passage 2")]);
   });
 
+  it("a row from a changed file says its page may have moved", async () => {
+    const changed = { ...digest("1", 2), source: { ...digest("1", 2).source, changed: true } };
+    const v = createDigestViewerPanel({ id: "p", source: source(async () => [changed, digest("2", 3)]), onPick: () => {}, onNone: () => {} });
+    v.load("57", 0, () => false);
+    await vi.waitFor(() => expect(v.panel.el.querySelectorAll(".digest-doc__row")).toHaveLength(2));
+    expect([...v.panel.el.querySelectorAll(".digest-doc__changed")].map((e) => e.textContent)).toEqual([
+      "This file has changed since the digest was taken: page 2 may no longer hold the passage.",
+    ]);
+  });
+
   it("a document with none dims the opener and shuts the panel; one that can't have any hides it", async () => {
     const onNone = vi.fn();
     const v = createDigestViewerPanel({ id: "p", source: source(async () => []), onPick: () => {}, onNone });

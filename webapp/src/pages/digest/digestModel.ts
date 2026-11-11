@@ -111,9 +111,10 @@ export interface SourceGroup {
  * The Sources list's sections, in this order. Documents and notebooks share
  * one, as on the tablet; what was typed there is its own.
  */
-export const SOURCE_SECTIONS: readonly { kinds: readonly DigestSourceKind[]; name: string }[] = [
+export const SOURCE_SECTIONS: readonly { kinds: readonly DigestSourceKind[]; name: string; alone?: true }[] = [
   { kinds: ["document", "note"], name: "Documents & notes" },
-  { kinds: ["manual"], name: "Typed on the tablet" },
+  // One group, its row named like the section: no label above it.
+  { kinds: ["manual"], name: "Typed on the tablet", alone: true },
   { kinds: ["other"], name: "Other" },
 ];
 
@@ -158,6 +159,13 @@ export function opensAtPage(d: Digest): boolean {
 }
 
 /** At most `max` characters of `text`, cut at a word, with "…" when cut: a control's text, not a whole passage. */
+/** What a digest from a changed file says: its page may not hold the passage any more. */
+export function changedLine(d: Digest): string {
+  return d.source.page === null
+    ? "This file has changed since the digest was taken: the passage may have moved."
+    : `This file has changed since the digest was taken: page ${d.source.page} may no longer hold the passage.`;
+}
+
 export function shorten(text: string, max = 240): string {
   const flat = text.replace(/\s+/g, " ").trim();
   if (flat.length <= max) return flat;
