@@ -6,6 +6,7 @@
 // only when one of its functions runs, never while it is being built, so the
 // construction order in `reader.ts` is the one place that has to be right.
 
+import type { DigestViewerPanel } from "../digest/digestViewerPanel";
 import type { ApiFailureSink } from "../../api/client";
 import type { NoteMeta, PageRef, PdfLink } from "../../core/types";
 import type { LazyEngine } from "../../render/lazy";
@@ -51,6 +52,8 @@ export interface ReaderCtx {
   linkLayer: LinkLayer;
   pageEl: HTMLElement;
   ocrPanel: SidePanel;
+  /** The note's digests: the opener and the panel beside the page. */
+  digests: DigestViewerPanel;
   layersPanel: LayersPanel;
   /** The shared page index, docked left and open by default. */
   pageIndexPanel: PageIndex;

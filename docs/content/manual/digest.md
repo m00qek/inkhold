@@ -39,3 +39,7 @@ the note you wrote on it, its category and when you made it.
 
 A digest whose file is no longer in the library (it was never synced, or it
 moved) can't be opened, and says so.
+
+The other way round, a PDF or a notebook lists its own digests: **Digests**, in
+its bar, shows them in page order beside the page, the ones on the page you are
+on marked. Choose one to go to its page; **Open in Digest** brings you back here.

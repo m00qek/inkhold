@@ -29,6 +29,9 @@ export function createReaderLifecycle(ctx: ReaderCtx): Reader {
     st.layersAvail = "unknown";
     ctx.noteLayerCtl.release();
     ctx.panels.refreshLayersUi();
+    st.digestsOpen = false;
+    ctx.digests.reset();
+    ctx.panels.refreshDigestsUi();
     st.previewVersion = null;
     st.previewViewOnly = false;
     ctx.banner.restore.hidden = false;
@@ -112,6 +115,10 @@ export function createReaderLifecycle(ctx: ReaderCtx): Reader {
         st.layersAvail = "unknown";
         ctx.noteLayerCtl.release();
         ctx.panels.refreshLayersUi();
+        // One note's digests must never sit beside another's pages.
+        st.digestsOpen = false;
+        ctx.digests.reset();
+        ctx.panels.refreshDigestsUi();
         // Page index back to default open, only on a real file change. Closed
         // on a phone, where it opens as a sheet over the page.
         st.pageIndexOpen = !isPhone();
@@ -151,6 +158,9 @@ export function createReaderLifecycle(ctx: ReaderCtx): Reader {
           ctx.find.open();
           ctx.find.setQuery(primed);
         }
+        // A trashed note's digests are the live file's business, not the bin's.
+        const id = st.meta.id;
+        if (!st.fromBin) ctx.digests.load(id, st.pageIndex, () => !st.open || st.meta?.id !== id);
         // Paint after the overlay has laid out so the stage has real dimensions.
         requestAnimationFrame(() => void ctx.paint.showPage(st.pageIndex));
       } else {

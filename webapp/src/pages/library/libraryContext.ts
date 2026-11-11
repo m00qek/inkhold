@@ -11,6 +11,7 @@
 import type { Place } from "../../ui/place";
 import type { TodoPage } from "../todo/todoPage";
 import type { DigestPage } from "../digest/digestPage";
+import type { DigestInk } from "../digest/digestInk";
 import type { DestinationMode } from "./libraryModes";
 import type { Api } from "../../api/types";
 import type { ApiFailureSink } from "../../api/client";
@@ -97,6 +98,8 @@ export interface LibraryCtx {
   exporter: Exporter;
   /** Lassoed to-dos' handwriting, cut from their note pages (the To-Do page and search). */
   todoInk: TodoInk;
+  /** Digests' handwritten notes (the Digest page and the viewers' Digests panels). */
+  digestInk: DigestInk;
   masonry: Masonry;
   viewers: ViewerSet;
   /** Where you are: the tab's title and the page's <h1> (`ui/place.ts`). */

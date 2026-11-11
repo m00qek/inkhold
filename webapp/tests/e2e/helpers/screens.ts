@@ -114,6 +114,14 @@ export const SCREENS: Screen[] = [
   { name: "digest-open", ownTitle: true, open: async (p) => { await p.goto("/#/digest/category/c0ffee00000000000000000000000001/d/1"); } },
   { name: "digest-sources", ownTitle: true, open: async (p) => { await p.goto("/#/digest/sources"); } },
   {
+    name: "reader-digests",
+    ownTitle: true,
+    open: async (p) => {
+      await p.goto("/#/note/121");
+      await p.getByRole("button", { name: "Digests", exact: true }).click();
+    },
+  },
+  {
     name: "digest-comment",
     ownTitle: true,
     open: async (p) => {

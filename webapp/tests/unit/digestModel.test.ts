@@ -3,7 +3,7 @@
 import { describe, it, expect } from "vitest";
 import type { Digest, DigestSnapshot } from "../../src/api/digestTypes";
 import {
-  categoryName, categoryRows, digestsIn, fileName, parsePlace, placePath, sourceGroups, sourceLine, viewTitle, type DigestPlace,
+  categoryName, categoryRows, digestPlace, digestsIn, fileDigests, fileName, parsePlace, placePath, sourceGroups, sourceLine, viewTitle, type DigestPlace,
 } from "../../src/pages/digest/digestModel";
 
 const d = (id: string, p: Partial<Digest> & { path?: string | null; page?: number | null; kind?: Digest["source"]["kind"] } = {}): Digest => ({
@@ -104,5 +104,18 @@ describe("sources", () => {
     expect(sourceLine(s.digests[4]!)).toBe("a");
     expect(fileName("MyStyle/Français/La_phonetique.pdf")).toBe("La_phonetique");
     expect(fileName("Note/.hidden")).toBe(".hidden");
+  });
+});
+
+describe("a file's digests, for its viewer", () => {
+  it("only that file's, in page order; never one typed on the tablet", () => {
+    const f = (id: string, fileId: string | null, page: number | null, kind: Digest["source"]["kind"] = "document"): Digest => {
+      const x = d(id, { kind, page, path: kind === "manual" ? null : "Document/a.pdf" });
+      return { ...x, source: { ...x.source, fileId } };
+    };
+    const s = snap([f("1", "57", 3), f("2", "58", 1), f("3", "57", 1), f("4", "57", null), f("5", "57", 1, "manual")]);
+    expect(fileDigests(s, "57").map((x) => x.id)).toEqual(["3", "1", "4"]);
+    expect(fileDigests(s, "99")).toEqual([]);
+    expect(digestPlace(s.digests[0]!)).toEqual({ view: { kind: "source", key: "Document/a.pdf" }, digest: "1" });
   });
 });

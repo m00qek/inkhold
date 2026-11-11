@@ -1,4 +1,5 @@
-// The shared viewer steppers: zoom `− [readout] +` and the `‹ 12 / 1700 ›` pager.
+// The shared viewer controls: zoom `− [readout] +`, the `‹ 12 / 1700 ›` pager,
+// and the opener that dims, rather than disappears, when it has nothing to open.
 
 import { el } from "../../ui/dom";
 import { isFit, pinchLabel } from "../../ui/pinchZoom";
@@ -194,6 +195,42 @@ export function createPager(opts: {
       live.textContent = of > 0 ? `Page ${at + 1} of ${of}` : "";
       prev.disabled = of <= 0 || at <= 0;
       next.disabled = of <= 0 || at >= of - 1;
+    },
+  };
+}
+
+export interface ContextualOpener {
+  el: HTMLButtonElement;
+  setAvailable(has: boolean): void;
+}
+
+/**
+ * A toolbar control that is always present, dimmed with the reason on its
+ * accessible name when unavailable, so the bar keeps its shape per document.
+ */
+export function contextualOpener(spec: {
+  icon: string;
+  label: string;
+  reason: string;
+  attrs?: Record<string, string>;
+}): ContextualOpener {
+  const dimmed = `${spec.label} — ${spec.reason}`;
+  const button = el("button", {
+    class: "btn",
+    type: "button",
+    ...spec.attrs,
+    "aria-label": dimmed,
+    title: dimmed,
+    disabled: true,
+    html: svg(spec.icon, 1.8),
+  }) as HTMLButtonElement;
+  return {
+    el: button,
+    setAvailable(has: boolean): void {
+      button.disabled = !has;
+      const name = has ? spec.label : dimmed;
+      button.setAttribute("aria-label", name);
+      button.title = name;
     },
   };
 }

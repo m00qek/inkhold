@@ -1,46 +1,10 @@
-// The PDF viewer's chrome pieces: the dimmable opener, the copy control and the
-// dock layout that keeps the page from being squeezed.
+// The PDF viewer's chrome pieces: the copy control and the dock layout that
+// keeps the page from being squeezed.
 
 import { el } from "../../ui/dom";
 import { copyText } from "../../ui/clipboard";
 import { tokenPx, MIN_PAGE_W } from "../../ui/sidePanel";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
-
-export interface ContextualOpener {
-  el: HTMLButtonElement;
-  setAvailable(has: boolean): void;
-}
-
-/**
- * A toolbar control that is always present, dimmed with the reason on its
- * accessible name when unavailable, so the bar keeps its shape per document.
- */
-export function contextualOpener(spec: {
-  icon: string;
-  label: string;
-  reason: string;
-  attrs?: Record<string, string>;
-}): ContextualOpener {
-  const dimmed = `${spec.label} — ${spec.reason}`;
-  const button = el("button", {
-    class: "btn",
-    type: "button",
-    ...spec.attrs,
-    "aria-label": dimmed,
-    title: dimmed,
-    disabled: true,
-    html: svg(spec.icon, 1.8),
-  }) as HTMLButtonElement;
-  return {
-    el: button,
-    setAvailable(has: boolean): void {
-      button.disabled = !has;
-      const name = has ? spec.label : dimmed;
-      button.setAttribute("aria-label", name);
-      button.title = name;
-    },
-  };
-}
 
 export interface CopyControl {
   btn: HTMLButtonElement;
@@ -80,15 +44,17 @@ export function createCopyControl(selectedText: () => string): CopyControl {
   return { btn: copyBtn, live: copyLive };
 }
 
-/** Pages and Outline share the left dock, so one value makes both-open unrepresentable. */
-export type LeftDock = "pages" | "outline";
+/** Pages, Outline and Digests share the left dock, so one value makes two open unrepresentable. */
+export type LeftDock = "pages" | "outline" | "digests";
 
 export interface PdfDocksDeps {
   pagesPanel: { setOpen(open: boolean): void };
   outlinePanel: { setOpen(open: boolean): void };
+  digestsPanel: { setOpen(open: boolean): void };
   layersPanel: { el: HTMLElement };
   pagesToggle: HTMLElement;
   outlineToggle: HTMLElement;
+  digestsToggle: HTMLElement;
   layersToggle: HTMLElement;
   /** The stage's inner width now; 0 before layout. */
   stageWidth: () => number;
@@ -115,7 +81,7 @@ export function createPdfDocks(deps: PdfDocksDeps): PdfDocks {
   }
   function leftDockPx(left: LeftDock | null): number {
     if (left === "pages") return dockPx("--panel-w-narrow", 180);
-    if (left === "outline") return dockPx("--panel-w", 268);
+    if (left === "outline" || left === "digests") return dockPx("--panel-w", 268);
     return 0;
   }
   function rightDockPx(right: boolean): number {
@@ -149,9 +115,11 @@ export function createPdfDocks(deps: PdfDocksDeps): PdfDocks {
     rightDock = right;
     deps.pagesPanel.setOpen(left === "pages");
     deps.outlinePanel.setOpen(left === "outline");
+    deps.digestsPanel.setOpen(left === "digests");
     deps.layersPanel.el.hidden = !right;
     deps.pagesToggle.setAttribute("aria-pressed", String(left === "pages"));
     deps.outlineToggle.setAttribute("aria-pressed", String(left === "outline"));
+    deps.digestsToggle.setAttribute("aria-pressed", String(left === "digests"));
     deps.layersToggle.setAttribute("aria-pressed", String(right));
     if (repaint) deps.repaint();
   }

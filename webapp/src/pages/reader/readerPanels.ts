@@ -16,10 +16,12 @@ export interface ReaderPanels {
   setPageIndexOpen(next: boolean): void;
   /** Never squeeze the page from both sides: shuts the page index if needed. */
   relieveDoubleSqueeze(): void;
-  /** On a phone the panels share one sheet: opening `kept` shuts the other right panel. */
-  soloOnPhone(kept: "ocr" | "layers"): void;
+  /** On a phone the panels share one sheet: opening `kept` shuts the other right panels. */
+  soloOnPhone(kept: "ocr" | "layers" | "digests"): void;
   collapseRightPanels(): void;
   refreshLayersUi(): void;
+  /** Sync the Digests opener and panel with the user's intent and the mode. */
+  refreshDigestsUi(): void;
   /** Whether the decoded layer stack belongs to the focused page. */
   stackIsCurrent(): boolean;
 }
@@ -42,6 +44,9 @@ export function createReaderPanels(ctx: ReaderCtx): ReaderPanels {
 
     if (!isNote) ctx.noteLayerCtl.release();
     refreshLayersUi();
+    // A notebook's digests; an image or a document opened here has none to list.
+    ctx.digests.setApplicable(isNote);
+    refreshDigestsUi();
 
     refreshFindUi();
   }
@@ -72,8 +77,9 @@ export function createReaderPanels(ctx: ReaderCtx): ReaderPanels {
   function rightPanelsWidth(): number {
     const gap = tokenPx("--panel-gap", 22);
     const ocrW = ctx.ocr.isOpen() ? tokenPx("--panel-w", 268) + gap : 0;
+    const digestsW = digestsShown() ? tokenPx("--panel-w", 268) + gap : 0;
     const layersW = layersPanelShown() ? tokenPx("--panel-w-wide", 320) + gap : 0;
-    return ocrW + layersW;
+    return ocrW + digestsW + layersW;
   }
 
   /** The page index plus the right dock(s) would leave the page below {@link MIN_PAGE_W}. */
@@ -106,12 +112,16 @@ export function createReaderPanels(ctx: ReaderCtx): ReaderPanels {
     if (st.pageIndexOpen && st.mode === "note" && bothSidesTooTight()) setPageIndexOpen(false);
   }
 
-  function soloOnPhone(kept: "ocr" | "layers"): void {
+  function soloOnPhone(kept: "ocr" | "layers" | "digests"): void {
     if (!isPhone()) return;
-    if (kept === "layers" && ctx.ocr.isOpen()) ctx.ocr.toggle();
-    if (kept === "ocr" && st.layersPanelOpen) {
+    if (kept !== "ocr" && ctx.ocr.isOpen()) ctx.ocr.toggle();
+    if (kept !== "layers" && st.layersPanelOpen) {
       st.layersPanelOpen = false;
       refreshLayersUi();
+    }
+    if (kept !== "digests" && st.digestsOpen) {
+      st.digestsOpen = false;
+      refreshDigestsUi();
     }
   }
 
@@ -122,6 +132,21 @@ export function createReaderPanels(ctx: ReaderCtx): ReaderPanels {
       st.layersPanelOpen = false;
       refreshLayersUi();
     }
+    if (st.digestsOpen) {
+      st.digestsOpen = false;
+      refreshDigestsUi();
+    }
+  }
+
+  /** Whether the Digests panel is on screen: the user's intent, for a `.note`. */
+  function digestsShown(): boolean {
+    return st.digestsOpen && st.mode === "note";
+  }
+
+  function refreshDigestsUi(): void {
+    const open = digestsShown();
+    ctx.digests.panel.setOpen(open);
+    ctx.digests.opener.el.setAttribute("aria-pressed", String(open));
   }
 
   /** Sync every layers affordance with the stack; called on every path that changes it. */
@@ -153,5 +178,5 @@ export function createReaderPanels(ctx: ReaderCtx): ReaderPanels {
     return page !== undefined && page.hash !== "" && ctx.noteLayerCtl.isPresented(page.hash, ctx.getTheme());
   }
 
-  return { setMode, refreshFindUi, layersPanelShown, bothSidesTooTight, setPageIndexOpen, relieveDoubleSqueeze, soloOnPhone, collapseRightPanels, refreshLayersUi, stackIsCurrent };
+  return { setMode, refreshFindUi, layersPanelShown, bothSidesTooTight, setPageIndexOpen, relieveDoubleSqueeze, soloOnPhone, collapseRightPanels, refreshLayersUi, refreshDigestsUi, stackIsCurrent };
 }

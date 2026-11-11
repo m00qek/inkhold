@@ -97,6 +97,7 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
     thumbs.reset();
     outlinePanel.clear();
     setOutlineAvailable(false); // …which also shuts the panel and un-presses it
+    ctx.digests.reset();
     downloads.refreshGroups();
     exportMenu.setOpen(false);
     // The raw href is per open; left set it would offer the previous file until metadata lands.
@@ -245,6 +246,8 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
         if (mine !== st.generation) return;
         setOutlineAvailable(false);
       });
+    // A trashed document's digests are the live file's business, not the bin's.
+    if (!st.fromBin) ctx.digests.load(summary.id, st.pageIndex, () => mine !== st.generation);
     pagesPanel.setPages(st.pageCount);
     // The mark may have landed already, so compute the rail here as well as in `loadMark`.
     refreshInk();

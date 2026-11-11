@@ -274,6 +274,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   installLibraryEngines(ctx);
   ctx.exporter = createExporter({ api, renderer });
   ctx.todoInk = createTodoInk({ api, renderer, store: deps.persistentThumbs ?? null });
+  ctx.digestInk = createDigestInk({ api, renderer, store: deps.persistentThumbs ?? null });
 
   // ---- viewers ----
   ctx.viewers = createViewerSet(createLibraryViewerDeps(ctx), content, gallery);
@@ -377,7 +378,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     handled: ctx.handled,
     onChanged: () => ctx.rail.build(),
     go: (path) => go(digestHref(path)),
-    ink: createDigestInk({ api, renderer, store: deps.persistentThumbs ?? null }),
+    ink: ctx.digestInk,
     openFile: (id, page) => go(notePageHref(id, page)),
   });
   // Once at start, like To-Do: the rail shows Digest only when the server keeps digests.

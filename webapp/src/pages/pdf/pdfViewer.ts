@@ -10,11 +10,12 @@ import { el } from "../../ui/dom";
 import type { PageRef } from "../../core/types";
 import { createToolbar } from "../toolbar";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
-import { applyPinch, createPager, createZoomStepper, FIT_PAGE } from "../viewer/viewerControls";
+import { applyPinch, contextualOpener, createPager, createZoomStepper, FIT_PAGE } from "../viewer/viewerControls";
 import { createViewerExportMenu } from "../viewer/viewerExportMenu";
 import { createViewerHeader, createViewerBody, createVersionBanner } from "../viewer/viewerChrome";
 import type { VersionSubject, Viewer, ViewerDeps } from "../viewer/viewer";
 import { createPdfOutlinePanel } from "./pdfOutlinePanel";
+import { createDigestViewerPanel } from "../digest/digestViewerPanel";
 import { closeWith } from "../../ui/sidePanel";
 import { isPhone } from "../../ui/breakpoints";
 import { attachPinch } from "../../ui/pinchZoom";
@@ -26,7 +27,7 @@ import { createPdfHighlightLayer } from "./pdfHighlightLayer";
 import { createPdfSelectionLayer } from "./pdfSelectionLayer";
 import { createBinViewerActions } from "../../ui/binViewerActions";
 import { createLayersPanel } from "../layersPanel";
-import { contextualOpener, createCopyControl, createPdfDocks } from "./pdfChrome";
+import { createCopyControl, createPdfDocks } from "./pdfChrome";
 import { createFindBar } from "../viewer/findBar";
 import { buildNoteLayerThumb, createNoteLayersController } from "../noteLayers";
 import { createPdfExports } from "./pdfExports";
@@ -276,14 +277,30 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     docks.set(docks.left() === "outline" ? null : "outline", docks.right(), "left"),
   );
 
+  // ---- digests ----
+  const digests = createDigestViewerPanel({
+    id: "pdf-digests-panel",
+    source: deps.digests,
+    onPick: (page) => void ctx.nav.go(page),
+    // No repaint: callers paint on their own path.
+    onNone: () => {
+      if (docks.left() === "digests") docks.set(null, docks.right(), null, false);
+    },
+  });
+  digests.opener.el.addEventListener("click", () =>
+    docks.set(docks.left() === "digests" ? null : "digests", docks.right(), "left"),
+  );
+
   layersToggle.addEventListener("click", () => docks.set(docks.left(), !docks.right(), "right"));
 
   const docks = createPdfDocks({
     pagesPanel,
     outlinePanel,
+    digestsPanel: digests.panel,
     layersPanel,
     pagesToggle,
     outlineToggle: outlineOpener.el,
+    digestsToggle: digests.opener.el,
     layersToggle,
     stageWidth: () => renderer.stageInner().w,
     repaint: () => {
@@ -320,6 +337,8 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
       // Panel switches stay on the bar everywhere: their state is worth seeing.
       { kind: "custom", key: "pages", el: pagesToggle, focus: [pagesToggle] },
       { kind: "custom", key: "outline", el: outlineOpener.el, focus: [outlineOpener.el] },
+      // Shown while the server keeps digests.
+      { kind: "custom", key: "digests", el: digests.opener.el, focus: [digests.opener.el] },
       // Shown only when a `.mark` exists.
       { kind: "custom", key: "layers", el: layersToggle, focus: [layersToggle] },
       { kind: "custom", key: "copy", el: copy.btn, focus: [copy.btn], fold: true },
@@ -342,6 +361,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     { class: "pdf-wrap" },
     pagesPanel.el,
     outlinePanel.el,
+    digests.panel.el,
     body.main,
     layersPanel.el,
   );
@@ -378,6 +398,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
           : [
               docks.left() === "pages" ? pagesPanel.el : null,
               docks.left() === "outline" ? outlinePanel.el : null,
+              docks.left() === "digests" ? digests.panel.el : null,
               docks.right() ? layersPanel.el : null,
             ].filter((panel): panel is HTMLElement => panel !== null),
     },
@@ -437,6 +458,7 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     pagesToggle,
     outlinePanel,
     outlineOpener,
+    digests,
     layersToggle,
     docks,
     copy,

@@ -29,6 +29,8 @@ export interface ReaderState {
   previewViewOnly: boolean;
   /** The user's intent; the panel shows only while the page has layers. */
   layersPanelOpen: boolean;
+  /** The user's intent; the Digests panel shows only for a `.note`. */
+  digestsOpen: boolean;
   /**
   * What the layers toggle may claim, decided from metadata rather than the
   * decode (which lags a page turn). "unknown" while `meta` is the skeleton.

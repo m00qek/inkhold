@@ -27,6 +27,8 @@ import { originSubtitle, createViewerHeader } from "../viewer/viewerChrome";
 import { createBinViewerActions, type BinRetention } from "../../ui/binViewerActions";
 import { createLayersPanel } from "../layersPanel";
 import { closeWith, createSidePanel } from "../../ui/sidePanel";
+import { createDigestViewerPanel } from "../digest/digestViewerPanel";
+import type { ViewerDigests } from "../viewer/viewer";
 import { createPageIndex } from "../pageIndex";
 import { createLinkLayer } from "../linkLayer";
 import { buildNoteLayerThumb, createNoteLayersController } from "../noteLayers";
@@ -67,6 +69,8 @@ export interface ReaderDeps {
    * bin) are mutually exclusive and select those route forms.
    */
   onPosition?: (noteId: Id, page: number, query: string, versionMd5?: string, bin?: boolean) => void;
+  /** The note's digests for its Digests panel; absent, the reader has none. */
+  digests?: ViewerDigests;
 }
 
 /**
@@ -153,6 +157,7 @@ export function createReader(deps: ReaderDeps): Reader {
     previewVersion: null,
     previewViewOnly: false,
     layersPanelOpen: false,
+    digestsOpen: false,
     layersAvail: "unknown",
     // Docked beside the page; on a phone it would cover it (a sheet).
     pageIndexOpen: !isPhone(),
@@ -185,6 +190,17 @@ export function createReader(deps: ReaderDeps): Reader {
     label: "Page text",
     hookPrefix: "ocr",
     onClose: closeWith(buttons.ocrToggle),
+  });
+  // The note's digests, beside the page like Page text.
+  const digests = createDigestViewerPanel({
+    id: "note-digests-panel",
+    source: deps.digests,
+    onPick: (index) => ctx.nav.goToPage(index),
+    onNone: () => {
+      if (!st.digestsOpen) return;
+      st.digestsOpen = false;
+      ctx.panels.refreshDigestsUi();
+    },
   });
   // No `onOpacity`: `.note` layers carry no opacity (device-confirmed).
   const layersPanel = createLayersPanel({
@@ -228,7 +244,7 @@ export function createReader(deps: ReaderDeps): Reader {
   });
 
   // Page index docks left; OCR and Layers dock right.
-  const pageWrap = el("div", { class: "page-wrap" }, pageIndexPanel.el, pageEl, ocrPanel.el, layersPanel.el);
+  const pageWrap = el("div", { class: "page-wrap" }, pageIndexPanel.el, pageEl, ocrPanel.el, digests.panel.el, layersPanel.el);
   const stage = el("div", { class: "stage" }, pageWrap);
 
   // --- the non-`.note` stage ------------------------------------------------
@@ -293,6 +309,8 @@ export function createReader(deps: ReaderDeps): Reader {
       { kind: "custom", key: "find", el: findBar.toggle, focus: [findBar.toggle], top: true },
       // Panel switches stay on the bar everywhere: their state is worth seeing.
       { kind: "custom", key: "ocr", el: buttons.ocrToggle, focus: [buttons.ocrToggle] },
+      // Shown for a `.note` while the server keeps digests.
+      { kind: "custom", key: "digests", el: digests.opener.el, focus: [digests.opener.el] },
       { kind: "custom", key: "layers", el: buttons.layersToggle, focus: [buttons.layersToggle] },
       { kind: "custom", key: "pages", el: buttons.pagesToggle, focus: [buttons.pagesToggle] },
     ],
@@ -333,6 +351,7 @@ export function createReader(deps: ReaderDeps): Reader {
     linkLayer,
     pageEl,
     ocrPanel,
+    digests,
     layersPanel,
     pageIndexPanel,
     pageWrap,
@@ -404,6 +423,16 @@ export function createReader(deps: ReaderDeps): Reader {
       panels.soloOnPhone("ocr");
       panels.relieveDoubleSqueeze();
     }
+  });
+  digests.opener.el.addEventListener("click", () => {
+    st.digestsOpen = !st.digestsOpen;
+    panels.refreshDigestsUi();
+    if (st.digestsOpen) {
+      panels.soloOnPhone("digests");
+      panels.relieveDoubleSqueeze();
+    }
+    // The panel takes stage width.
+    void ctx.paint.showPage(st.pageIndex);
   });
   buttons.layersToggle.addEventListener("click", () => {
     st.layersPanelOpen = !st.layersPanelOpen;

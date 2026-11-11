@@ -1,5 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { signedIn } from "./helpers/app";
+import { servePdf } from "./pdfViewer.shared";
 
 // Digest against the fake API (`api/fakeDigest.ts`): seven digests in Home,
 // Kitchen and Uncategorized ("Reading" is empty), from two PDFs, an EPUB, two
@@ -137,5 +139,43 @@ test.describe("Digest", () => {
     expect(width).toBeLessThanOrEqual(390);
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/phone.png` });
   });
-});
 
+  test("a PDF's Digests panel: its digests in page order, those on screen marked; a row turns the page", async ({ page }) => {
+    await signedIn(page);
+    // Three pages, so the lease's page-3 digest has a page to go to.
+    await servePdf(page, readFileSync(new URL("../fixtures/demo/deutsch-lernen.pdf", import.meta.url)));
+    await page.goto("/#/note/142");
+    const opener = page.getByRole("button", { name: "Digests", exact: true });
+    await expect(opener).toBeEnabled();
+    await opener.click();
+    await expect(opener).toHaveAttribute("aria-pressed", "true");
+    const p = page.locator("#pdf-digests-panel");
+    await expect(p.locator(".digest-doc__page")).toHaveText(["p. 1", "p. 3"]);
+    await expect(p.locator(".digest-doc__row.is-current")).toHaveCount(1);
+    await expect(p.locator(".digest-doc__row.is-current")).toContainText("repairs caused by misuse");
+    await p.getByRole("button", { name: /sublet/ }).click();
+    await expect(page).toHaveURL(/#\/note\/142\/page\/3$/);
+    await expect(p.locator(".digest-doc__row.is-current")).toContainText("sublet");
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/pdf-panel.png` });
+    // On to the digest itself, where its comment can be changed.
+    await p.locator(".digest-doc__row.is-current").getByRole("link", { name: "Open in Digest" }).click();
+    await expect(page).toHaveURL(/#\/digest\/sources\/.+\/d\/1$/);
+    await expect(page.locator(".digest-panel")).toContainText("Ask before the summer");
+  });
+
+  test("a notebook's Digests panel beside the page; a note with none dims the opener", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/#/note/121");
+    const opener = page.getByRole("button", { name: "Digests", exact: true });
+    await opener.click();
+    const p = page.locator("#note-digests-panel");
+    await expect(p).toBeVisible();
+    await p.getByRole("button", { name: /Ship the beta/ }).click();
+    await expect(page).toHaveURL(/#\/note\/121\/page\/2$/);
+    await expect(p.locator(".digest-doc__row.is-current")).toHaveCount(1);
+
+    await page.goto("/#/note/101");
+    await expect(page.getByRole("button", { name: /^Digests — none were taken/ })).toBeDisabled();
+    await expect(page.locator("#note-digests-panel")).toBeHidden();
+  });
+});

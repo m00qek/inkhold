@@ -82,6 +82,7 @@ export function createReaderPaint(ctx: ReaderCtx): ReaderPaint {
 
     // Every page change comes through here, so the strip follows for free.
     ctx.pageIndexPanel.setCurrent(st.pageIndex);
+    ctx.digests.setCurrent(st.pageIndex);
     ctx.pager.set(st.pageIndex, st.meta.pages.length);
 
     // Decided from metadata now, not after the decode. The server omits

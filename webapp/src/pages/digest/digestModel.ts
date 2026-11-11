@@ -141,6 +141,16 @@ export function sourceGroups(s: DigestSnapshot): SourceGroup[] {
     .sort((a, b) => order(a.kind) - order(b.kind) || a.name.localeCompare(b.name));
 }
 
+/** The digests taken from one library file, in page order: what its viewer's Digests panel lists. */
+export function fileDigests(s: DigestSnapshot, fileId: string): Digest[] {
+  return s.digests.filter((d) => d.source.kind !== "manual" && d.source.fileId === fileId).sort(byPage);
+}
+
+/** A digest's place on the Digest page: under its source, open. */
+export function digestPlace(d: Digest): DigestPlace {
+  return { view: { kind: "source", key: sourceKey(d) }, digest: d.id };
+}
+
 // ---- what a view shows ----
 
 /** The digests a view lists: a category's newest first, a source's in page order (every source: grouped, in the list's order). */

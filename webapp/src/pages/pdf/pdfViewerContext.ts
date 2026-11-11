@@ -17,12 +17,14 @@ import type { LinkLayer } from "../linkLayer";
 import type { NoteLayersController } from "../noteLayers";
 import type { PdfSeam } from "./pdfViewer";
 import type { PdfViewerState } from "./pdfViewerState";
-import type { ContextualOpener, CopyControl, PdfDocks } from "./pdfChrome";
+import type { CopyControl, PdfDocks } from "./pdfChrome";
+import type { ContextualOpener } from "../viewer/viewerControls";
 import type { FindBar } from "../viewer/findBar";
 import type { PdfExports } from "./pdfExports";
 import type { PdfFindController } from "./pdfFind";
 import type { PdfHighlightLayer } from "./pdfHighlightLayer";
 import type { PdfOutlinePanel } from "./pdfOutlinePanel";
+import type { DigestViewerPanel } from "../digest/digestViewerPanel";
 import type { PdfPageRenderer, Zoom } from "./pdfPageRenderer";
 import type { PdfSelectionLayer } from "./pdfSelectionLayer";
 import type { PdfThumbStrip } from "./pdfThumbStrip";
@@ -68,8 +70,10 @@ export interface PdfViewerCtx {
   pagesToggle: HTMLButtonElement;
   outlinePanel: PdfOutlinePanel;
   outlineOpener: ContextualOpener;
+  /** The document's digests, in the left dock too. */
+  digests: DigestViewerPanel;
   layersToggle: HTMLButtonElement;
-  /** Pages and Outline share the left dock; the layers panel is the right one. */
+  /** Pages, Outline and Digests share the left dock; the layers panel is the right one. */
   docks: PdfDocks;
   copy: CopyControl;
   findToggle: HTMLButtonElement;
