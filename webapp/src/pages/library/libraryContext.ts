@@ -136,8 +136,17 @@ export interface LibraryCtx {
   leaveAdmin(): void;
   leaveTodo(): void;
   leaveDigest(): void;
+  /**
+   * Leave every place that covers the gallery (the console, the account page,
+   * To-Do, Digest) but `keep`: one at a time, and a new one added here only.
+   * The bin closes by being repainted over, so it is not one of them.
+   */
+  leaveDestinations(keep?: CoveringPlace): void;
   openAdmin(): void;
 }
+
+/** The places that cover the gallery and are left by `leaveDestinations`. */
+export type CoveringPlace = "admin" | "account" | "todo" | "digest";
 
 /** The members the shell has before any part is built. */
 export type LibraryCtxSeed = Pick<
@@ -145,7 +154,7 @@ export type LibraryCtxSeed = Pick<
   | "deps" | "identity" | "renderer" | "cache" | "live" | "api" | "historyScope" | "binScope" | "st"
   | "gallery" | "content" | "place" | "toastEl" | "destinationsOpen"
   | "failures" | "handled" | "sessionDidExpire" | "toast"
-  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "leaveDigest" | "openAdmin"
+  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "leaveDigest" | "leaveDestinations" | "openAdmin"
 >;
 
 /**

@@ -97,10 +97,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
 
     showFolder(id: Id | null): void {
       enterPlace();
-      ctx.leaveAdmin();
-      ctx.leaveAccount();
-      ctx.leaveTodo();
-      ctx.leaveDigest();
+      ctx.leaveDestinations();
       st.destination = null;
       void ctx.data.navigate(id);
       requestAnimationFrame(() => ctx.galleryEngine.repaintVisible());
@@ -131,9 +128,8 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
 
     showDestination(key: string): void {
       enterPlace();
-      ctx.leaveAccount();
-      ctx.leaveTodo();
-      ctx.leaveDigest();
+      // The console stays until its own arm decides: the bin's leaves it.
+      ctx.leaveDestinations("admin");
       st.query = "";
       ctx.topbar.searchInput.value = "";
       ctx.search.reset();
@@ -144,8 +140,6 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
         // --- BIN ROUTE ---
         case BIN_KEY:
           ctx.leaveAdmin(); // one st.destination at a time
-          ctx.leaveTodo();
-          ctx.leaveDigest();
           st.destination = key;
           ctx.bin.open();
           ctx.rail.build(); // the ctx.bin is open now; repaint the highlight
@@ -155,8 +149,6 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
           // The bin closes by being repainted over; do it while `destination` is null so
           // the guard lets it through.
           if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
-          ctx.leaveTodo();
-          ctx.leaveDigest();
           st.destination = key;
           ctx.openAdmin();
           return;
@@ -172,9 +164,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
       enterPlace();
       // Same as the account arm: repaint over a mounted bin while `destination` is null.
       if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
-      ctx.leaveAdmin();
-      ctx.leaveAccount();
-      ctx.leaveDigest();
+      ctx.leaveDestinations("todo");
       st.query = "";
       ctx.topbar.searchInput.value = "";
       ctx.search.reset();
@@ -188,9 +178,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
       enterPlace();
       // Same as the account arm: repaint over a mounted bin while `destination` is null.
       if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
-      ctx.leaveAdmin();
-      ctx.leaveAccount();
-      ctx.leaveTodo();
+      ctx.leaveDestinations("digest");
       st.query = "";
       ctx.topbar.searchInput.value = "";
       ctx.search.reset();
@@ -203,9 +191,7 @@ export function createLibraryRoutes(ctx: LibraryCtx): LibraryRoutes {
       enterPlace();
       // Same as the admin arm.
       if (ctx.bin.isOpen()) ctx.render.renderGallery({ rail: false });
-      ctx.leaveAdmin();
-      ctx.leaveTodo();
-      ctx.leaveDigest();
+      ctx.leaveDestinations("account");
       st.query = "";
       ctx.topbar.searchInput.value = "";
       ctx.search.reset();

@@ -239,6 +239,12 @@ export function createAppShell(deps: AppDeps): AppShell {
     leaveAdmin: () => ctx.adminDest.leave(),
     leaveTodo: () => ctx.todo?.close(),
     leaveDigest: () => ctx.digest?.close(),
+    leaveDestinations(keep) {
+      if (keep !== "admin") ctx.leaveAdmin();
+      if (keep !== "account") ctx.leaveAccount();
+      if (keep !== "todo") ctx.leaveTodo();
+      if (keep !== "digest") ctx.leaveDigest();
+    },
     openAdmin: () => ctx.adminDest.open(),
   });
 

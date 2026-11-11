@@ -18,10 +18,7 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
   /** Shared by keystrokes and the `#/search?q=` route; doesn't touch the URL. */
   function applyQuery(next: string): void {
     // The results belong in the gallery, which the console or account page covers.
-    ctx.leaveAdmin();
-    ctx.leaveAccount();
-    ctx.leaveTodo();
-    ctx.leaveDigest();
+    ctx.leaveDestinations();
     st.query = next;
     // Names paint on the keystroke from the cached tree; transcripts arrive after
     // the debounce. `rail: false`: typing can't change the tree.
