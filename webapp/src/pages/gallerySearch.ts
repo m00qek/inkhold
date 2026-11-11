@@ -41,7 +41,7 @@ export interface GallerySearchCtx {
   */
   indexPending: () => number | null;
   /** Another group of results painted after the notes (the to-dos); null: none. */
-  moreResults?: (q: string) => HTMLElement | null;
+  moreResults?: (q: string) => Node | null;
   /** How much handwriting search can find (`searchCoverage.ts`); absent: not said. */
   coverage?: SearchCoverage;
 }

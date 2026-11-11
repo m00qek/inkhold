@@ -68,7 +68,8 @@
 /* Mirrors `.ocr__body mark`: one highlight look in titles and transcripts. */
 .card__title mark,
 .card__excerpt mark,
-.todo-hit__title mark {
+.todo-hit__title mark,
+.digest-hit mark {
   background: color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--ink);
   border-radius: 2px;

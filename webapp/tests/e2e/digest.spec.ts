@@ -171,6 +171,30 @@ test.describe("Digest", () => {
     await expect(page.locator(".digest-panel").getByRole("link", { name: /^Open/ })).toHaveCount(0);
   });
 
+  test("search finds a digest by its passage and its comment together, and opens it on the Digest page", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/");
+    await page.getByRole("searchbox", { name: "Search notes" }).fill("sublet summer");
+    const group = page.getByRole("region", { name: "Digests" });
+    await expect(group.locator(".section-head")).toHaveText("1 digest");
+    await expect(group.locator(".digest-hit__text mark")).toHaveText(["sublet"]);
+    await expect(group.locator(".digest-hit__comment mark")).toHaveText(["summer"]);
+    await expect(group.locator(".digest-hit__meta")).toHaveText("Home · Apartment lease — signed, page 3");
+    await group.locator(".digest-hit").click();
+    await expect(page).toHaveURL(/#\/digest\/d\/1$/);
+    await expect(page.locator(".digest-panel__text")).toHaveText("The tenant may sublet the flat only with the landlord's written consent.");
+  });
+
+  test("search holds a quoted phrase to its order in a digest", async ({ page }) => {
+    await signedIn(page);
+    await page.goto("/");
+    const box = page.getByRole("searchbox", { name: "Search notes" });
+    await box.fill('"written consent"');
+    await expect(page.getByRole("region", { name: "Digests" }).locator(".digest-hit")).toHaveCount(1);
+    await box.fill('"consent written"');
+    await expect(page.getByRole("region", { name: "Digests" })).toHaveCount(0);
+  });
+
   test("a place that is gone says so, with a way back", async ({ page }) => {
     await openDigest(page, "/category/kb-gone");
     await expect(page.locator(".digest-empty__title")).toHaveText("This category is gone");

@@ -1,6 +1,6 @@
 // The library's feature wiring: version history, rename, card actions, gallery cards and search rows, uploads, and the account page's host.
 
-import { destinationHref, folderHref, go, todoHref } from "../../router";
+import { destinationHref, digestHref, folderHref, go, todoHref } from "../../router";
 import type { Entry } from "../../core/types";
 import { NameTakenError } from "../../api/client";
 import { openRenameDialog } from "../../ui/renameDialog";
@@ -15,6 +15,8 @@ import { createHistoryController, type HistoryController } from "../historyPanel
 import { createGallerySearch, type GallerySearch } from "../gallerySearch";
 import { BIN_KEY } from "../bin/bin";
 import { findTodos, todoHits } from "../todo/todoSearch";
+import { digestHits, foundDigests } from "../digest/digestSearch";
+import { placePath } from "../digest/digestModel";
 import { homeView, viewPath } from "../todo/todoModel";
 import { type AccountHost } from "../account/account";
 import type { LibraryCtx } from "./libraryContext";
@@ -130,15 +132,19 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
       if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
     }),
     moreResults: (q) => {
-      // To-dos read at start can be stale: a search asks again (`load` repaints).
+      // Read at start, they can be stale: a search asks again (`load` repaints).
       ctx.todo.freshen();
-      const snap = ctx.searchItems.todo();
-      if (!snap?.enabled) return null;
+      void ctx.digest.freshen();
       const s = st.searchState;
-      const answered = s.kind === "results" && s.query === q.trim();
-      const found = findTodos(snap, q, answered ? s.items.todo : [], answered ? s.expansions : []);
-      if (found.tasks.length === 0 && found.lists.length === 0) return null;
-      return todoHits(
+      const answered = s.kind === "results" && s.query === q.trim() ? s : null;
+      const expansions = answered?.expansions ?? [];
+      const digests = ctx.searchItems.digest();
+      const dHits = digests?.enabled
+        ? digestHits(digests, foundDigests(digests, answered?.items.digest ?? []), q, expansions, (place) => go(digestHref(placePath(place))))
+        : null;
+      const snap = ctx.searchItems.todo();
+      const found = snap?.enabled ? findTodos(snap, q, answered?.items.todo ?? [], expansions) : null;
+      const tHits = snap && found && (found.tasks.length > 0 || found.lists.length > 0) ? todoHits(
         snap,
         found,
         Date.now(),
@@ -148,7 +154,11 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
         },
         (t) => ctx.todoInk.chip(t),
         (view) => go(todoHref(viewPath(view))),
-      );
+      ) : null;
+      if (!dHits && !tHits) return null;
+      const both = document.createDocumentFragment();
+      both.append(...[dHits, tHits].filter((x): x is HTMLElement => x !== null));
+      return both;
     },
   });
 
