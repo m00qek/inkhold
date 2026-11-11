@@ -1,16 +1,8 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import {
-  MAPPING_FORMAT_VERSION,
-  SearchIndex,
-  SearchIndexError,
-  StaleSnapshotError,
-  type CoreLoader,
-  type IndexSnapshot,
-  type SearchCoreExports,
-  type TermsDocument,
-} from "../../src/search/indexEngine";
+import { SearchIndex, SearchIndexError, type CoreLoader, type SearchCoreExports, type TermsDocument } from "../../src/search/indexEngine";
+import { fields } from "../../src/search/itemRows";
 
 // Against the real `public/sqlite-core.wasm` (built by the `pretest` hook): the
 // tokenizer is what is under test. It imports nothing, so Node can instantiate it.
@@ -183,96 +175,6 @@ describe("SearchIndex query folding to nothing", () => {
   });
 });
 
-describe("SearchIndex persistence", () => {
-  it("round-trips through a FRESH instance and answers identically", async () => {
-    const source = await built();
-    let snapshot: IndexSnapshot;
-    const before: Record<string, string[]> = {};
-    const QUERIES = ["reunião ", "caligrafia ", "orcamento projeto ", "cali", "dados "];
-    try {
-      for (const q of QUERIES) before[q] = places(source.query(q, 10));
-      snapshot = source.serialize();
-    } finally {
-      source.close();
-    }
-    expect(snapshot.image.length).toBeGreaterThan(0);
-    expect(snapshot.mappingVersion).toBe(MAPPING_FORMAT_VERSION);
-
-    // A fresh instance: `idx_image_alloc` is its first call, where `OMIT_AUTOINIT` bites.
-    const restored = await SearchIndex.restore(snapshot, loadCore);
-    try {
-      for (const q of QUERIES) expect(places(restored.query(q, 10))).toEqual(before[q]);
-    } finally {
-      restored.close();
-    }
-  });
-
-  it("carries the rowid mapping across the round trip", async () => {
-    const source = await built();
-    const snapshot = source.serialize();
-    source.close();
-
-    const restored = await SearchIndex.restore(snapshot, loadCore);
-    try {
-      expect(restored.documents()).toEqual(LIBRARY.map((d) => d.md5));
-      expect(restored.documentCount).toBe(3);
-      expect(restored.pageCount).toBe(6);
-      expect(restored.query("conclusao ", 10).hits).toEqual([{ md5: NOTES.md5, page: 11 }]);
-      expect(places(restored.query("caligrafia ", 10))).toEqual(["a3", "b0"]);
-      const again = restored.serialize();
-      expect(again.docs).toEqual(snapshot.docs);
-      expect(again.image.length).toBe(snapshot.image.length);
-    } finally {
-      restored.close();
-    }
-  });
-
-  it("restores into an instance that is already open, without re-instantiating", async () => {
-    const index = await built();
-    try {
-      const snapshot = index.serialize();
-      index.reset();
-      index.build([PLAN]);
-      expect(index.query("caligrafia ", 10).total).toBe(0);
-      index.deserialize(snapshot);
-      expect(index.query("caligrafia ", 10).total).toBe(2);
-      expect(index.documentCount).toBe(3);
-    } finally {
-      index.close();
-    }
-  });
-
-  it("refuses a snapshot from a different index shape rather than answering wrongly", async () => {
-    const index = await built();
-    const snapshot = index.serialize();
-    index.close();
-
-    // Either version can move with nothing server-side moving: a distinguishable error.
-    const fresh = await SearchIndex.open(loadCore);
-    try {
-      expect(() => fresh.deserialize({ ...snapshot, schemaVersion: snapshot.schemaVersion + 1 })).toThrow(
-        StaleSnapshotError,
-      );
-      expect(() => fresh.deserialize({ ...snapshot, mappingVersion: 99 })).toThrow(StaleSnapshotError);
-      expect(fresh.query("caligrafia ", 10).total).toBe(0);
-      fresh.deserialize(snapshot);
-      expect(fresh.query("caligrafia ", 10).total).toBe(2);
-    } finally {
-      fresh.close();
-    }
-  });
-
-  it("states the wasm's schema version, so a caller can check before restoring", async () => {
-    const index = await SearchIndex.open(loadCore);
-    try {
-      expect(index.schemaVersion).toBeGreaterThanOrEqual(1);
-      expect(index.serialize().schemaVersion).toBe(index.schemaVersion);
-    } finally {
-      index.close();
-    }
-  });
-});
-
 describe("SearchIndex lifecycle and refusals", () => {
   it("empties on reset and keeps answering", async () => {
     const index = await built();
@@ -323,7 +225,7 @@ describe("SearchIndex lifecycle and refusals", () => {
     index.close();
     expect(() => index.query("reuniao ", 10)).toThrow(/closed/);
     expect(() => index.build([BOOK])).toThrow(/closed/);
-    expect(() => index.serialize()).toThrow(/closed/);
+    expect(() => index.setItems("todo", [])).toThrow(/closed/);
     index.close();
   });
 
@@ -375,8 +277,6 @@ describe("SearchIndex scale", () => {
       expect(index.query("pagina7x50 ", 10).hits).toEqual([
         { md5: "7".padStart(32, "0"), page: 150 },
       ]);
-      const snapshot = index.serialize();
-      index.deserialize(snapshot);
       expect(index.query("pagina39x99 ", 10).hits).toEqual([
         { md5: "39".padStart(32, "0"), page: 297 },
       ]);
@@ -437,6 +337,17 @@ describe("SearchIndex item rows", () => {
     }
   });
 
+  it("holds a quoted phrase within one field of an item; its words may come from any", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [{ key: "t1", text: fields("Comprar leite", "Casa") }]);
+      expect(keys(index.query('"leite casa" ', 10))).toEqual([]);
+      expect(keys(index.query("leite casa ", 10))).toEqual(["todo:t1"]);
+    } finally {
+      index.close();
+    }
+  });
+
   it("holds a quoted phrase to its order in an item, not on a page of words", async () => {
     const index = await built();
     try {
@@ -464,19 +375,4 @@ describe("SearchIndex item rows", () => {
     }
   });
 
-  it("round-trips its items through a snapshot", async () => {
-    const source = await built();
-    source.setItems("digest", [{ key: "d1", text: "Moby Dick" }]);
-    const snapshot = source.serialize();
-    source.close();
-    const restored = await SearchIndex.restore(snapshot, loadCore);
-    try {
-      expect(keys(restored.query("moby ", 10))).toEqual(["digest:d1"]);
-      restored.setItems("digest", [{ key: "d2", text: "Ahab" }]);
-      expect(keys(restored.query("moby ", 10))).toEqual([]);
-      expect(keys(restored.query("ahab ", 10))).toEqual(["digest:d2"]);
-    } finally {
-      restored.close();
-    }
-  });
 });

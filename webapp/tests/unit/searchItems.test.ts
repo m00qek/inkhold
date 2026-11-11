@@ -38,7 +38,7 @@ describe("search's items", () => {
     const h = harness({ todo: todo("Comprar pão") });
     await settle();
     expect(h.items.todo()?.tasks[0]?.title).toBe("Comprar pão");
-    expect(h.written).toEqual([["todo", [{ key: "t:t1", text: "Comprar pão\nInbox" }, { key: "l:", text: "Inbox" }]]]);
+    expect(h.written).toEqual([["todo", [{ key: "t:t1", text: "Comprar pão\x1fInbox" }, { key: "l:", text: "Inbox" }]]]);
 
     h.items.setTodo(todo("Comprar leite"));
     expect(h.items.todo()?.tasks[0]?.title).toBe("Comprar leite");

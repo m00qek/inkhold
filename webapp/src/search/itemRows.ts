@@ -1,16 +1,16 @@
 // The index's rows that are not document pages: what the browser holds
-// itself (names, to-dos, digests) as running text, one row each. A rowid's
-// top bits are its kind (`webapp/wasm/sqlite_core.zig`), so one query
-// answers every kind with an exact total of its own; pages are kind 0.
+// itself (names, to-dos, digests), one row each. A rowid's top bits are its
+// kind (`webapp/wasm/sqlite_core.zig`), so one query answers every kind with
+// an exact total of its own; pages are kind 0. A row has up to four fields,
+// each its own column, so a quoted phrase never runs from one into the next.
 
 /** A kind of row the browser writes itself. */
 export type ItemKind = "name" | "todo" | "digest";
 
 export const ITEM_KINDS: readonly ItemKind[] = ["name", "todo", "digest"];
 
-/** `rowid >> KIND_SHIFT` is the kind; the wasm's `kind_shift`. */
-export const KIND_SHIFT = 28;
-const KIND_SIZE = 1 << KIND_SHIFT;
+/** Rowids per kind: `rowid >> 28` is the kind, the wasm's `kind_shift`. */
+export const KIND_SIZE = 1 << 28;
 
 const CODE: Record<ItemKind, number> = { name: 1, todo: 2, digest: 3 };
 
@@ -18,80 +18,66 @@ export function kindCode(kind: ItemKind): number {
   return CODE[kind];
 }
 
-/** The kind of a rowid; null for a page. */
-export function kindOf(rowid: number): ItemKind | null {
-  const code = Math.floor(rowid / KIND_SIZE);
-  return ITEM_KINDS.find((k) => CODE[k] === code) ?? null;
+/** The wasm's `field_separator`, between a row's fields in `idx_add`'s text. */
+const FIELD_SEPARATOR = "\x1f";
+
+/** The wasm's `fields`: columns a row has. */
+const MAX_FIELDS = 4;
+
+/** A row's text from its fields, the missing ones skipped; a field never holds the separator. */
+export function fields(...parts: readonly (string | null | undefined)[]): string {
+  const kept = parts.filter((p): p is string => !!p).map((p) => p.replaceAll(FIELD_SEPARATOR, " "));
+  if (kept.length > MAX_FIELDS) throw new Error(`a row has at most ${MAX_FIELDS} fields`);
+  return kept.join(FIELD_SEPARATOR);
 }
 
-/** One row: its key within its kind (an id) and the text it is found by. */
+/** One row: its key within its kind (an id) and its text (`fields`). */
 export interface ItemRow {
   readonly key: string;
   readonly text: string;
 }
 
 /** What a change to one kind's rows asks of the index. */
-export interface ItemDiff {
+interface ItemDiff {
   readonly remove: readonly number[];
   readonly add: readonly { rowid: number; text: string }[];
 }
 
-/** One kind's rows: key to rowid and text, and back. */
+/** One kind's rows: key to rowid and text, and back. Rowids are never reused. */
 class KindRows {
   readonly byKey = new Map<string, { rowid: number; text: string }>();
   readonly byRowid = new Map<number, string>();
   private next: number;
+  private readonly end: number;
 
-  constructor(readonly code: number) {
+  constructor(code: number) {
     // From 1 above the kind's base, so no rowid is the base itself.
     this.next = code * KIND_SIZE + 1;
+    this.end = (code + 1) * KIND_SIZE;
   }
 
-  /** Every row not in `rows` goes, every new or changed one is (re)written. */
+  /** Every row not in `rows` goes, every new or changed one is (re)written. Nothing changes when rowids would run out. */
   diff(rows: readonly ItemRow[]): ItemDiff {
     const want = new Map(rows.map((r) => [r.key, r.text]));
-    const remove: number[] = [];
-    const add: { rowid: number; text: string }[] = [];
-    for (const [key, held] of this.byKey) {
-      if (want.get(key) === held.text) continue;
-      remove.push(held.rowid);
+    const stale = [...this.byKey].filter(([key, held]) => want.get(key) !== held.text);
+    const fresh = [...want].filter(([key, text]) => this.byKey.get(key)?.text !== text);
+    if (this.next + fresh.length > this.end) throw new Error("no rowids left for this kind of row");
+    for (const [key, held] of stale) {
       this.byKey.delete(key);
       this.byRowid.delete(held.rowid);
     }
-    for (const [key, text] of want) {
-      if (this.byKey.has(key)) continue;
+    const add = fresh.map(([key, text]) => {
       const rowid = this.next++;
-      if (rowid >= (this.code + 1) * KIND_SIZE) throw new Error(`no rowids left for kind ${this.code}`);
       this.byKey.set(key, { rowid, text });
       this.byRowid.set(rowid, key);
-      add.push({ rowid, text });
-    }
-    return { remove, add };
+      return { rowid, text };
+    });
+    return { remove: stale.map(([, held]) => held.rowid), add };
   }
 
   rows(): { rowid: number; text: string }[] {
     return [...this.byKey.values()];
   }
-
-  entries(): { key: string; rowid: number; text: string }[] {
-    return [...this.byKey].map(([key, r]) => ({ key, ...r }));
-  }
-
-  /** A row as a snapshot held it. */
-  restore(key: string, rowid: number, text: string): void {
-    if (Math.floor(rowid / KIND_SIZE) !== this.code || this.byRowid.has(rowid)) throw new Error(`snapshot row ${rowid} is not a fresh kind-${this.code} rowid`);
-    this.byKey.set(key, { rowid, text });
-    this.byRowid.set(rowid, key);
-    this.next = Math.max(this.next, rowid + 1);
-  }
-}
-
-/** One item row as a snapshot keeps it. */
-export interface SnapshotItem {
-  kind: ItemKind;
-  key: string;
-  rowid: number;
-  text: string;
 }
 
 /** Every kind's rows, kept beside the index so a rebuild writes them again. */
@@ -109,23 +95,10 @@ export class ItemTable {
 
   /** The key behind an item rowid; null for a page or a rowid not held. */
   lookup(rowid: number): { kind: ItemKind; key: string } | null {
-    const kind = kindOf(rowid);
+    const code = Math.floor(rowid / KIND_SIZE);
+    const kind = ITEM_KINDS.find((k) => CODE[k] === code);
     if (!kind) return null;
     const key = this.kinds.get(kind)!.byRowid.get(rowid);
     return key === undefined ? null : { kind, key };
-  }
-
-  count(kind: ItemKind): number {
-    return this.kinds.get(kind)!.byKey.size;
-  }
-
-  snapshot(): SnapshotItem[] {
-    return ITEM_KINDS.flatMap((kind) => this.kinds.get(kind)!.entries().map((r) => ({ kind, ...r })));
-  }
-
-  static from(items: readonly SnapshotItem[]): ItemTable {
-    const t = new ItemTable();
-    for (const r of items) t.kinds.get(r.kind)!.restore(r.key, r.rowid, r.text);
-    return t;
   }
 }

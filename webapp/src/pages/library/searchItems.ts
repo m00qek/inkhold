@@ -10,9 +10,24 @@ import type { TodoSnapshot } from "../../api/todoTypes";
 import type { DigestSnapshot } from "../../api/digestTypes";
 import type { ItemStore } from "../../cache/itemStore";
 import type { SearchService } from "../../search/searchService";
-import type { ItemRow } from "../../search/itemRows";
+import { fields, type ItemRow } from "../../search/itemRows";
+import type { FolderCache } from "../folderCache";
+import { FOLDER, NOTE } from "../gallerySearch";
+import type { Folder } from "../../core/types";
 import { todoRows } from "../todo/todoSearch";
 import { digestRows } from "../digest/digestSearch";
+
+/** The search index's rows for names: every note's, and every folder's by the label the rail shows. */
+export function nameRows(folders: Pick<FolderCache, "values">, labelFor: (folder: Folder) => string): ItemRow[] {
+  const rows = new Map<string, string>();
+  for (const cached of folders.values()) {
+    for (const e of cached.entries) {
+      if (e.kind === "note") rows.set(NOTE + e.id, fields(e.name));
+      else rows.set(FOLDER + e.id, fields(labelFor(e)));
+    }
+  }
+  return [...rows].map(([key, text]) => ({ key, text }));
+}
 
 export interface SearchItems {
   /** The To-Do answer search uses: the page's last, or the stored one. */

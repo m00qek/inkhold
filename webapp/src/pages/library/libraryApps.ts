@@ -10,8 +10,7 @@ import { createDigestInk } from "../digest/digestInk";
 import { createDigestThumbs } from "../digest/digestThumbs";
 import { parsePlace, placePath } from "../digest/digestModel";
 import type { LibraryCtx } from "./libraryContext";
-import { createSearchItems } from "./searchItems";
-import { nameRows } from "../gallerySearch";
+import { createSearchItems, nameRows } from "./searchItems";
 import { openItemStore } from "../../cache/itemStore";
 
 /** The handwriting each app draws, kept in the persistent thumbnail store. */

@@ -8,7 +8,6 @@ import { el } from "../ui/dom";
 import { answerFor, coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail/railPlaces";
 import { insideQuery, matchesName } from "../search/match";
-import type { ItemRow } from "../search/itemRows";
 import type { SearchCoverage } from "./searchCoverage";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
@@ -24,20 +23,9 @@ function segmentKind(note: NoteSummary): number {
   return note.fileType.trim().toLowerCase() === "txt" ? 1 : 0;
 }
 
-const NOTE = "n:";
-const FOLDER = "f:";
-
-/** The search index's rows for names: every note's, and every folder's by the label the rail shows. */
-export function nameRows(folders: Pick<FolderCache, "values">, labelFor: (folder: Folder) => string): ItemRow[] {
-  const rows = new Map<string, string>();
-  for (const cached of folders.values()) {
-    for (const e of cached.entries) {
-      if (e.kind === "note") rows.set(NOTE + e.id, e.name);
-      else rows.set(FOLDER + e.id, labelFor(e));
-    }
-  }
-  return [...rows].map(([key, text]) => ({ key, text }));
-}
+/** Name rows' keys (`nameRows`): a note's id, a folder's. */
+export const NOTE = "n:";
+export const FOLDER = "f:";
 
 /** What matched by name: notes and folders, by id. */
 interface NameHits {

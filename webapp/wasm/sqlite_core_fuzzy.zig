@@ -27,8 +27,8 @@ const max_fuzzy_terms: usize = 32;
 /// Longer tokens stay exact; also sizes `editDistance`'s stack rows.
 const max_fuzzy_term_cp: usize = 64;
 
-/// `fts5vocab` over the index's terms, created per call: a deserialized
-/// connection has no temp tables.
+/// `fts5vocab` over the index's terms, created per call: every `idx_open` is a
+/// fresh connection, without the temp tables.
 const vocab_ddl =
     "CREATE VIRTUAL TABLE IF NOT EXISTS temp.docs_vocab USING fts5vocab('main','docs','row');";
 

@@ -1,7 +1,7 @@
 // ABI check for `sqlite-core.wasm` (`zig build wasm-sqlite-core-test`): the
 // TEMP_STORE refusal (a dropped flag is otherwise unobservable), both ABIs in
-// one instance, the serialize/restore path through a fresh instance, and the
-// typo ladder (its only description since it left the server).
+// one instance, rowid kinds, fields and phrases, and the typo ladder (its only
+// description since it left the server).
 //
 // Usage: node sqlite_core_abi.mjs <sqlite-core.wasm> <fixture.spd>
 
@@ -100,11 +100,10 @@ function expansionText() {
 
 // ---- exports (both ABIs, one module) ----
 for (const name of [
-  "idx_alloc", "idx_free", "idx_schema_version",
+  "idx_alloc", "idx_free",
   "idx_open", "idx_close", "idx_begin", "idx_add", "idx_commit",
   "idx_query", "idx_hit", "idx_kind_total", "idx_delete",
   "idx_fuzzy", "idx_expansion_ptr", "idx_expansion_len",
-  "idx_serialize", "idx_image_ptr", "idx_image_alloc", "idx_deserialize",
   "idx_errmsg_ptr", "idx_errmsg_len",
   "spd_alloc", "spd_free", "spd_open", "spd_close",
   "spd_layer_count", "spd_layer_id", "spd_tiles_begin", "spd_tile_next",
@@ -125,7 +124,6 @@ check(
 equal(opened, 0, "an index opens on a fresh instance");
 if (failures > 0) process.exit(1);
 
-check(e.idx_schema_version() >= 1, "the module reports a schema version for the stored image to carry");
 
 // ---- build ----
 // Real diacritics: documents 1 and 2 spell the same word differently.
@@ -273,6 +271,17 @@ equal(fuzzy("xilofone ").expansion, "", "...and reports no substitution");
   equal(drifted, 0, "the query fold does not accumulate across 200 searches");
 }
 
+// ---- rowids and fields ----
+{
+  const buf = put("x");
+  equal(e.idx_add(2 ** 31, buf[0], buf[1]), -25, "a rowid past the last kind is refused (SQLITE_RANGE)");
+  check(/out of range/.test(errorText()), "...and says why", errorText());
+  const five = put("a\x1fb\x1fc\x1fd\x1fe");
+  equal(e.idx_add(99, five[0], five[1]), -25, "more fields than columns are refused");
+  drop(buf);
+  drop(five);
+}
+
 // ---- kinds of row ----
 // A rowid's top bits are its kind (`rowid >> 28`); kind 0 is a document page,
 // a set of words, and the others are running text.
@@ -286,6 +295,8 @@ const TODO = 2 << 28;
     [TEXT + 1, "color chart for the kitchen"],
     [TODO + 1, "chart the color of the kitchen"],
     [TODO + 2, "paint the kitchen"],
+    // Two fields: a phrase never runs from one into the next.
+    [TODO + 3, "buy milk\x1finbox"],
   ]) {
     const buf = put(body);
     equal(e.idx_add(id, buf[0], buf[1]), 0, `row ${id} is indexed`);
@@ -312,18 +323,22 @@ const TODO = 2 << 28;
   equal(query('"color char" ').hits.includes(TEXT + 1), false, "...and a closed one matches it whole");
   equal(query('"kitchen" paint').total, 1, "a single quoted word is just a word");
   equal(query('"the kitchen" paint').hits[0], TODO + 2, "a phrase ANDs with the words beside it");
+  equal(query('"milk inbox" ').total, 0, "a phrase is held within one field");
+  equal(query("milk inbox ").hits[0], TODO + 3, "...while the words alone may come from any of them");
 
   // The typo ladder keeps the order: its best near-miss stands in.
   {
     const r = fuzzy('"colour chart" ');
     equal(r.expansion, "colour>color", "a misspelt word in a phrase is corrected");
     check(r.hits.includes(TEXT + 1) && !r.hits.includes(TODO + 1), "...and the phrase still holds its order", r.hits.join(","));
+    equal(e.idx_kind_total(1), 1, "...and the widened pass counts each kind too");
+    equal(e.idx_kind_total(2), 0, "...a kind it found nothing in, as none");
   }
 
   equal(e.idx_delete(TODO + 1), 0, "a row is deleted by its rowid");
   equal(query("kitchen ").total, 2, "...and no longer answers");
   equal(e.idx_delete(TODO + 1), 0, "deleting a row already gone is no error");
-  for (const id of [16, TEXT + 1, TODO + 2]) e.idx_delete(id);
+  for (const id of [16, TEXT + 1, TODO + 2, TODO + 3]) e.idx_delete(id);
   equal(query("kitchen ").total, 0, "the kinds' rows are gone again");
 }
 
@@ -352,46 +367,12 @@ const TODO = 2 << 28;
 
 equal(query("reunião ").total, 2, "the search index still answers after a .spd parse");
 
-// ---- serialize / restore ----
-const imageLen = e.idx_serialize();
-check(imageLen > 0, "the index serializes to an image", `got ${imageLen} (${errorText()})`);
-const image = Buffer.from(new Uint8Array(e.memory.buffer, e.idx_image_ptr(), imageLen));
+// ---- closed ----
 e.idx_close();
-
 // -21 is SQLITE_MISUSE: no open database.
 equal(query("reunião ").total, -21, "a query with no open index is refused");
 equal(fuzzy("reunaio ").total, -21, "...and so is a fuzzy one, with the same code");
-
-{
-  e = await freshInstance();
-  // Both traps: the target must be on SQLite's heap, and this is the fresh
-  // instance's first call, where OMIT_AUTOINIT would trap `sqlite3_malloc64`.
-  const dst = e.idx_image_alloc(image.length);
-  check(dst !== 0, "idx_image_alloc works as the FIRST call into a fresh instance");
-  new Uint8Array(e.memory.buffer, dst, image.length).set(image);
-  equal(e.idx_deserialize(dst, image.length), 0, "the image deserializes");
-
-  equal(query("reunião ").total, 2, "the restored index answers the accented query");
-  equal(query("cali").total, 2, "...and still expands a prefix");
-  equal(query("projeto reuni").hits[0], 12, "...and still ANDs two tokens");
-
-  // The per-query `IF NOT EXISTS` DDL recreates the fold table on a new
-  // connection.
-  equal(query("-").total, 0, "...and still folds punctuation to nothing");
-
-  // Likewise the temp `fts5vocab` pool, which a pool created once at open
-  // would miss.
-  {
-    const r = fuzzy("reunaio ");
-    equal(r.total, 2, "the restored index still corrects a typo");
-    equal(r.expansion, "reunaio>reuniao", "...and still says what it substituted");
-    equal(fuzzy("caligrafia ").expansion, "", "...and still leaves a matching query alone");
-  }
-
-  const again = e.idx_serialize();
-  equal(again, imageLen, "the restored index serializes back to the same length");
-  e.idx_close();
-}
+equal(e.idx_delete(11), -21, "...and so is a delete");
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);

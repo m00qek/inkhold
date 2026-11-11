@@ -4,17 +4,15 @@
 //!
 //! `-DSQLITE_TEMP_STORE=3` is required: the null VFS cannot open files, so any
 //! temp spill would fail as a corrupt index. No household-scale test reaches
-//! that path, so `idx_open`/`idx_deserialize` ask the compiled amalgamation
-//! (`sqlite3_compileoption_used`) and refuse with -100 otherwise. Other
+//! that path, so `idx_open` asks the compiled amalgamation
+//! (`sqlite3_compileoption_used`) and refuses with -100 otherwise. Other
 //! negatives are `-rc`; -21 (`SQLITE_MISUSE`) is "no open database".
 //!
-//! Two traps: a deserialize target must come from `sqlite3_malloc`
-//! (`idx_image_alloc`), since `FREEONCLOSE` frees it on SQLite's heap; and
-//! under `OMIT_AUTOINIT` `sqlite3_malloc64` traps until `sqlite3_initialize()`,
-//! so every possible first call initialises.
+//! One trap: under `OMIT_AUTOINIT` SQLite's allocator traps until
+//! `sqlite3_initialize()`, so `idx_open`, the first call, initialises.
 //!
-//! This module owns the schema (`idx_schema_version`) and the query fold, so
-//! JS never runs a second tokenizer. `idx_errmsg_*` is set on failure and not
+//! This module owns the schema and the query fold, so JS never runs a second
+//! tokenizer. `idx_errmsg_*` is set on failure and not
 //! cleared on success. `memory` can grow on any call; re-read pointers after
 //! each.
 
@@ -28,8 +26,7 @@ comptime {
     _ = @import("spd_decode.zig");
 }
 
-/// wasm_allocator in the browser, page_allocator natively. SQLite never uses
-/// it, hence `idx_image_alloc`.
+/// wasm_allocator in the browser, page_allocator natively. SQLite never uses it.
 pub const gpa = if (builtin.target.cpu.arch.isWasm())
     std.heap.wasm_allocator
 else
@@ -42,13 +39,16 @@ const tokenizer = @import("schema").fts_tokenizer;
 const sqlite_core_fuzzy = @import("sqlite_core_fuzzy.zig");
 pub const q = @import("sqlite_core_query.zig");
 
-/// Bump when `index_ddl` or `tokenizer` changes: stored images go stale with
-/// nothing server-side moving.
-const schema_version: u32 = 1;
+/// A row's fields, each in a column of its own, so a quoted phrase never runs
+/// from one into the next (FTS5 matches a phrase within one column); the
+/// query's words may still come from any of them. A page is one field. In
+/// `idx_add`'s text they are separated by `field_separator`.
+const fields = 4;
+const field_separator = 0x1f;
 
 /// No `prefix=`: prefix queries measured fast without one, and it would grow
-/// the stored image.
-const index_ddl = "CREATE VIRTUAL TABLE docs USING fts5(body, tokenize='" ++ tokenizer ++ "');";
+/// the index.
+const index_ddl = "CREATE VIRTUAL TABLE docs USING fts5(f0, f1, f2, f3, tokenize='" ++ tokenizer ++ "');";
 
 /// A one-row FTS5 table used to fold the query the way the index folded its
 /// text. `content=''` enables `'delete-all'`: `DELETE FROM` only appends
@@ -60,10 +60,9 @@ pub const fold_ddl =
 const fold_reset_sql = "INSERT INTO temp.token_fold(token_fold) VALUES('delete-all');";
 
 pub var db: ?*c.sqlite3 = null;
-/// Cached so the INSERT is not re-parsed per document.
+/// Cached so neither is re-parsed per row.
 var add_stmt: ?*c.sqlite3_stmt = null;
-var image: ?[*]u8 = null;
-var image_len: usize = 0;
+var delete_stmt: ?*c.sqlite3_stmt = null;
 /// Bound with `SQLITE_STATIC`, so it must outlive its statement.
 pub var match: std.ArrayList(u8) = .empty;
 /// `match` with quoted phrases held to their order, for the text rows; empty
@@ -115,10 +114,6 @@ export fn idx_free(ptr: [*]u8, len: usize) void {
     gpa.free(ptr[0..len]);
 }
 
-export fn idx_schema_version() u32 {
-    return schema_version;
-}
-
 fn setErr(msg: []const u8) void {
     errbuf.clearRetainingCapacity();
     errbuf.appendSlice(gpa, msg) catch {};
@@ -157,14 +152,9 @@ export fn idx_open() i32 {
 }
 
 export fn idx_close() void {
-    if (add_stmt) |s| {
-        _ = c.sqlite3_finalize(s);
-        add_stmt = null;
-    }
-    if (image) |p| {
-        c.sqlite3_free(p);
-        image = null;
-        image_len = 0;
+    for ([_]*?*c.sqlite3_stmt{ &add_stmt, &delete_stmt }) |slot| {
+        if (slot.*) |s| _ = c.sqlite3_finalize(s);
+        slot.* = null;
     }
     if (db) |h| {
         _ = c.sqlite3_close(h);
@@ -191,28 +181,32 @@ export fn idx_commit() i32 {
     return -rc;
 }
 
-/// `doc_id` is the rowid, its kind in the top bits (`kind_shift`); a repeat is
-/// a constraint failure, never an overwrite.
+/// `doc_id` is the rowid, its kind in the top bits (`kind_shift`), and under
+/// `rowid_end`; a repeat is a constraint failure, never an overwrite. The text
+/// is up to `fields` fields, split at `field_separator`.
 export fn idx_add(doc_id: u32, ptr: [*]const u8, len: usize) i32 {
     const h = db orelse return no_db;
-    if (add_stmt == null) {
-        var s: ?*c.sqlite3_stmt = null;
-        const rc = c.sqlite3_prepare_v2(h, "INSERT INTO docs(rowid, body) VALUES(?1, ?2)", -1, &s, null);
-        if (rc != c.SQLITE_OK) {
-            setErrDb();
-            return -rc;
+    if (doc_id >= rowid_end) {
+        setErr("rowid out of range");
+        return -c.SQLITE_RANGE;
+    }
+    var stmt: *c.sqlite3_stmt = undefined;
+    var rc = cached(h, &add_stmt, "INSERT INTO docs(rowid, f0, f1, f2, f3) VALUES(?1, ?2, ?3, ?4, ?5)", &stmt);
+    if (rc != 0) return rc;
+    rc = c.sqlite3_bind_int64(stmt, 1, @intCast(doc_id));
+    var it = std.mem.splitScalar(u8, ptr[0..len], field_separator);
+    var col: c_int = 2;
+    while (it.next()) |field| : (col += 1) {
+        if (col > fields + 1) {
+            setErr("more fields than columns");
+            return -c.SQLITE_RANGE;
         }
-        add_stmt = s;
+        // SQLITE_STATIC: the caller's buffer outlives the step, so no copy.
+        if (rc == c.SQLITE_OK) rc = c.sqlite3_bind_text(stmt, col, field.ptr, @intCast(field.len), null);
     }
-    const stmt = add_stmt;
-    _ = c.sqlite3_reset(stmt);
-    var rc = c.sqlite3_bind_int64(stmt, 1, @intCast(doc_id));
-    if (rc != c.SQLITE_OK) {
-        setErrDb();
-        return -rc;
+    while (col <= fields + 1) : (col += 1) {
+        if (rc == c.SQLITE_OK) rc = c.sqlite3_bind_null(stmt, col);
     }
-    // SQLITE_STATIC: the caller's buffer outlives the step, so no copy.
-    rc = c.sqlite3_bind_text(stmt, 2, ptr, @intCast(len), null);
     if (rc != c.SQLITE_OK) {
         setErrDb();
         return -rc;
@@ -222,6 +216,23 @@ export fn idx_add(doc_id: u32, ptr: [*]const u8, len: usize) i32 {
         setErrDb();
         return -rc;
     }
+    return 0;
+}
+
+/// `slot`'s statement into `out`, prepared on first use and reset for the
+/// next; 0 or `-rc`.
+fn cached(h: *c.sqlite3, slot: *?*c.sqlite3_stmt, sql: [*:0]const u8, out: **c.sqlite3_stmt) i32 {
+    if (slot.* == null) {
+        const rc = c.sqlite3_prepare_v2(h, sql, -1, slot, null);
+        if (rc != c.SQLITE_OK) {
+            setErrDb();
+            return -rc;
+        }
+    }
+    const s = slot.*.?;
+    _ = c.sqlite3_reset(s);
+    _ = c.sqlite3_clear_bindings(s);
+    out.* = s;
     return 0;
 }
 
@@ -379,19 +390,15 @@ export fn idx_kind_total(kind: u32) i32 {
 /// Removes one row: a to-do or digest changed, a name went. A missing rowid is no error.
 export fn idx_delete(rowid: u32) i32 {
     const h = db orelse return no_db;
-    var s: ?*c.sqlite3_stmt = null;
-    var rc = c.sqlite3_prepare_v2(h, "DELETE FROM docs WHERE rowid = ?1", -1, &s, null);
+    var stmt: *c.sqlite3_stmt = undefined;
+    var rc = cached(h, &delete_stmt, "DELETE FROM docs WHERE rowid = ?1", &stmt);
+    if (rc != 0) return rc;
+    rc = c.sqlite3_bind_int64(stmt, 1, @intCast(rowid));
     if (rc != c.SQLITE_OK) {
         setErrDb();
         return -rc;
     }
-    defer _ = c.sqlite3_finalize(s);
-    rc = c.sqlite3_bind_int64(s, 1, @intCast(rowid));
-    if (rc != c.SQLITE_OK) {
-        setErrDb();
-        return -rc;
-    }
-    rc = c.sqlite3_step(s);
+    rc = c.sqlite3_step(stmt);
     if (rc != c.SQLITE_DONE) {
         setErrDb();
         return -rc;
@@ -402,63 +409,6 @@ export fn idx_delete(rowid: u32) i32 {
 export fn idx_hit(i: u32) i32 {
     if (i >= hits.items.len) return -1;
     return @intCast(hits.items[i]);
-}
-
-/// Serializes `main` to `idx_image_ptr()` until the next serialize or close.
-export fn idx_serialize() i32 {
-    const h = db orelse return no_db;
-    if (image) |p| {
-        c.sqlite3_free(p);
-        image = null;
-        image_len = 0;
-    }
-    var n: c.sqlite3_int64 = 0;
-    const p = c.sqlite3_serialize(h, "main", &n, 0) orelse {
-        setErr("sqlite3_serialize returned null");
-        return -c.SQLITE_NOMEM;
-    };
-    image = p;
-    image_len = @intCast(n);
-    return @intCast(n);
-}
-
-export fn idx_image_ptr() ?[*]const u8 {
-    return image;
-}
-
-/// A deserialize target on SQLite's heap.
-export fn idx_image_alloc(len: usize) ?[*]u8 {
-    // Often the first call into SQLite (restoring from IndexedDB).
-    if (c.sqlite3_initialize() != c.SQLITE_OK) return null;
-    return @ptrCast(c.sqlite3_malloc64(@intCast(len)));
-}
-
-/// Restores an `idx_serialize` image from `idx_image_alloc`; SQLite takes
-/// ownership. No copy.
-export fn idx_deserialize(ptr: [*]u8, len: usize) i32 {
-    idx_close();
-    var rc = initSqlite();
-    if (rc != 0) return rc;
-    var h: ?*c.sqlite3 = null;
-    rc = c.sqlite3_open(":memory:", &h);
-    if (rc != c.SQLITE_OK) {
-        if (h) |x| _ = c.sqlite3_close(x);
-        return -rc;
-    }
-    db = h;
-    rc = c.sqlite3_deserialize(
-        h,
-        "main",
-        ptr,
-        @intCast(len),
-        @intCast(len),
-        c.SQLITE_DESERIALIZE_FREEONCLOSE | c.SQLITE_DESERIALIZE_RESIZEABLE,
-    );
-    if (rc != c.SQLITE_OK) {
-        setErrDb();
-        return -rc;
-    }
-    return 0;
 }
 
 test {

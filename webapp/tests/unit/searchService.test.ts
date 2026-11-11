@@ -46,7 +46,6 @@ function fakeCore(): SearchCoreExports {
       return ptr;
     },
     idx_free() {},
-    idx_schema_version: () => 1,
     idx_open() {
       rows.clear();
       hits = [];
@@ -69,10 +68,6 @@ function fakeCore(): SearchCoreExports {
       rows.delete(rowid);
       return 0;
     },
-    idx_serialize: () => 0,
-    idx_image_ptr: () => 0,
-    idx_image_alloc: () => 0,
-    idx_deserialize: () => 0,
     idx_errmsg_ptr: () => 0,
     idx_errmsg_len: () => 0,
   };

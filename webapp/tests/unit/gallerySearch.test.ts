@@ -3,7 +3,8 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { createGallerySearch, nameRows, type GallerySearchCtx } from "../../src/pages/gallerySearch";
+import { createGallerySearch, type GallerySearchCtx } from "../../src/pages/gallerySearch";
+import { nameRows } from "../../src/pages/library/searchItems";
 import { SearchIndex, type SearchCoreExports } from "../../src/search/indexEngine";
 import type { SearchState } from "../../src/pages/noteSearch";
 import type { SearchResult } from "../../src/pages/galleryCards";

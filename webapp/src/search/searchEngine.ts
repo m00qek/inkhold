@@ -17,7 +17,7 @@ import {
 import type { EngineRequest, EngineResponse } from "./engineWorker";
 import type { ItemKind, ItemRow } from "./itemRows";
 
-/** Narrower than `SearchIndex`: no `serialize`, so no 10 MB image crosses the wire. */
+/** What a search needs of `SearchIndex`, behind promises, on the worker or in this thread. */
 export interface SearchEngine {
   build(docs: readonly TermsDocument[]): Promise<void>;
   /** Replaces one kind's item rows (`itemRows.ts`); kept across builds. Never superseded. */

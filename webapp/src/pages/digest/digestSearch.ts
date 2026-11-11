@@ -6,7 +6,7 @@
 // recognise it.
 
 import type { Digest, DigestSnapshot } from "../../api/digestTypes";
-import type { ItemRow } from "../../search/itemRows";
+import { fields, type ItemRow } from "../../search/itemRows";
 import type { Expansion } from "../../search/localSearch";
 import { excerptNodes, excerptQuery, pickExcerpt, WIDTH, type ExcerptQuery } from "../../search/excerpt";
 import { wordMarks } from "../../search/match";
@@ -21,7 +21,7 @@ export function digestRows(s: DigestSnapshot): ItemRow[] {
   const names = new Map(s.categories.map((c) => [c.uid, c.name]));
   return s.digests.map((d) => ({
     key: d.id,
-    text: [d.text, d.comment, names.get(d.categoryUid), d.source.path ? fileName(d.source.path) : null].filter(Boolean).join("\n"),
+    text: fields(d.text, d.comment, names.get(d.categoryUid), d.source.path ? fileName(d.source.path) : null),
   }));
 }
 

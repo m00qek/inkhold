@@ -9,7 +9,7 @@ import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
 import { byTabletOrder, homeView, listName, newestDone, openCount, viewPath, type TodoView } from "./todoModel";
 import { insideQuery, matchesName, nameQuery, queryMarks, wordMarks, type NameQuery } from "../../search/match";
 import { fold } from "../../search/fold";
-import type { ItemRow } from "../../search/itemRows";
+import { fields, type ItemRow } from "../../search/itemRows";
 import type { Expansion } from "../../search/localSearch";
 import { taskMeta } from "./todoView";
 import { expansionNotice } from "../noteSearch";
@@ -32,9 +32,9 @@ const plural = (n: number, one: string) => `${n} ${n === 1 ? one : `${one}s`}`;
 
 const onOpen = (a: HTMLElement, open: () => void) => onPlainClick(a, open);
 
-/** What a to-do is found by: its title, the notebook and words it was lassoed from, and its list. */
+/** What a to-do is found by, each a field: its title, the notebook and words it was lassoed from, and its list. */
 function searchText(s: TodoSnapshot, t: TodoTask): string {
-  return [t.title, t.link?.name, t.link?.text, listName(s, t.listId)].filter(Boolean).join("\n");
+  return fields(t.title, t.link?.name, t.link?.text, listName(s, t.listId));
 }
 
 const TASK = "t:";
@@ -46,7 +46,7 @@ export function todoRows(s: TodoSnapshot): ItemRow[] {
   return [
     ...s.tasks.map((t) => ({ key: TASK + t.id, text: searchText(s, t) })),
     { key: LIST, text: "Inbox" },
-    ...s.lists.map((l) => ({ key: LIST + l.id, text: l.title })),
+    ...s.lists.map((l) => ({ key: LIST + l.id, text: fields(l.title) })),
   ];
 }
 
