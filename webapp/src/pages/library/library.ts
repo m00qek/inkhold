@@ -12,7 +12,7 @@ import { createPhoneShell } from "./libraryPhone";
 import { createPlace } from "../../ui/place";
 import { el } from "../../ui/dom";
 import { SORT_KEY, readLocal, writeLocal } from "../../ui/storage";
-import { binNotePageHref, current, destinationHref, digestHref, folderHref, go, notePageHref, todoHref } from "../../router";
+import { binNotePageHref, current, destinationHref, folderHref, go } from "../../router";
 import { createBackupNotice } from "./backupNotice";
 import type { Api } from "../../api/types";
 import type { NoteRenderer } from "../../render/types";
@@ -44,12 +44,7 @@ import { createLibraryFeatures } from "./libraryFeatures";
 import { createLibraryPreviews } from "./libraryPreviews";
 import { createLibraryRoutes } from "./libraryRoutes";
 import { warmWasm } from "../../core/warmWasm";
-import { createTodoPage } from "../todo/todoPage";
-import { createTodoInk } from "../todo/todoInk";
-import { createDigestPage } from "../digest/digestPage";
-import { createDigestInk } from "../digest/digestInk";
-import { createDigestThumbs } from "../digest/digestThumbs";
-import { parsePlace, placePath } from "../digest/digestModel";
+import { appUp, installAppInks, installAppPages } from "./libraryApps";
 
 export const ADMIN_KEY = "admin";
 /**
@@ -280,8 +275,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   ctx.pdfThumbs = createPdfThumbs();
   installLibraryEngines(ctx);
   ctx.exporter = createExporter({ api, renderer });
-  ctx.todoInk = createTodoInk({ api, renderer, store: deps.persistentThumbs ?? null });
-  ctx.digestInk = createDigestInk({ api, renderer, store: deps.persistentThumbs ?? null });
+  installAppInks(ctx);
 
   // ---- viewers ----
   ctx.viewers = createViewerSet(createLibraryViewerDeps(ctx), content, gallery);
@@ -313,12 +307,8 @@ export function createAppShell(deps: AppDeps): AppShell {
     section: () => (st.destination === TODO_KEY ? "todo" : st.destination === ACCOUNT_KEY ? "you" : "library"),
     up: () => {
       const r = current();
-      if (r.name === "todo") return r.view === "" ? null : { href: todoHref(""), label: "Lists" };
-      // An open digest goes back to its list; a list is a top-level place.
-      if (r.name === "digest") {
-        const p = parsePlace(r.place);
-        return p.digest === null ? null : { href: digestHref(placePath({ view: p.view, digest: null })), label: "Digest" };
-      }
+      const inApp = appUp(r);
+      if (inApp !== undefined) return inApp;
       if (r.name === "search") {
         // Back to where the search started, named as the rail names it.
         const here = st.listing?.folderId === st.folderId ? st.listing?.path.at(-1) : undefined;
@@ -344,53 +334,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     if (here) ctx.place.set(here.textContent ?? "");
   }).observe(ctx.topbar.crumbs, { childList: true });
 
-  ctx.todo = createTodoPage({
-    api,
-    content,
-    gallery,
-    setPlace: (name) => ctx.place.overlay(name),
-    crumbs: ctx.topbar.crumbs,
-    sortWrap: ctx.topbar.sortWrap,
-    segmented: ctx.topbar.segmented,
-    status: ctx.topbar.todoStatus,
-    listBtn: ctx.topbar.todoListBtn,
-    downloadBtn: ctx.topbar.todoDownloadBtn,
-    newListBtn: ctx.topbar.todoNewListBtn,
-    openNote: (id, page) => go(notePageHref(id, page)),
-    ink: ctx.todoInk,
-    setMode: (open) => ctx.modes.setDestinationMode("todo", open),
-    setSearchShown: (shown) => ctx.root.classList.toggle("is-todo-browse", shown),
-    toast: ctx.toast,
-    handled: ctx.handled,
-    onChanged: () => {
-      ctx.rail.build();
-      // New to-dos reach an open search too.
-      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
-    },
-    go: (view) => go(todoHref(view)),
-  });
-  // Once at start: the rail shows To-Do only when the server keeps to-dos.
-  void ctx.todo.load();
-
-  ctx.digest = createDigestPage({
-    api,
-    content,
-    gallery,
-    setPlace: (name) => ctx.place.overlay(name),
-    crumbs: ctx.topbar.crumbs,
-    sortWrap: ctx.topbar.sortWrap,
-    segmented: ctx.topbar.segmented,
-    setMode: (open) => ctx.modes.setDestinationMode("digest", open),
-    toast: ctx.toast,
-    handled: ctx.handled,
-    onChanged: () => ctx.rail.build(),
-    go: (path) => go(digestHref(path)),
-    ink: ctx.digestInk,
-    thumbs: createDigestThumbs({ api, thumbnails: ctx.thumbnails }),
-    openFile: (id, page) => go(notePageHref(id, page)),
-  });
-  // Once at start, like To-Do: the rail shows Digest only when the server keeps digests.
-  void ctx.digest.load();
+  installAppPages(ctx);
 
   ctx.adminDest = createAdminDestination({
     api,
