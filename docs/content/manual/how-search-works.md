@@ -37,7 +37,10 @@ second search is as fast as your device.
 
 A result holds every word you type, in its name or in its text: notebook and
 folder names, recognised handwriting, text typed into text boxes, PDF and text
-file contents, and to-dos.
+file contents, to-dos and digests. They are all searched the same way: accents
+and capitals don't matter, and words in quotes must appear together and in
+that order. Your to-dos and digests are kept in the browser for search too, so
+they are found without a connection; signing out removes them.
 Results come best first, by how much of a document matched, with notebooks
 weighed above other files. With no exact match, it looks for close spellings
 and says so.
