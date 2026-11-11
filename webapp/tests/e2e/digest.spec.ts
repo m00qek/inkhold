@@ -66,6 +66,30 @@ test.describe("Digest", () => {
     await expect(card(page, "sublet").locator(".digest-card__link")).toBeFocused();
   });
 
+  test("the comment is edited in the panel; it waits for the tablet; Escape leaves the edit, not the digest", async ({ page }) => {
+    await openDigest(page, "/d/2");
+    const p = page.locator(".digest-panel");
+    await p.getByRole("button", { name: "Add a comment" }).click();
+    const box = p.getByRole("textbox", { name: "Comment" });
+    await expect(box).toBeFocused();
+    await box.fill("Every three months, or the boiler scales");
+    await expect(p.locator("#digest-comment-count")).toHaveText("40 of 2000 characters");
+    await page.keyboard.press("Escape");
+    await expect(box).toHaveCount(0);
+    await expect(p).toBeVisible();
+    await expect(p.getByRole("button", { name: "Add a comment" })).toBeFocused();
+
+    await p.getByRole("button", { name: "Add a comment" }).click();
+    await box.fill("Every three months, or the boiler scales");
+    await p.getByRole("button", { name: "Save comment" }).click();
+    await expect(box).toHaveCount(0);
+    await expect(p).toContainText("Every three months, or the boiler scales");
+    await expect(p).toContainText("Waiting for the tablet");
+    await expect(card(page, "Descale")).toContainText("Waiting for the tablet");
+    await expect(p.getByRole("button", { name: "Edit" })).toBeFocused();
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/comment.png` });
+  });
+
   test("Open at page opens the source there, and Back returns to the digest", async ({ page }) => {
     await openDigest(page, "/d/2");
     await page.locator(".digest-panel").getByRole("link", { name: "Open at page 2" }).click();

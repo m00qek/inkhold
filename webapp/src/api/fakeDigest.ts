@@ -10,7 +10,8 @@
 import { delay } from "./fake";
 import { fakeHash } from "./fakeHash";
 import { DEMO_GRAMMAR_ID, demoNotesOn } from "./demoNotes";
-import type { Digest, DigestCategory, DigestSnapshot } from "./digestTypes";
+import { ApiError } from "./errors";
+import { MAX_COMMENT, type Digest, type DigestCategory, type DigestSnapshot } from "./digestTypes";
 
 const DAY = 86_400_000;
 
@@ -27,7 +28,10 @@ const noteMd5 = (seed: string) => fakeHash(seed).padEnd(32, "0").slice(0, 32);
 /** The e2e set's one handwritten note. */
 export const FAKE_NOTE_MD5 = noteMd5("digest-note-1");
 
-function testDigests(now: number): Digest[] {
+/** A digest as the tablet synced it; whether a browser change waits is the fake server's. */
+type Synced = Omit<Digest, "waiting">;
+
+function testDigests(now: number): Synced[] {
   const at = (days: number) => now - days * DAY;
   return [
     {
@@ -75,7 +79,7 @@ const DEMO_CATEGORIES: DigestCategory[] = [
 const [GRAMMAR, PHRASES] = DEMO_CATEGORIES.map((c) => c.uid) as [string, string];
 
 /** The demo's German, in the grammar sheet's own words and pages. */
-function demoDigests(now: number): Digest[] {
+function demoDigests(now: number): Synced[] {
   const at = (days: number) => now - days * DAY;
   const sheet = (page: number) => ({ kind: "document" as const, path: "Document/Deutsch lernen — Grammatik.pdf", fileId: DEMO_GRAMMAR_ID, page });
   const typed = { kind: "manual" as const, path: null, fileId: null, page: null };
@@ -93,13 +97,30 @@ function demoDigests(now: number): Digest[] {
 }
 
 export function fakeDigestMethods(latency: number) {
-  const made = Date.now();
   const demo = demoNotesOn();
+  const categories = demo ? DEMO_CATEGORIES : CATEGORIES;
+  // `waiting`: like a server whose tablet has not synced since.
+  const digests: Digest[] = (demo ? demoDigests(Date.now()) : testDigests(Date.now())).map((d) => ({ ...d, waiting: false }));
+  const tabletSyncedAt = Date.now() - 5 * 60_000;
   return {
     async digests(): Promise<DigestSnapshot> {
       await delay(latency);
-      const categories = demo ? DEMO_CATEGORIES : CATEGORIES;
-      return { enabled: true, categories: categories.map((c) => ({ ...c })), digests: demo ? demoDigests(made) : testDigests(made) };
+      return {
+        enabled: true,
+        categories: categories.map((c) => ({ ...c })),
+        digests: digests.map((d) => ({ ...d, source: { ...d.source } })),
+        tabletSyncedAt,
+        waiting: digests.some((d) => d.waiting),
+      };
+    },
+    async digestSetComment(id: string, comment: string): Promise<void> {
+      await delay(latency);
+      const text = comment.trim();
+      if ([...text].length > MAX_COMMENT) throw new ApiError("BAD_COMMENT", "a comment holds at most 2000 characters of text", 400);
+      const d = digests.find((x) => x.id === id);
+      if (!d) throw new ApiError("NO_SUCH_DIGEST", "there is no such digest", 404);
+      d.comment = text === "" ? null : text;
+      d.waiting = true;
     },
     async digestNoteBytes(_id: string, md5: string): Promise<ArrayBuffer> {
       await delay(latency);

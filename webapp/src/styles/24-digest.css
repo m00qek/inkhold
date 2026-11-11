@@ -338,6 +338,56 @@
   margin: 0;
   white-space: pre-line;
 }
+/* The comment's heading with its Edit button at the end. */
+.digest-panel__parthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+.digest-panel__parthead h3 {
+  margin-bottom: 0;
+}
+.digest-panel__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.digest-panel__label {
+  font: var(--fs-eyebrow) var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.digest-panel__comment {
+  width: 100%;
+  min-height: 6rem;
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--desk);
+  color: var(--ink);
+  font: var(--fs-body) / 1.45 var(--font-body);
+  resize: vertical;
+}
+.digest-panel__comment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* Touch keyboards zoom into smaller text. */
+@media (pointer: coarse) {
+  .digest-panel__comment {
+    font-size: var(--fs-field-touch);
+  }
+}
+.digest-panel__count {
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
+.digest-panel__count.is-over {
+  color: var(--margin-ink);
+}
 .digest-panel__facts {
   display: grid;
   grid-template-columns: auto 1fr;

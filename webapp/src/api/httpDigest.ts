@@ -10,7 +10,10 @@ type Raw = Partial<{
     id?: number | string; text?: string; comment?: string; categoryUid?: string; author?: string; createdAt?: number;
     source?: { kind?: string; path?: string; fileId?: number | string; page?: number };
     note?: string;
+    waiting?: boolean;
   }[];
+  tabletSyncedAt: number;
+  waiting: boolean;
 }>;
 
 const KINDS: readonly DigestSourceKind[] = ["document", "note", "manual", "other"];
@@ -39,8 +42,11 @@ export function digestsOf(r: Raw): DigestSnapshot {
         createdAt: num(d.createdAt) ?? 0,
         source: { kind, path: kind === "manual" ? null : str(s.path), fileId: id(s.fileId), page: page !== null && page >= 1 ? page : null },
         note: str(d.note),
+        waiting: d.waiting === true,
       }];
     }),
+    tabletSyncedAt: num(r.tabletSyncedAt),
+    waiting: r.waiting === true,
   };
 }
 
@@ -50,6 +56,9 @@ export const digestMethods = {
   // --- DIGEST ---
   async digests(): Promise<DigestSnapshot> {
     return digestsOf(await request<Raw>("GET", "/api/controlplane/digests"));
+  },
+  async digestSetComment(id: string, comment: string): Promise<void> {
+    await request("PUT", `/api/controlplane/digests/${enc(id)}`, { comment });
   },
   async digestNoteBytes(id: string, md5: string): Promise<ArrayBuffer> {
     // No `?v=`: `:md5` already pins the note.

@@ -7,13 +7,15 @@ import {
 } from "../../src/pages/digest/digestModel";
 
 const d = (id: string, p: Partial<Digest> & { path?: string | null; page?: number | null; kind?: Digest["source"]["kind"] } = {}): Digest => ({
-  id, text: `text ${id}`, comment: null, categoryUid: "", author: null, createdAt: Number(id), note: null,
+  id, text: `text ${id}`, comment: null, categoryUid: "", author: null, createdAt: Number(id), note: null, waiting: false,
   source: { kind: p.kind ?? "document", path: p.path === undefined ? "Document/a.pdf" : p.path, fileId: null, page: p.page === undefined ? 1 : p.page },
   ...p,
 });
 
 const snap = (digests: Digest[]): DigestSnapshot => ({
   enabled: true,
+  tabletSyncedAt: null,
+  waiting: false,
   categories: [{ uid: "kb-phon", name: "Phonétique" }, { uid: "kb-empty", name: "" }],
   digests,
 });

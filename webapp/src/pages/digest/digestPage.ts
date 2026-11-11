@@ -1,8 +1,10 @@
 // The Digest destination: the person's digests, as the tablet's Digest app
 // synced them. Mounted in the shell's content area like To-Do; painted by
 // `digestView.ts` from `digestModel.ts`, its handwritten notes drawn by
-// `digestInk.ts`. Read only: the tablet is where digests are made and changed,
-// so the page only keeps up with it, re-reading while someone is looking.
+// `digestInk.ts`. The tablet is where digests are made; here only a digest's
+// typed comment changes, saved to the server, then re-read, and taken by the
+// tablet at its next sync. The page keeps up with the tablet, re-reading while
+// someone is looking, but never repaints over a comment being written.
 
 import { el, keepingFocus } from "../../ui/dom";
 import type { Api } from "../../api/types";
@@ -12,7 +14,7 @@ import { placePath, sameView, type DigestPlace } from "./digestModel";
 import { groups, list, notice, panel, placeTitle, tabs, type DigestActions } from "./digestView";
 
 export interface DigestHost {
-  api: Pick<Api, "digests">;
+  api: Pick<Api, "digests" | "digestSetComment">;
   content: HTMLElement;
   gallery: HTMLElement;
   crumbs: HTMLElement;
@@ -63,8 +65,15 @@ export function createDigestPage(host: DigestHost): DigestPage {
   let open_ = false;
   let place: DigestPlace = { view: { kind: "category", uid: null }, digest: null };
   let loadToken = 0;
-  /** Where focus goes after the next paint: the panel just opened, or the card of the one just closed. */
-  let focusNext: { panel: true } | { card: string } | null = null;
+  /** The comment being edited: its digest and the text so far. */
+  let editing: { id: string; draft: string } | null = null;
+  /** A comment's save in flight. */
+  let busy = false;
+  /**
+   * Where focus goes after the next paint: the panel just opened, the card of
+   * the one just closed, or the comment's box or its Edit button.
+   */
+  let focusNext: "panel" | "comment-box" | "comment-edit" | { card: string } | null = null;
 
   async function load(): Promise<void> {
     const mine = ++loadToken;
@@ -80,7 +89,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
       failed = snap === null;
     }
     host.onChanged();
-    if (open_) paint();
+    // A comment being written is never repainted away; its save re-reads.
+    if (open_ && editing === null) paint();
   }
 
   /** The shell's topbar dressed for Digest (`mine`), or handed back to the library. */
@@ -93,7 +103,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
 
   const actions: DigestActions = {
     go(p) {
-      if (p.digest !== null && p.digest !== place.digest) focusNext = { panel: true };
+      if (p.digest !== null && p.digest !== place.digest) focusNext = "panel";
       else if (p.digest === null && place.digest !== null && sameView(p.view, place.view)) focusNext = { card: place.digest };
       host.go(placePath(p));
     },
@@ -105,6 +115,39 @@ export function createDigestPage(host: DigestHost): DigestPage {
       const refused = () => host.toast("Couldn't copy the text.");
       if (!navigator.clipboard) return refused();
       navigator.clipboard.writeText(d.text).then(() => host.toast("Copied the text."), refused);
+    },
+    editComment(d: Digest) {
+      editing = { id: d.id, draft: d.comment ?? "" };
+      focusNext = "comment-box";
+      paint();
+    },
+    draftComment(text: string) {
+      if (editing) editing.draft = text;
+    },
+    cancelComment() {
+      editing = null;
+      focusNext = "comment-edit";
+      paint();
+    },
+    saveComment(d: Digest) {
+      if (!editing || busy) return;
+      const text = editing.draft;
+      busy = true;
+      paint();
+      host.api.digestSetComment(d.id, text).then(
+        async () => {
+          busy = false;
+          editing = null;
+          focusNext = "comment-edit";
+          await load();
+        },
+        (e: unknown) => {
+          busy = false;
+          if (!host.handled(e)) host.toast("Couldn't save the comment. Check your connection and try again.");
+          focusNext = "comment-box";
+          paint();
+        },
+      );
     },
   };
 
@@ -121,7 +164,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
         root.replaceChildren(notice("Digest sync is off on this server", "The tablet's digests are not kept here. An administrator can turn it on with digest_sync in the server's config.", null));
         return;
       }
-      const p = { snap, place, ink: host.ink };
+      const p = { snap, place, ink: host.ink, editing, busy };
       const side = panel(p, actions);
       root.replaceChildren(
         tabs(place, actions),
@@ -130,8 +173,13 @@ export function createDigestPage(host: DigestHost): DigestPage {
     });
     const next = focusNext;
     focusNext = null;
-    if (next && "panel" in next) root.querySelector<HTMLElement>(".digest-panel__close")?.focus();
-    else if (next) root.querySelector<HTMLElement>(`.digest-card__link[data-digest="${CSS.escape(next.card)}"]`)?.focus();
+    if (next === "panel") root.querySelector<HTMLElement>(".digest-panel__close")?.focus();
+    else if (next === "comment-edit") root.querySelector<HTMLElement>("#digest-comment-edit")?.focus();
+    else if (next === "comment-box") {
+      const box = root.querySelector<HTMLTextAreaElement>("#digest-comment");
+      box?.focus();
+      box?.setSelectionRange(box.value.length, box.value.length);
+    } else if (next) root.querySelector<HTMLElement>(`.digest-card__link[data-digest="${CSS.escape(next.card)}"]`)?.focus();
   }
 
   /** Escape closes the open digest, as it closes the reader's panels. */
@@ -154,6 +202,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
 
   return {
     open(next) {
+      // Another digest, or none: the comment being written there is let go.
+      if (editing && editing.id !== next.digest) editing = null;
       place = next;
       if (!open_) {
         open_ = true;

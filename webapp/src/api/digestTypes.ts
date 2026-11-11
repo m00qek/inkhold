@@ -1,5 +1,6 @@
 // The person's digests, as the browser sees them: what the tablet's Digest app
-// synced (`/api/controlplane/digests`). Read only: the tablet is their writer.
+// synced (`/api/controlplane/digests`). The browser changes one thing, a
+// digest's typed comment, which the tablet takes at its next sync.
 
 /** A category the person made on the tablet. Uncategorized is not one: a digest with `categoryUid` "" is in it. */
 export interface DigestCategory {
@@ -34,7 +35,12 @@ export interface Digest {
   source: DigestSource;
   /** The handwritten note's md5, which names its page; null: none. */
   note: string | null;
+  /** Its comment changed here and no tablet has fetched it yet. */
+  waiting: boolean;
 }
+
+/** The app's own limit on a comment, in characters. */
+export const MAX_COMMENT = 2000;
 
 export interface DigestSnapshot {
   /** False when the server keeps no digests (`digest_sync` off); everything else is empty then. */
@@ -42,4 +48,8 @@ export interface DigestSnapshot {
   categories: DigestCategory[];
   /** In the order the tablet made them. */
   digests: Digest[];
+  /** When a tablet last asked for these digests; null: never. */
+  tabletSyncedAt: number | null;
+  /** Something changed here that no tablet has fetched yet. */
+  waiting: boolean;
 }

@@ -207,10 +207,13 @@ export interface Api {
 
   // --- DIGEST ---
   // The signed-in person's digests, as their tablet's Digest app synced them.
-  // Read only: the tablet is their writer. While the server keeps none,
-  // `digests()` answers `enabled: false`.
+  // Only a digest's typed comment changes here; the tablet takes it at its
+  // next sync. While the server keeps none, `digests()` answers
+  // `enabled: false` and an edit is a 409 `DIGEST_SYNC_OFF`.
 
   digests(): Promise<DigestSnapshot>;
+  /** "" removes the comment. 400 `BAD_COMMENT` past `MAX_COMMENT` characters, 404 `NO_SUCH_DIGEST`. */
+  digestSetComment(id: string, comment: string): Promise<void>;
   /** A digest's handwritten note as SNPG page bytes, for the renderer. `md5` is the digest's `note`; 404 for any other. */
   digestNoteBytes(id: string, md5: string): Promise<ArrayBuffer>;
 
