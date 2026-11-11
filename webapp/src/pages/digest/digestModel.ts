@@ -107,13 +107,20 @@ export interface SourceGroup {
   digests: Digest[];
 }
 
-/** The kinds' sections in the Sources list, in this order. */
-export const SOURCE_SECTIONS: readonly { kind: DigestSourceKind; name: string }[] = [
-  { kind: "document", name: "Documents" },
-  { kind: "note", name: "Notes" },
-  { kind: "manual", name: "Typed on the tablet" },
-  { kind: "other", name: "Other" },
+/**
+ * The Sources list's sections, in this order. Documents and notebooks share
+ * one, as on the tablet; what was typed there is its own.
+ */
+export const SOURCE_SECTIONS: readonly { kinds: readonly DigestSourceKind[]; name: string }[] = [
+  { kinds: ["document", "note"], name: "Documents & notes" },
+  { kinds: ["manual"], name: "Typed on the tablet" },
+  { kinds: ["other"], name: "Other" },
 ];
+
+/** The section a kind of source is listed under. */
+export function sectionOf(kind: DigestSourceKind): (typeof SOURCE_SECTIONS)[number] {
+  return SOURCE_SECTIONS.find((x) => x.kinds.includes(kind))!;
+}
 
 /** Page order: by page (pages unknown last), then the order they were made. */
 function byPage(a: Digest, b: Digest): number {
@@ -129,16 +136,34 @@ export function sourceGroups(s: DigestSnapshot): SourceGroup[] {
     const key = sourceKey(d);
     let g = groups.get(key);
     if (!g) {
-      const name = d.source.path ? fileName(d.source.path) : SOURCE_SECTIONS.find((x) => x.kind === d.source.kind)!.name;
+      const name = d.source.path ? fileName(d.source.path) : sectionOf(d.source.kind).name;
       g = { key, kind: d.source.kind, name, fileId: d.source.fileId, digests: [] };
       groups.set(key, g);
     }
     g.digests.push(d);
   }
-  const order = (k: DigestSourceKind) => SOURCE_SECTIONS.findIndex((x) => x.kind === k);
+  const order = (k: DigestSourceKind) => SOURCE_SECTIONS.indexOf(sectionOf(k));
   return [...groups.values()]
     .map((g) => ({ ...g, digests: [...g.digests].sort(byPage) }))
     .sort((a, b) => order(a.kind) - order(b.kind) || a.name.localeCompare(b.name));
+}
+
+/**
+ * Whether the digest's source opens at its page here: a PDF or a notebook in
+ * the library. An EPUB, a CBZ and the like have no viewer that goes to a page.
+ */
+export function opensAtPage(d: Digest): boolean {
+  const path = d.source.path?.toLowerCase() ?? "";
+  return d.source.fileId !== null && (path.endsWith(".pdf") || path.endsWith(".note"));
+}
+
+/** At most `max` characters of `text`, cut at a word, with "…" when cut: a control's text, not a whole passage. */
+export function shorten(text: string, max = 240): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= max) return flat;
+  const cut = flat.slice(0, max);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
 /** The digests taken from one library file, in page order: what its viewer's Digests panel lists. */

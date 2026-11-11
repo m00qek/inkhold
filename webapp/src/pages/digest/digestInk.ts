@@ -12,7 +12,10 @@ import type { NoteRenderer } from "../../render/types";
 import type { PersistentThumbStore } from "../../cache/idb";
 import { cutStrokes } from "../../render/inkMask";
 
-/** The Nomad's panel, which a digest's note covers. */
+/**
+ * The page size the renderer is handed: the Nomad's panel. The note's own
+ * header decides what is drawn, and the cut keeps only its strokes.
+ */
 const PANEL = { width: 1404, height: 1872 };
 /** Widest picture kept, in px: sharp at the side panel's width on a dense screen. */
 const MAX_W = 720;
@@ -117,6 +120,24 @@ export function createDigestInk(dep: DigestInkDeps): DigestInk {
     }
   }, { rootMargin: "200px" });
 
+  /**
+   * Holders a repaint replaced before they came into view are let go. Run
+   * after the paint that made the new ones has put them on the page.
+   */
+  let sweeping = false;
+  function sweepSoon(): void {
+    if (sweeping) return;
+    sweeping = true;
+    setTimeout(() => {
+      sweeping = false;
+      for (const h of waiting.keys()) {
+        if (h.isConnected) continue;
+        waiting.delete(h);
+        seen!.unobserve(h);
+      }
+    }, 0);
+  }
+
   return {
     picture,
     holder(d, className) {
@@ -128,6 +149,7 @@ export function createDigestInk(dep: DigestInkDeps): DigestInk {
       } else if (seen) {
         waiting.set(h, d);
         seen.observe(h);
+        sweepSoon();
       } else {
         void fill(h, d);
       }

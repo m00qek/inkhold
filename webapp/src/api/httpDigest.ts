@@ -7,8 +7,8 @@ type Raw = Partial<{
   enabled: boolean;
   categories: { uid?: string; name?: string }[];
   digests: {
-    id?: number | string; text?: string; comment?: string; categoryUid?: string; author?: string; createdAt?: number;
-    source?: { kind?: string; path?: string; fileId?: number | string; page?: number };
+    id?: number | string; text?: string; comment?: string; categoryUid?: string; author?: string; createdAt?: number; modifiedAt?: number;
+    source?: { kind?: string; path?: string; fileId?: number | string; page?: number; changed?: boolean };
     note?: string;
     waiting?: boolean;
   }[];
@@ -24,9 +24,11 @@ const id = (v: unknown): string | null => (typeof v === "number" || (typeof v ==
 
 /** The server omits null optionals: absent is "none". */
 export function digestsOf(r: Raw): DigestSnapshot {
+  const categories = (r.categories ?? []).flatMap((c) => (str(c.uid) ? [{ uid: c.uid!, name: c.name ?? "" }] : []));
+  const known = new Set(categories.map((c) => c.uid));
   return {
     enabled: r.enabled === true,
-    categories: (r.categories ?? []).flatMap((c) => (str(c.uid) ? [{ uid: c.uid!, name: c.name ?? "" }] : [])),
+    categories,
     digests: (r.digests ?? []).flatMap((d): Digest[] => {
       const key = id(d.id);
       if (key === null) return [];
@@ -37,10 +39,12 @@ export function digestsOf(r: Raw): DigestSnapshot {
         id: key,
         text: d.text ?? "",
         comment: str(d.comment),
-        categoryUid: d.categoryUid ?? "",
+        // A category the listing doesn't name is no place to show: Uncategorized, as the tablet does.
+        categoryUid: d.categoryUid && known.has(d.categoryUid) ? d.categoryUid : "",
         author: str(d.author),
         createdAt: num(d.createdAt) ?? 0,
-        source: { kind, path: kind === "manual" ? null : str(s.path), fileId: id(s.fileId), page: page !== null && page >= 1 ? page : null },
+        modifiedAt: num(d.modifiedAt) ?? num(d.createdAt) ?? 0,
+        source: { kind, path: kind === "manual" ? null : str(s.path), fileId: id(s.fileId), page: page !== null && page >= 1 ? page : null, changed: s.changed === true },
         note: str(d.note),
         waiting: d.waiting === true,
       }];

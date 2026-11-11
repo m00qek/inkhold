@@ -66,10 +66,11 @@ export function createLibraryViewerDeps(ctx: LibraryCtx): ViewerDeps {
         : versionMd5
           ? replaceNoteVersionPosition(noteId, shortMd5(versionMd5), page)
           : replaceNotePosition(noteId, page, q),
-    // The Digest page's own snapshot, freshened first: one read for both.
+    // The Digest page's own snapshot, re-read only when it is not fresh: a
+    // file opened after another reads nothing.
     digests: {
       of: async (fileId) => {
-        await ctx.digest.load();
+        await ctx.digest.freshen();
         const s = ctx.digest.snapshot();
         return s?.enabled ? fileDigests(s, fileId) : null;
       },

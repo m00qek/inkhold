@@ -12,7 +12,7 @@ import { svg } from "../viewer/viewerIcons";
 import { ICONS } from "../../ui/icons";
 import type { Digest } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
-import { digestPlace, placePath } from "./digestModel";
+import { digestPlace, placePath, shorten } from "./digestModel";
 
 export interface DigestDocPanel {
   /** The panel, also the scroll container. */
@@ -55,7 +55,7 @@ export function createDigestDocPanel(opts: DigestDocPanelOptions): DigestDocPane
       "button",
       { class: "digest-doc__go", type: "button", disabled: page === null },
       el("span", { class: "digest-doc__page", text: page === null ? "" : `p. ${page}` }),
-      el("q", { class: "digest-doc__text", text: d.text }),
+      el("q", { class: "digest-doc__text", text: shorten(d.text) }),
     );
     if (page !== null) step.addEventListener("click", () => opts.onPick(page - 1));
     const ink = opts.ink.holder(d, "digest-doc__ink");
@@ -68,7 +68,7 @@ export function createDigestDocPanel(opts: DigestDocPanelOptions): DigestDocPane
       "li",
       { class: "digest-doc__row", "data-page": page === null ? "" : String(page - 1) },
       step,
-      d.comment ? el("p", { class: "digest-doc__comment", text: d.comment }) : null,
+      d.comment ? el("p", { class: "digest-doc__comment", text: shorten(d.comment) }) : null,
       ink,
       open,
     );

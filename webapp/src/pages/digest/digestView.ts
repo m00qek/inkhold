@@ -8,13 +8,13 @@
 import { el } from "../../ui/dom";
 import { ICONS, svg } from "../../ui/icons";
 import { onPlainClick } from "../../ui/link";
-import { digestHref, notePageHref } from "../../router";
+import { digestHref, noteHref, notePageHref } from "../../router";
 import { absoluteDate } from "../../ui/relativeTime";
 import { MAX_COMMENT, type Digest, type DigestSnapshot } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
 import type { DigestThumbs } from "./digestThumbs";
 import {
-  categoryName, categoryRows, digestsIn, placePath, sameView, sourceGroups, sourceLine, SOURCE_SECTIONS, tabOf, viewTitle,
+  categoryName, categoryRows, digestsIn, opensAtPage, placePath, sameView, shorten, sourceGroups, sourceLine, SOURCE_SECTIONS, tabOf, viewTitle,
   type DigestPlace, type DigestView,
 } from "./digestModel";
 
@@ -108,10 +108,10 @@ export function groups(p: DigestPaint, a: DigestActions): HTMLElement {
     { class: "digest-groups", "aria-label": "Sources" },
     el("ul", {}, row({ kind: "source", key: null }, "All sources", p.snap.digests.length, "stack")),
     ...SOURCE_SECTIONS.flatMap((sec) => {
-      const mine = all.filter((g) => g.kind === sec.kind);
+      const mine = all.filter((g) => sec.kinds.includes(g.kind));
       if (mine.length === 0) return [];
       // What was typed on the tablet is one group, its row named like its section.
-      if (sec.kind === "manual") return [el("ul", { class: "digest-groups__alone" }, ...mine.map((g) => row({ kind: "source", key: g.key }, g.name, g.digests.length, glyph[g.kind])))];
+      if (sec.kinds.length === 1 && sec.kinds[0] === "manual") return [el("ul", { class: "digest-groups__alone" }, ...mine.map((g) => row({ kind: "source", key: g.key }, g.name, g.digests.length, glyph[g.kind])))];
       return [
         el("p", { class: "digest-groups__label", text: sec.name }),
         el("ul", {}, ...mine.map((g) => row({ kind: "source", key: g.key }, g.name, g.digests.length, glyph[g.kind]))),
@@ -174,9 +174,9 @@ function card(d: Digest, p: DigestPaint, a: DigestActions, byPage: boolean): HTM
       { view: p.place.view, digest: d.id },
       a,
       { class: "digest-card__link", "data-digest": d.id, "aria-current": open ? "true" : null },
-      el("q", { class: "digest-card__text", text: d.text }),
+      el("q", { class: "digest-card__text", text: shorten(d.text) }),
     ),
-    d.comment ? el("p", { class: "digest-card__comment", text: d.comment }) : null,
+    d.comment ? el("p", { class: "digest-card__comment", text: shorten(d.comment) }) : null,
     el(
       "p",
       { class: "digest-card__meta" },
@@ -226,9 +226,9 @@ export function panel(p: DigestPaint, a: DigestActions): HTMLElement | null {
   );
 }
 
-/** The typed comment, and the one change the browser makes: to it. */
+/** The typed comment, which the browser can change. */
 function comment(d: Digest, p: DigestPaint, a: DigestActions): HTMLElement {
-  const waiting = d.waiting ? el("p", { class: "digest-panel__aside", text: "Waiting for the tablet: it takes the comment at its next sync." }) : null;
+  const waiting = d.waiting ? el("p", { class: "digest-panel__aside", text: "Waiting for the tablet: it takes the change at its next sync." }) : null;
   if (p.editing?.id === d.id) return commentForm(d, p.editing.draft, p.busy, a, waiting);
   const change = d.comment
     ? el("button", { class: "btn", type: "button", id: "digest-comment-edit", "aria-label": "Edit the comment", text: "Edit" })
@@ -289,22 +289,25 @@ function commentForm(d: Digest, draft: string, busy: boolean, a: DigestActions, 
   return form;
 }
 
-/** A link to the digest's source at its page, which the app opens itself; null when the library hasn't the file. */
 /**
  * The page the digest was taken from, small, with its caption: one link to
- * that page, which the app opens itself; null when the library hasn't the file.
+ * that page, which the app opens itself. A file the app can't open at a page
+ * (an EPUB) is a plain link to the file; null when the library hasn't it.
  */
 function sourceLink(d: Digest, p: DigestPaint, a: DigestActions): HTMLElement | null {
   const s = d.source;
   if (s.kind === "manual" || s.fileId === null) return null;
+  const atPage = opensAtPage(d) && s.page !== null;
   const link = el(
     "a",
-    { class: "digest-panel__source", href: notePageHref(s.fileId, Math.max(0, (s.page ?? 1) - 1)) },
-    p.thumbs.holder(d, "digest-panel__thumb"),
-    el("span", { class: "digest-panel__caption", text: s.page === null ? "Open the file" : `Open at page ${s.page}` }),
+    { class: "digest-panel__source", href: atPage ? notePageHref(s.fileId, s.page! - 1) : noteHref(s.fileId) },
+    atPage ? p.thumbs.holder(d, "digest-panel__thumb") : null,
+    el("span", { class: "digest-panel__caption", text: atPage ? `Open at page ${s.page}` : "Open the file" }),
   );
   onPlainClick(link, () => a.openSource(d));
-  return link;
+  if (!s.changed) return link;
+  const note = el("p", { class: "digest-panel__aside", text: `This file has changed since the digest was taken: page ${s.page ?? 1} may no longer hold the passage.` });
+  return el("div", { class: "digest-panel__sourcebox" }, link, note);
 }
 
 export function notice(title: string, text: string, retry: (() => void) | null, action: HTMLElement | null = null): HTMLElement {

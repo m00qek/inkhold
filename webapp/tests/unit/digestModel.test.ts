@@ -3,12 +3,13 @@
 import { describe, it, expect } from "vitest";
 import type { Digest, DigestSnapshot } from "../../src/api/digestTypes";
 import {
-  categoryName, categoryRows, digestPlace, digestsIn, fileDigests, fileName, parsePlace, placePath, sourceGroups, sourceLine, viewTitle, type DigestPlace,
+  categoryName, categoryRows, digestPlace, digestsIn, fileDigests, fileName, opensAtPage, parsePlace, placePath, shorten, sourceGroups, sourceLine, viewTitle,
+  type DigestPlace,
 } from "../../src/pages/digest/digestModel";
 
 const d = (id: string, p: Partial<Digest> & { path?: string | null; page?: number | null; kind?: Digest["source"]["kind"] } = {}): Digest => ({
-  id, text: `text ${id}`, comment: null, categoryUid: "", author: null, createdAt: Number(id), note: null, waiting: false,
-  source: { kind: p.kind ?? "document", path: p.path === undefined ? "Document/a.pdf" : p.path, fileId: null, page: p.page === undefined ? 1 : p.page },
+  id, text: `text ${id}`, comment: null, categoryUid: "", author: null, createdAt: Number(id), modifiedAt: Number(id), note: null, waiting: false,
+  source: { kind: p.kind ?? "document", path: p.path === undefined ? "Document/a.pdf" : p.path, fileId: null, page: p.page === undefined ? 1 : p.page, changed: false },
   ...p,
 });
 
@@ -85,6 +86,11 @@ describe("sources", () => {
     ]);
   });
 
+  it("documents and notes are one section, by name across both", () => {
+    const mixed = snap([d("1", { path: "Document/m.pdf" }), d("2", { path: "Note/Aufgaben.note", kind: "note" }), d("3", { path: "Document/z.pdf" })]);
+    expect(sourceGroups(mixed).map((g) => g.name)).toEqual(["Aufgaben", "m", "z"]);
+  });
+
   it("a document's digests in page order, unknown pages last, ties in the order made", () => {
     expect(digestsIn(s, { kind: "source", key: "Document/b.pdf" }).map((x) => x.id)).toEqual(["4", "7", "1", "6"]);
     expect(digestsIn(s, { kind: "source", key: null }).map((x) => x.id)).toEqual(["5", "4", "7", "1", "6", "2", "3"]);
@@ -117,5 +123,29 @@ describe("a file's digests, for its viewer", () => {
     expect(fileDigests(s, "57").map((x) => x.id)).toEqual(["3", "1", "4"]);
     expect(fileDigests(s, "99")).toEqual([]);
     expect(digestPlace(s.digests[0]!)).toEqual({ view: { kind: "source", key: "Document/a.pdf" }, digest: "1" });
+  });
+});
+
+describe("opening a digest's source", () => {
+  const at = (path: string, fileId: string | null = "9") => ({ ...d("1", { path }), source: { ...d("1", { path }).source, fileId } });
+
+  it("a PDF or a note opens at its page; an EPUB, or a file not in the library, does not", () => {
+    expect(opensAtPage(at("Document/a.PDF"))).toBe(true);
+    expect(opensAtPage(at("Note/n.note"))).toBe(true);
+    expect(opensAtPage(at("Document/book.epub"))).toBe(false);
+    expect(opensAtPage(at("Document/a.pdf", null))).toBe(false);
+  });
+});
+
+describe("a passage made short for a list", () => {
+  it("is kept whole when it fits, its spaces made one", () => {
+    expect(shorten("a  b\n\nc ")).toBe("a b c");
+  });
+
+  it("is cut at a word, and says so", () => {
+    const long = "word ".repeat(100);
+    const out = shorten(long, 22);
+    expect(out).toBe("word word word word…");
+    expect(out.length).toBeLessThanOrEqual(23);
   });
 });

@@ -12,7 +12,7 @@
   z-index: var(--z-cover);
   overflow-y: auto;
   background: var(--desk);
-  padding: var(--sp-6) 28px 96px;
+  padding: var(--sp-6) var(--sp-6) 6rem;
 }
 .digest > * {
   max-width: 1180px;
@@ -102,8 +102,8 @@
   margin-top: var(--sp-4);
 }
 .digest-groups__label {
-  margin: var(--sp-4) 0 var(--sp-1);
-  padding-inline-start: 10px;
+  margin-block: var(--sp-4) var(--sp-1);
+  padding-inline-start: var(--sp-3);
   font: var(--fs-eyebrow) var(--font-mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -112,8 +112,8 @@
 .digest-group {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
   border-inline-start: 2px solid transparent;
   border-radius: 3px;
   color: var(--ink-soft);
@@ -143,7 +143,7 @@
 
 /* ---- the list ---- */
 .digest-list__title {
-  margin: 0 0 var(--sp-3);
+  margin-block: 0 var(--sp-3);
   font: 500 var(--fs-heading) var(--font-display);
   color: var(--ink);
   overflow-wrap: anywhere;
@@ -235,10 +235,13 @@
   overflow-wrap: anywhere;
 }
 .digest-card__comment {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   margin: 0;
   color: var(--ink-soft);
   overflow-wrap: anywhere;
-  white-space: pre-line;
 }
 .digest-card__meta {
   display: flex;
@@ -407,6 +410,11 @@
 }
 /* The source page, small, and its caption: one link to that page. Room is
    kept for the page while it is drawn, so nothing below it moves. */
+/* The source link, with the line saying its file has changed since. */
+.digest-panel__sourcebox {
+  display: grid;
+  gap: var(--sp-2);
+}
 .digest-panel__source {
   display: flex;
   align-items: center;
@@ -470,7 +478,7 @@
   max-width: 52ch;
 }
 .digest-empty p {
-  margin: 0 0 var(--sp-2);
+  margin-block: 0 var(--sp-2);
 }
 .digest-empty__title {
   font: 500 var(--fs-title) var(--font-display);
@@ -532,6 +540,10 @@
   color: var(--ink-faint);
 }
 .digest-doc__text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
   overflow-wrap: anywhere;
 }
 /* On the page on screen: the outline's accent stroke and number. */
@@ -553,13 +565,17 @@
 .digest-doc__comment,
 .digest-doc__ink,
 .digest-doc__open {
-  margin: 0 var(--sp-2) 0 calc(2.5rem + var(--sp-4));
+  margin-block: 0;
+  margin-inline: calc(2.5rem + var(--sp-4)) var(--sp-2);
 }
 .digest-doc__comment {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   font-size: var(--fs-caption);
   color: var(--ink-soft);
   overflow-wrap: anywhere;
-  white-space: pre-line;
 }
 .digest-doc__ink {
   display: flex;
@@ -599,7 +615,7 @@
 /* ---- a phone: one column; the groups scroll sideways above the list ---- */
 @media (max-width: 699px) {
   .digest {
-    padding: var(--sp-4) var(--sp-4) 96px;
+    padding: var(--sp-4) var(--sp-4) 6rem;
   }
   .digest-body,
   .digest-body:not(.has-open) {

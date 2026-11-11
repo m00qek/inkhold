@@ -6,7 +6,8 @@ import { servePdf } from "./pdfViewer.shared";
 // Digest against the fake API (`api/fakeDigest.ts`): seven digests in Home,
 // Kitchen and Uncategorized ("Reading" is empty), from two PDFs, an EPUB, two
 // notes (one not in the library) and one typed on the tablet. The first,
-// from the lease's page 3, has a handwritten note.
+// from the lease's page 3, has a handwritten note; the appliance manual has
+// changed since its digest was taken.
 
 const SHOTS = process.env.DIGEST_SHOTS;
 
@@ -128,6 +129,18 @@ test.describe("Digest", () => {
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/source-thumb.png` });
   });
 
+  test("an EPUB opens as a whole, with no page to show; a changed file says its page may have moved", async ({ page }) => {
+    await openDigest(page, "/d/4");
+    const panel = page.locator(".digest-panel");
+    const link = panel.getByRole("link", { name: "Open the file" });
+    await expect(link).toHaveAttribute("href", /#\/note\/143$/);
+    await expect(panel.locator(".digest-panel__thumb")).toHaveCount(0);
+    await expect(panel).not.toContainText("has changed since");
+
+    await page.goto("/#/digest/d/2");
+    await expect(page.locator(".digest-panel")).toContainText("This file has changed since the digest was taken: page 2 may no longer hold the passage.");
+  });
+
   test("Open at page opens the source there, and Back returns to the digest", async ({ page }) => {
     await openDigest(page, "/d/2");
     await page.locator(".digest-panel").getByRole("link", { name: "Open at page 2" }).click();
@@ -140,12 +153,12 @@ test.describe("Digest", () => {
     await expect(page.locator(".digest-panel")).toBeVisible();
   });
 
-  test("by source: documents, notes and typed ones; a document's digests in page order", async ({ page }) => {
+  test("by source: documents and notes together, then typed ones; a document's digests in page order", async ({ page }) => {
     await openDigest(page);
     await page.getByRole("navigation", { name: "Browse digests by" }).getByRole("link", { name: "Sources" }).click();
     await expect(page).toHaveURL(/#\/digest\/sources$/);
     const groups = page.getByRole("navigation", { name: "Sources" });
-    await expect(groups.locator(".digest-groups__label")).toHaveText(["Documents", "Notes"]);
+    await expect(groups.locator(".digest-groups__label")).toHaveText(["Documents & notes"]);
     await expect(groups.getByRole("link", { name: /^Typed on the tablet/ })).toBeVisible();
     await groups.getByRole("link", { name: /^Apartment lease/ }).click();
     await expect(page.locator(".digest-card__page")).toHaveText(["p. 1", "p. 3"]);

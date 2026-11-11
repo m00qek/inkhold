@@ -10,6 +10,7 @@ import type { Api } from "../../api/types";
 import type { Digest } from "../../api/digestTypes";
 import type { NoteMeta } from "../../core/types";
 import type { Thumbnails } from "../../render/thumbnails";
+import { opensAtPage } from "./digestModel";
 
 export interface DigestThumbsDeps {
   api: Pick<Api, "getNoteMeta">;
@@ -17,8 +18,14 @@ export interface DigestThumbsDeps {
 }
 
 export interface DigestThumbs {
-  /** The digest's source page, filled in once drawn; null when its file is not in the library. */
+  /**
+   * The digest's source page, filled in once drawn (and left empty when that
+   * page is gone); null when there is no page to show: a file not in the
+   * library, or one no viewer opens at a page.
+   */
   holder(d: Digest, className: string): HTMLElement | null;
+  /** Forget what was read and drawn: the digests changed, and a file's pages may have too. */
+  forget(): void;
 }
 
 export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
@@ -28,6 +35,8 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
   const pictures = new Map<string, Promise<string | null>>();
   /** The pictures in, so a repaint shows one at once instead of blinking. */
   const drawn = new Map<string, string>();
+  /** Bumped by `forget`: a draw begun before it keeps nothing. */
+  let generation = 0;
 
   const meta = (id: string): Promise<NoteMeta> => {
     let m = metas.get(id);
@@ -41,14 +50,18 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
 
   async function draw(fileId: string, page: number): Promise<string | null> {
     const m = await meta(fileId);
+    // A page the file no longer has: no picture, never another page's.
+    if (m.pages.length > 0 && page >= m.pages.length) return null;
+    const notePage = m.pages[page];
+    if (m.fileType === "note" && !notePage) return null;
     const blob =
-      m.fileType === "note"
+      m.fileType === "note" && notePage
         ? // Not the cover: the page the digest is on.
-          await deps.thumbnails.getThumbnail({ fileHash: null, noteId: fileId, page: m.pages[page] ?? m.pages[0] }, "note")
+          await deps.thumbnails.getThumbnail({ fileHash: null, noteId: fileId, page: notePage }, "note")
         : m.fileType === "pdf"
           ? await deps.thumbnails.getThumbnail({ fileHash: m.fileHash, fileId, pdfPage: page }, "pdf")
-          : await deps.thumbnails.getThumbnail({ fileHash: m.fileHash, fileId }, m.fileType);
-    return URL.createObjectURL(blob);
+          : null;
+    return blob ? URL.createObjectURL(blob) : null;
   }
 
   function show(holder: HTMLElement, url: string): void {
@@ -59,7 +72,7 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
   return {
     holder(d, className) {
       const fileId = d.source.fileId;
-      if (d.source.kind === "manual" || fileId === null) return null;
+      if (fileId === null || !opensAtPage(d)) return null;
       const page = Math.max(0, (d.source.page ?? 1) - 1);
       const key = `${fileId}:${page}:${currentTheme()}`;
       const h = el("span", { class: className, "aria-hidden": "true" });
@@ -70,9 +83,10 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
       }
       let p = pictures.get(key);
       if (!p) {
+        const mine = generation;
         p = draw(fileId, page).then(
           (url) => {
-            if (url) drawn.set(key, url);
+            if (url && mine === generation) drawn.set(key, url);
             return url;
           },
           () => {
@@ -86,6 +100,13 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
         if (url && h.isConnected) show(h, url);
       });
       return h;
+    },
+    forget() {
+      generation++;
+      metas.clear();
+      pictures.clear();
+      for (const url of drawn.values()) URL.revokeObjectURL(url);
+      drawn.clear();
     },
   };
 }

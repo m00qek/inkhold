@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The Digest page's states before there are digests to show: loading, off on
 // the server, a failed read that can be tried again; that an unchanged answer
-// repaints nothing; and editing a comment, the one change made here.
+// repaints nothing; editing a comment, and moving a digest to a category.
 
 import { describe, it, expect, vi } from "vitest";
 import { createDigestPage, type DigestHost } from "../../src/pages/digest/digestPage";
@@ -25,7 +25,7 @@ function host(digests: () => Promise<DigestSnapshot>, digestEdit: (id: string, c
     onChanged: () => void h.changed++,
     go: () => {},
     ink,
-    thumbs: { holder: () => null },
+    thumbs: { holder: () => null, forget: () => {} },
     openFile: () => {},
     changed: 0,
     toasts: [] as string[],
@@ -36,8 +36,11 @@ function host(digests: () => Promise<DigestSnapshot>, digestEdit: (id: string, c
 const ALL = { view: { kind: "category", uid: null }, digest: null } as const;
 const one: DigestSnapshot = {
   enabled: true,
-  categories: [],
-  digests: [{ id: "1", text: "a passage", comment: null, categoryUid: "", author: null, createdAt: 1, note: null, waiting: false, source: { kind: "manual", path: null, fileId: null, page: null } }],
+  categories: [{ uid: "kb-1", name: "Grammar" }],
+  digests: [{
+    id: "1", text: "a passage", comment: null, categoryUid: "", author: null, createdAt: 1, modifiedAt: 1, note: null, waiting: false,
+    source: { kind: "manual", path: null, fileId: null, page: null, changed: false },
+  }],
   tabletSyncedAt: null,
   waiting: false,
 };
@@ -127,6 +130,50 @@ describe("the Digest page", () => {
     expect(saved).toEqual(["1:Learn it by heart"]);
     expect(h.content.querySelector(".digest-panel")!.textContent).toContain("Learn it by heart");
     expect(h.content.querySelector(".digest-panel")!.textContent).toContain("Waiting for the tablet");
+    page.destroy();
+  });
+
+  it("a save that changes nothing sends nothing; one the server answers alike still closes the form", async () => {
+    const server = { ...structuredClone(one), digests: [{ ...one.digests[0]!, comment: "kept" }] };
+    const sent: DigestEdit[] = [];
+    // The server takes the edit and answers as before: the page must not wait for a change.
+    const h = host(async () => structuredClone(server), async (_id, c) => void sent.push(c));
+    const page = createDigestPage(h);
+    page.open({ ...ALL, digest: "1" });
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-comment-edit")).not.toBeNull());
+    const box = () => h.content.querySelector<HTMLTextAreaElement>("#digest-comment");
+    const submit = () => h.content.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+
+    h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.click();
+    box()!.value = "  kept ";
+    box()!.dispatchEvent(new Event("input"));
+    submit();
+    expect(box()).toBeNull();
+    expect(sent).toEqual([]);
+
+    h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.click();
+    box()!.value = "other";
+    box()!.dispatchEvent(new Event("input"));
+    submit();
+    await vi.waitFor(() => expect(box()).toBeNull());
+    expect(sent).toEqual([{ comment: "other" }]);
+    expect(h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.disabled).toBe(false);
+    page.destroy();
+  });
+
+  it("a move the server refuses says so and leaves the digest where it was", async () => {
+    const h = host(async () => structuredClone(one), async () => {
+      throw new Error("offline");
+    });
+    const page = createDigestPage(h);
+    page.open({ ...ALL, digest: "1" });
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-move")).not.toBeNull());
+    h.content.querySelector<HTMLButtonElement>("#digest-move")!.click();
+    const to = [...document.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]")].find((b) => b.textContent?.includes("Grammar"));
+    expect(to).toBeDefined();
+    to!.click();
+    await vi.waitFor(() => expect(h.toasts.at(-1)).toMatch(/Couldn't move the digest/));
+    expect(h.content.querySelector(".digest-panel__category")!.textContent).toContain("Uncategorized");
     page.destroy();
   });
 

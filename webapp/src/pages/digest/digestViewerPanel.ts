@@ -51,6 +51,8 @@ export function createDigestViewerPanel(deps: DigestViewerPanelDeps): DigestView
   /** The server keeps digests, as last heard: the opener is there from the first frame. */
   let kept = deps.source?.kept() ?? false;
   let applicable = true;
+  /** The page on screen now, which may have turned while the digests loaded. */
+  let lastPage = 0;
   const sync = () => void (opener.el.hidden = !(kept && applicable));
   sync();
 
@@ -63,6 +65,7 @@ export function createDigestViewerPanel(deps: DigestViewerPanelDeps): DigestView
     opener,
     panel,
     load(fileId, page, stale) {
+      lastPage = page;
       const source = deps.source;
       if (!source) return;
       void source.of(fileId).then(
@@ -71,7 +74,7 @@ export function createDigestViewerPanel(deps: DigestViewerPanelDeps): DigestView
           kept = digests !== null;
           sync();
           panel.setDigests(digests ?? []);
-          panel.setCurrent(page);
+          panel.setCurrent(lastPage);
           if (digests !== null && digests.length > 0) opener.setAvailable(true);
           else none();
         },
@@ -80,7 +83,10 @@ export function createDigestViewerPanel(deps: DigestViewerPanelDeps): DigestView
         },
       );
     },
-    setCurrent: (page) => panel.setCurrent(page),
+    setCurrent(page) {
+      lastPage = page;
+      panel.setCurrent(page);
+    },
     setApplicable(on) {
       applicable = on;
       sync();

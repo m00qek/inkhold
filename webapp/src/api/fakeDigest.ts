@@ -1,7 +1,7 @@
 // The fake API's Digest: one person's digests and categories, as a tablet
 // synced them, with sources in the fake library (`fakeFixtures.ts`) so
-// "Open at page" lands somewhere, one source the library lacks, and a
-// category with nothing in it.
+// "Open at page" lands somewhere, one source the library lacks, one that
+// has changed since, and a category with nothing in it.
 //
 // The demo and the docs' screenshots get their own set (`demoNotes.ts`):
 // someone learning German, quoting the demo's grammar sheet word for word.
@@ -11,7 +11,7 @@ import { delay } from "./fake";
 import { fakeHash } from "./fakeHash";
 import { DEMO_GRAMMAR_ID, demoNotesOn } from "./demoNotes";
 import { ApiError } from "./errors";
-import { MAX_COMMENT, type Digest, type DigestCategory, type DigestEdit, type DigestSnapshot } from "./digestTypes";
+import { MAX_COMMENT, type Digest, type DigestCategory, type DigestEdit, type DigestSnapshot, type DigestSource } from "./digestTypes";
 
 const DAY = 86_400_000;
 
@@ -28,8 +28,11 @@ const noteMd5 = (seed: string) => fakeHash(seed).padEnd(32, "0").slice(0, 32);
 /** The e2e set's one handwritten note. */
 export const FAKE_NOTE_MD5 = noteMd5("digest-note-1");
 
-/** A digest as the tablet synced it; whether a browser change waits is the fake server's. */
-type Synced = Omit<Digest, "waiting">;
+/**
+ * A digest as the tablet synced it, its source unchanged unless it says so;
+ * when it last changed, and whether a browser change waits, are the fake server's.
+ */
+type Synced = Omit<Digest, "waiting" | "modifiedAt" | "source"> & { source: Omit<DigestSource, "changed"> & { changed?: boolean } };
 
 function testDigests(now: number): Synced[] {
   const at = (days: number) => now - days * DAY;
@@ -42,7 +45,7 @@ function testDigests(now: number): Synced[] {
     {
       id: "2", text: "Descale the boiler every three months in hard-water areas.", comment: null,
       categoryUid: HOME, author: null, createdAt: at(8), note: null,
-      source: { kind: "document", path: "Document/Appliance manual.pdf", fileId: "178", page: 2 },
+      source: { kind: "document", path: "Document/Appliance manual.pdf", fileId: "178", page: 2, changed: true },
     },
     {
       id: "3", text: "The tenant pays for repairs caused by misuse.", comment: null,
@@ -100,7 +103,9 @@ export function fakeDigestMethods(latency: number) {
   const demo = demoNotesOn();
   const categories = demo ? DEMO_CATEGORIES : CATEGORIES;
   // `waiting`: like a server whose tablet has not synced since.
-  const digests: Digest[] = (demo ? demoDigests(Date.now()) : testDigests(Date.now())).map((d) => ({ ...d, waiting: false }));
+  const digests: Digest[] = (demo ? demoDigests(Date.now()) : testDigests(Date.now())).map((d) => ({
+    ...d, modifiedAt: d.createdAt, source: { ...d.source, changed: d.source.changed ?? false }, waiting: false,
+  }));
   const tabletSyncedAt = Date.now() - 5 * 60_000;
   return {
     async digests(): Promise<DigestSnapshot> {
@@ -123,6 +128,7 @@ export function fakeDigestMethods(latency: number) {
       if (!d) throw new ApiError("NO_SUCH_DIGEST", "there is no such digest", 404);
       if (text !== undefined) d.comment = text === "" ? null : text;
       if (uid !== undefined) d.categoryUid = uid;
+      d.modifiedAt = Math.max(Date.now(), d.modifiedAt + 1);
       d.waiting = true;
     },
     async digestNoteBytes(_id: string, md5: string): Promise<ArrayBuffer> {

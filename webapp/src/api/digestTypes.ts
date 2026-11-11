@@ -19,6 +19,8 @@ export interface DigestSource {
   fileId: string | null;
   /** 1-based; null when the tablet did not say. */
   page: number | null;
+  /** The library's file is not the size it was when the passage was taken: the page may no longer hold it. */
+  changed: boolean;
 }
 
 export interface Digest {
@@ -32,10 +34,12 @@ export interface Digest {
   author: string | null;
   /** Epoch ms, by the tablet's clock. */
   createdAt: number;
+  /** Epoch ms of its last change, here or on the tablet. */
+  modifiedAt: number;
   source: DigestSource;
   /** The handwritten note's md5, which names its page; null: none. */
   note: string | null;
-  /** Its comment changed here and no tablet has fetched it yet. */
+  /** Its comment or category changed here and no tablet has fetched it yet. */
   waiting: boolean;
 }
 

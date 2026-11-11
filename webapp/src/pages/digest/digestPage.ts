@@ -2,9 +2,10 @@
 // synced them. Mounted in the shell's content area like To-Do; painted by
 // `digestView.ts` from `digestModel.ts`, its handwritten notes drawn by
 // `digestInk.ts`. The tablet is where digests are made; here only a digest's
-// typed comment changes, saved to the server, then re-read, and taken by the
-// tablet at its next sync. The page keeps up with the tablet, re-reading while
-// someone is looking, but never repaints over a comment being written.
+// typed comment and its category change, saved to the server, then re-read,
+// and taken by the tablet at its next sync. The page keeps up with the
+// tablet, re-reading while someone is looking, but never repaints over a
+// comment being written.
 
 import { el, keepingFocus } from "../../ui/dom";
 import { openBarMenu, type BarRow } from "../../ui/barMenu";
@@ -12,7 +13,7 @@ import type { Api } from "../../api/types";
 import type { Digest, DigestSnapshot } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
 import type { DigestThumbs } from "./digestThumbs";
-import { categoryRows, placePath, sameView, type DigestPlace } from "./digestModel";
+import { categoryRows, opensAtPage, placePath, sameView, type DigestPlace } from "./digestModel";
 import { groups, list, notice, panel, placeTitle, tabs, type DigestActions } from "./digestView";
 
 export interface DigestHost {
@@ -49,11 +50,15 @@ export interface DigestPage {
   snapshot(): DigestSnapshot | null;
   /** Re-reads the server (shell start, tab back in focus). */
   load(): Promise<void>;
+  /** Re-reads the server only when the last answer is older than half a minute: a viewer opening a file. */
+  freshen(): Promise<void>;
   destroy(): void;
 }
 
 /** While open and in view, the tablet's new digests show up within this. */
 const POLL_MS = 30_000;
+/** A viewer reuses an answer this young rather than asking again. */
+const FRESH_MS = 30_000;
 
 /** Two answers alike: plain data, so their JSON says it. */
 function sameSnapshot(a: DigestSnapshot, b: DigestSnapshot): boolean {
@@ -69,6 +74,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
   let open_ = false;
   let place: DigestPlace = { view: { kind: "category", uid: null }, digest: null };
   let loadToken = 0;
+  /** When the server last answered (ms); 0 before it has. */
+  let answeredAt = 0;
   /** The comment being edited: its digest and the text so far. */
   let editing: { id: string; draft: string } | null = null;
   /** A comment's save in flight. */
@@ -79,15 +86,25 @@ export function createDigestPage(host: DigestHost): DigestPage {
    */
   let focusNext: "panel" | "comment-box" | "comment-edit" | "move" | { card: string } | null = null;
 
-  async function load(): Promise<void> {
+  /**
+   * Re-reads the server. An answer like the last one repaints nothing, so
+   * nothing on screen moves; `repaint` asks for one anyway, after the page's
+   * own change, whose form or busy state must go even when nothing changed.
+   */
+  async function load(repaint = false): Promise<void> {
     const mine = ++loadToken;
     try {
       const s = await host.api.digests();
       if (mine !== loadToken) return;
-      // Nothing new from the tablet: no repaint, so nothing on screen moves.
-      if (snap !== null && !failed && sameSnapshot(snap, s)) return;
+      answeredAt = Date.now();
+      if (snap !== null && !failed && sameSnapshot(snap, s)) {
+        if (repaint && open_) paint();
+        return;
+      }
       snap = s;
       failed = false;
+      // A file's pages may have changed with it.
+      host.thumbs.forget();
     } catch (e) {
       if (mine !== loadToken || host.handled(e)) return;
       failed = snap === null;
@@ -113,7 +130,9 @@ export function createDigestPage(host: DigestHost): DigestPage {
     },
     openSource(d: Digest) {
       if (d.source.fileId === null) return;
-      host.openFile(d.source.fileId, Math.max(0, (d.source.page ?? 1) - 1));
+      // A file no viewer opens at a page (an EPUB) opens at its start.
+      const page = opensAtPage(d) && d.source.page !== null ? d.source.page - 1 : 0;
+      host.openFile(d.source.fileId, page);
     },
     copy(d: Digest) {
       const refused = () => host.toast("Couldn't copy the text.");
@@ -147,6 +166,13 @@ export function createDigestPage(host: DigestHost): DigestPage {
     saveComment(d: Digest) {
       if (!editing || busy) return;
       const text = editing.draft;
+      // What the server would keep is what is there: nothing to send.
+      if (text.trim() === (d.comment ?? "")) {
+        editing = null;
+        focusNext = "comment-edit";
+        paint();
+        return;
+      }
       busy = true;
       paint();
       host.api.digestEdit(d.id, { comment: text }).then(
@@ -154,7 +180,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
           busy = false;
           editing = null;
           focusNext = "comment-edit";
-          await load();
+          await load(true);
         },
         (e: unknown) => {
           busy = false;
@@ -175,7 +201,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
       async () => {
         busy = false;
         host.toast(`Moved to ${name}.`);
-        await load();
+        await load(true);
       },
       (e: unknown) => {
         busy = false;
@@ -259,7 +285,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
     isOpen: () => open_,
     place: () => (open_ ? place : null),
     snapshot: () => snap,
-    load,
+    load: () => load(),
+    freshen: () => (Date.now() - answeredAt < FRESH_MS ? Promise.resolve() : load()),
     destroy() {
       clearInterval(poll);
       root.removeEventListener("keydown", onKey);
