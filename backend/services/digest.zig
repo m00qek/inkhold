@@ -349,20 +349,40 @@ pub fn liveDigestId(db: sqlite.Db, user_id: u64, uid: []const u8) sqlite.Error!?
 
 // ---- the browser's edit, and what a tablet has fetched ----
 
-/// The browser's edit of a live digest's typed comment, the one field it may
-/// change. `md5_hash` must be new: the app takes the server's copy when its
-/// md5 differs from the one it last synced and its own is unchanged, with no
-/// clock in it; when both changed, the newer `last_modified_time` wins, so it
-/// moves past the row's own time and a tablet clock ahead cannot win over the
-/// edit (decompiled `KnowledgeSyncRepository.processKnowledgeDetail`). The
-/// handwritten note is never touched. False when there is no such live digest.
-pub fn setComment(db: sqlite.Db, user_id: u64, id: u64, comment: []const u8, md5_hash: []const u8, now_ms: i64) sqlite.Error!bool {
+/// What the browser may change in a digest: its typed comment and its
+/// category. Absent fields stay as they are.
+pub const WebEdit = struct {
+    comment: ?[]const u8 = null,
+    /// A category's uid, '' for Uncategorized; the caller checks it is live.
+    parent_uid: ?[]const u8 = null,
+};
+
+/// The browser's edit of a live digest. `md5_hash` must be new: the app takes
+/// the server's copy when its md5 differs from the one it last synced and its
+/// own is unchanged, with no clock in it, the comment and the category with it
+/// (a category it lacks becomes Uncategorized); when both changed, the newer
+/// `last_modified_time` wins, so it moves past the row's own time and a tablet
+/// clock ahead cannot win over the edit (decompiled
+/// `KnowledgeSyncRepository.processKnowledgeDetail` and
+/// `updateLocalKnowledgeFromServer`). The handwritten note is never touched.
+/// False when there is no such live digest.
+pub fn applyWebEdit(db: sqlite.Db, user_id: u64, id: u64, e: WebEdit, md5_hash: []const u8, now_ms: i64) sqlite.Error!bool {
     try db.runCached(
-        \\UPDATE digests SET comment_str = ?3, md5_hash = ?4,
-        \\  last_modified_time = MAX(?5, last_modified_time + 1), updated_at = ?5, web_changed_at = ?5
+        \\UPDATE digests SET comment_str = COALESCE(?3, comment_str), parent_uid = COALESCE(?4, parent_uid),
+        \\  md5_hash = ?5, last_modified_time = MAX(?6, last_modified_time + 1), updated_at = ?6, web_changed_at = ?6
         \\WHERE user_id = ?1 AND id = ?2 AND is_group = 0 AND deleted = 0;
-    , &.{ .{ .int = @intCast(user_id) }, .{ .int = @intCast(id) }, .{ .text = comment }, .{ .text = md5_hash }, .{ .int = now_ms } });
+    , &.{
+        .{ .int = @intCast(user_id) }, .{ .int = @intCast(id) }, .{ .text_opt = e.comment },
+        .{ .text_opt = e.parent_uid }, .{ .text = md5_hash },    .{ .int = now_ms },
+    });
     return db.changes() > 0;
+}
+
+/// Whether `uid` names one of the account's live categories ('' is
+/// Uncategorized, always there).
+pub fn categoryExists(db: sqlite.Db, user_id: u64, uid: []const u8) sqlite.Error!bool {
+    if (uid.len == 0) return true;
+    return (try liveId(db, user_id, true, uid)) != null;
 }
 
 /// A tablet asked for this account's manifest at `now_ms`: its sync takes
@@ -687,7 +707,7 @@ test "metadata without a unique_identifier, or not JSON, has no uid" {
     try testing.expectEqualStrings("u1", uidOfMetadata(a, "{\"unique_identifier\":\"u1\"}").?);
 }
 
-test "the browser's comment: a new md5, a time past the row's own, waiting until a tablet lists; a tablet's update clears it" {
+test "the browser's edit: a new md5, a time past the row's own, waiting until a tablet lists; a tablet's update clears it" {
     var db = try testDb();
     defer db.close();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -698,7 +718,7 @@ test "the browser's comment: a new md5, a time past the row's own, waiting until
     var sent = nomadDigest(a);
     sent.last_modified_time = 5_000;
     const id = try addDigest(db, 1, sent, 1000);
-    try testing.expect(try setComment(db, 1, id, "Learn it by heart", "0123456789abcdef0123456789abcdef", 2_000));
+    try testing.expect(try applyWebEdit(db, 1, id, .{ .comment = "Learn it by heart" }, "0123456789abcdef0123456789abcdef", 2_000));
     {
         const d = (try digestsByIds(db, a, 1, &.{id}))[0];
         try testing.expectEqualStrings("Learn it by heart", d.comment_str.?);
@@ -715,12 +735,34 @@ test "the browser's comment: a new md5, a time past the row's own, waiting until
     try testing.expectEqual(@as(usize, 0), (try changedSince(db, a, 1, 3_000)).len);
 
     // Changed again, then the tablet sends the digest back: its copy is the one now.
-    try testing.expect(try setComment(db, 1, id, "again", "fedcba9876543210fedcba9876543210", 4_000));
+    try testing.expect(try applyWebEdit(db, 1, id, .{ .comment = "again" }, "fedcba9876543210fedcba9876543210", 4_000));
     try testing.expect(try putDigest(db, 1, id, sent, 4_500));
     try testing.expectEqual(@as(usize, 0), (try changedSince(db, a, 1, null)).len);
 
     // Not someone else's, not a deleted one.
-    try testing.expect(!try setComment(db, 2, id, "x", "00000000000000000000000000000000", 5_000));
+    try testing.expect(!try applyWebEdit(db, 2, id, .{ .comment = "x" }, "00000000000000000000000000000000", 5_000));
     try deleteDigest(db, 1, id, 6_000);
-    try testing.expect(!try setComment(db, 1, id, "x", "00000000000000000000000000000000", 7_000));
+    try testing.expect(!try applyWebEdit(db, 1, id, .{ .comment = "x" }, "00000000000000000000000000000000", 7_000));
+}
+
+test "the browser's move: to a live category or Uncategorized; the comment stays" {
+    var db = try testDb();
+    defer db.close();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    _ = try addGroup(db, 1, .{ .is_group = true, .uid = "kb-phon", .name = "Phonétique", .md5_hash = "g" }, 1);
+    const id = try addDigest(db, 1, nomadDigest(a), 1);
+    try testing.expect(try categoryExists(db, 1, "kb-phon"));
+    try testing.expect(try categoryExists(db, 1, ""));
+    try testing.expect(!try categoryExists(db, 1, "kb-gone"));
+    try testing.expect(!try categoryExists(db, 2, "kb-phon"));
+
+    try testing.expect(try applyWebEdit(db, 1, id, .{ .parent_uid = "kb-phon" }, "11111111111111111111111111111111", 10));
+    var d = (try digestsByIds(db, a, 1, &.{id}))[0];
+    try testing.expectEqualStrings("kb-phon", d.parent_uid);
+    try testing.expectEqualStrings("yeah", d.comment_str.?);
+    try testing.expect(try applyWebEdit(db, 1, id, .{ .parent_uid = "" }, "22222222222222222222222222222222", 20));
+    d = (try digestsByIds(db, a, 1, &.{id}))[0];
+    try testing.expectEqualStrings("", d.parent_uid);
 }

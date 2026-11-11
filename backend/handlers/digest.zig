@@ -1,8 +1,8 @@
 //! The browser's Digest: `/api/controlplane/digests…`, the signed-in person's
 //! own digests and categories, as their tablet's app synced them
-//! (`services/digest_web.zig`). The browser changes one thing, a digest's
-//! typed comment, which the tablet takes at its next sync
-//! (`digest.setComment` says why); everything else, the handwritten note
+//! (`services/digest_web.zig`). The browser changes two things, a digest's
+//! typed comment and its category, which the tablet takes at its next sync
+//! (`digest.applyWebEdit` says why); everything else, the handwritten note
 //! included, is the tablet's alone. Off with `config.digest_sync`, like the
 //! tablet's side: the listing then says `enabled: false` and an edit is refused.
 
@@ -69,8 +69,9 @@ const DigestsVO = struct {
     waiting: bool = false,
 };
 
-/// Absent: no change; "" removes the comment.
-const CommentReq = struct { comment: ?[]const u8 = null };
+/// Absent fields stay; at least one is given. `comment` "" removes the
+/// comment; `categoryUid` "" is Uncategorized.
+const EditReq = struct { comment: ?[]const u8 = null, categoryUid: ?[]const u8 = null };
 
 // ---- handlers ----
 
@@ -116,18 +117,26 @@ pub fn list(ctx: *Context, req: *Request, params: Params) anyerror!void {
     }, null);
 }
 
-/// PUT /api/controlplane/digests/:id {comment}: the digest's typed comment,
-/// "" for none. Only the comment: the tablet owns every other field.
-pub fn setComment(ctx: *Context, req: *Request, params: Params) anyerror!void {
+/// PUT /api/controlplane/digests/:id {comment?, categoryUid?}: the digest's
+/// typed comment ("" for none) and the category it is in ("" Uncategorized).
+/// Only those: the tablet owns every other field.
+pub fn edit(ctx: *Context, req: *Request, params: Params) anyerror!void {
     if (!ctx.config.digest_sync) return off(ctx, req);
     const id = reply.pathId(params) orelse return noDigest(ctx, req);
-    var parsed = json.readBody(CommentReq, ctx.gpa, req) catch return badRequest(ctx, req);
+    var parsed = json.readBody(EditReq, ctx.gpa, req) catch return badRequest(ctx, req);
     defer parsed.deinit();
-    const comment = cleanComment(parsed.value.comment orelse return badComment(ctx, req)) orelse return badComment(ctx, req);
+    const v = parsed.value;
+    if (v.comment == null and v.categoryUid == null) return badRequest(ctx, req);
+    var change: digest.WebEdit = .{};
+    if (v.comment) |c| change.comment = cleanComment(c) orelse return badComment(ctx, req);
+    if (v.categoryUid) |uid| {
+        if (!(digest.categoryExists(ctx.db, ctx.caller.?.user_id, uid) catch return serverError(ctx, req))) return noCategory(ctx, req);
+        change.parent_uid = uid;
+    }
     var raw: [16]u8 = undefined;
     ctx.io.random(&raw);
     const md5 = std.fmt.bytesToHex(raw, .lower);
-    const found = digest.setComment(ctx.db, ctx.caller.?.user_id, id, comment, &md5, nowMs(ctx)) catch return serverError(ctx, req);
+    const found = digest.applyWebEdit(ctx.db, ctx.caller.?.user_id, id, change, &md5, nowMs(ctx)) catch return serverError(ctx, req);
     if (!found) return noDigest(ctx, req);
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
@@ -165,6 +174,9 @@ fn off(ctx: *Context, req: *Request) anyerror!void {
 }
 fn noDigest(ctx: *Context, req: *Request) anyerror!void {
     return fail(ctx, req, .not_found, "NO_SUCH_DIGEST", "there is no such digest");
+}
+fn noCategory(ctx: *Context, req: *Request) anyerror!void {
+    return fail(ctx, req, .not_found, "NO_SUCH_CATEGORY", "there is no such category");
 }
 fn badComment(ctx: *Context, req: *Request) anyerror!void {
     return fail(ctx, req, .bad_request, "BAD_COMMENT", "a comment holds at most 2000 characters of text");

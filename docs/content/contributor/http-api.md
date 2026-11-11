@@ -205,7 +205,7 @@ The device routes' behaviour is in [Device protocol](@/contributor/device-protoc
 | PUT | `/api/controlplane/todo/order` | controlplane | `todoweb.reorder` |  |
 | GET | `/api/controlplane/digests` | controlplane | `digestweb.list` | read-only |
 | GET | `/api/controlplane/digests/:id/note/:md5` | controlplane | `digestweb.note` | streams |
-| PUT | `/api/controlplane/digests/:id` | controlplane | `digestweb.setComment` |  |
+| PUT | `/api/controlplane/digests/:id` | controlplane | `digestweb.edit` |  |
 | GET | `/api/backup-notice` | controlplane | `backups.notice` | read-only |
 | GET | `/api/admin/backups` | controlplane | `backups.list` | elevated admin |
 | PUT | `/api/admin/backups/dismissed` | controlplane | `backups.setDismissed` | elevated admin |

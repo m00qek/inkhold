@@ -278,8 +278,52 @@ test "the comment, edited in the browser: a new md5 the tablet takes, waiting un
     const too_long = try std.fmt.allocPrint(gpa, "{{\"comment\":\"{s}\"}}", .{long});
     defer gpa.free(too_long);
     try expectFailure((try put(f, &b, path, &ana.web, too_long)).body, "BAD_COMMENT");
-    try expectFailure((try put(f, &b, path, &ana.web, "{}")).body, "BAD_COMMENT");
+    try testing.expectEqual(@as(u16, 400), (try put(f, &b, path, &ana.web, "{}")).status);
     try expectFailure((try put(f, &b, path, &rui.web, "{\"comment\":\"mine\"}")).body, "NO_SUCH_DIGEST");
     const gone = try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/{d}", .{id + 100});
     try expectFailure((try put(f, &b, gone, &ana.web, "{\"comment\":\"x\"}")).body, "NO_SUCH_DIGEST");
+}
+
+test "a digest moved to another category in the browser: the tablet reads it there; only a live category of one's own" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var b: Bufs = .{};
+    const ana = try person(f, &b, "ana");
+    const rui = try person(f, &b, "rui");
+    _ = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary/group",
+        \\{"uniqueIdentifier":"kb-phon","name":"Phonétique","md5Hash":"g1","creationTime":1,"lastModifiedTime":1}
+    );
+    _ = try helpers.addId(f, &b.obuf, &b.reqbuf, &rui.tablet, "/api/file/add/summary/group",
+        \\{"uniqueIdentifier":"kb-rui","name":"Rui's","md5Hash":"g2","creationTime":1,"lastModifiedTime":1}
+    );
+    const id = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", helpers.nomad_add);
+    const before = try manifestRow(f, &b, &ana.tablet, id);
+
+    var pbuf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/{d}", .{id});
+    try harness.expectSuccess((try put(f, &b, path, &ana.web, "{\"categoryUid\":\"kb-phon\"}")).body);
+    {
+        var l = try listing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expectEqualStrings("kb-phon", l.value.digests[0].categoryUid);
+        try testing.expectEqualStrings("yeah", l.value.digests[0].comment.?);
+        try testing.expect(l.value.digests[0].waiting);
+    }
+    try testing.expect(!std.mem.eql(u8, &before.md5, &(try manifestRow(f, &b, &ana.tablet, id)).md5));
+    {
+        var body: [32]u8 = undefined;
+        const resp = try helpers.call(f, &b.obuf, &b.reqbuf, &ana.tablet, "POST", "/api/file/query/summary/id", try std.fmt.bufPrint(&body, "{{\"ids\":[{d}]}}", .{id}));
+        try testing.expect(std.mem.indexOf(u8, resp.body, "\"parentUniqueIdentifier\":\"kb-phon\"") != null);
+    }
+    // Back to Uncategorized; never into a category that is gone or someone else's.
+    try harness.expectSuccess((try put(f, &b, path, &ana.web, "{\"categoryUid\":\"\"}")).body);
+    try expectFailure((try put(f, &b, path, &ana.web, "{\"categoryUid\":\"kb-gone\"}")).body, "NO_SUCH_CATEGORY");
+    try expectFailure((try put(f, &b, path, &ana.web, "{\"categoryUid\":\"kb-rui\"}")).body, "NO_SUCH_CATEGORY");
+    // Both at once.
+    try harness.expectSuccess((try put(f, &b, path, &ana.web, "{\"comment\":\"moved\",\"categoryUid\":\"kb-phon\"}")).body);
+    var l = try listing(f, &b, &ana.web);
+    defer l.deinit();
+    try testing.expectEqualStrings("moved", l.value.digests[0].comment.?);
+    try testing.expectEqualStrings("kb-phon", l.value.digests[0].categoryUid);
 }
