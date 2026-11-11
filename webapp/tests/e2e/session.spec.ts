@@ -68,7 +68,7 @@ test.describe("session restore on load", () => {
     await page.goto("/");
     await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeVisible();
     // Something in each of the person's databases, their key, and a preference of the device's.
-    const names = ["sn-terms", "sn-doctext", "sn-thumbs", "sn-dims", "sn-nocover"];
+    const names = ["sn-terms", "sn-doctext", "sn-search-items", "sn-thumbs", "sn-dims", "sn-nocover"];
     await page.evaluate(async (dbs) => {
       for (const name of dbs) {
         await new Promise<void>((resolve, reject) => {

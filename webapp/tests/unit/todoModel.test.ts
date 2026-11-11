@@ -2,7 +2,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { TodoSnapshot, TodoTask } from "../../src/api/todoTypes";
-import { addTarget, byTabletOrder, canReorder, cards, dateLine, dropOrder, isOverdue, summary, withOrder, withoutTask, dayOffset, dueFromInput, dueLabel, inputFromDue, openCount, parseView, findTodos, searchTasks, sections, siblings, viewPath } from "../../src/pages/todo/todoModel";
+import { addTarget, byTabletOrder, canReorder, cards, dateLine, dropOrder, isOverdue, summary, withOrder, withoutTask, dayOffset, dueFromInput, dueLabel, inputFromDue, openCount, parseView,  sections, siblings, viewPath } from "../../src/pages/todo/todoModel";
 
 const NOW = new Date(2026, 10, 5, 9, 30).getTime();
 const DAY = 86_400_000;
@@ -154,58 +154,5 @@ describe("To-Do dates", () => {
     expect(s.tasks.find((t) => t.id === b.id)).toMatchObject({ listId: "fr", sort: 0 });
     expect(s.tasks.find((t) => t.id === a.id)).toMatchObject({ sort: 1 });
     expect(withoutTask(s, a.id).tasks.map((t) => t.id)).toEqual([b.id]);
-  });
-});
-
-describe("finding to-dos", () => {
-  it("by the library's rule: accents aside, words in any order, the note's name too", () => {
-    const a = task({ id: "a", title: "Revisar o passé composé" });
-    const b = task({ id: "b", title: "Haus of gabin", link: { noteId: "9", page: 27, name: "Apostila", text: null } });
-    const s = snap([a, b]);
-    expect(searchTasks(s, "passe compose").map((t) => t.id)).toEqual(["a"]);
-    expect(searchTasks(s, "composé revisar").map((t) => t.id)).toEqual(["a"]);
-    expect(searchTasks(s, "gabin apostila").map((t) => t.id)).toEqual(["b"]);
-    // No task has a word starting "abin": then the text anywhere in a title.
-    expect(searchTasks(s, "abin").map((t) => t.id)).toEqual(["b"]);
-    expect(searchTasks(s, "passe compose zzz")).toEqual([]);
-  });
-});
-
-describe("finding to-dos: lists, lassoed words, typos, marks", () => {
-  const casa = { id: "casa", title: "Casa", waiting: false };
-  const withLists = (tasks: TodoTask[]): TodoSnapshot => ({ ...snap(tasks), lists: [casa] });
-  const ligar = task({ id: "l", title: "Ligar para o dentista", listId: "casa" });
-  const haus = task({ id: "h", title: "Comprar pão", link: { noteId: "9", page: 27, name: "Apostila", text: "Haus of gabin" } });
-
-  it("a list named like the query is found, and so are its tasks", () => {
-    const f = findTodos(withLists([ligar, haus]), "casa");
-    expect(f.lists).toEqual([{ id: "casa", name: "Casa" }]);
-    expect(f.tasks.map((t) => t.id)).toEqual(["l"]);
-  });
-
-  it("words in any order across title and list", () => {
-    expect(findTodos(withLists([ligar, haus]), "casa dentista").tasks.map((t) => t.id)).toEqual(["l"]);
-  });
-
-  it("the words it was lassoed from still find a renamed task", () => {
-    expect(findTodos(withLists([ligar, haus]), "gabin").tasks.map((t) => t.id)).toEqual(["h"]);
-  });
-
-  it("marks the matched words in the title, accents aside", () => {
-    const f = findTodos(withLists([ligar, haus]), "dentista casa");
-    expect(f.marks("Ligar para o dentista").map(([a, b]) => "Ligar para o dentista".slice(a, b))).toEqual(["dentista"]);
-    expect(findTodos(withLists([haus]), "pao").marks("Comprar pão").map(([a, b]) => "Comprar pão".slice(a, b))).toEqual(["pão"]);
-  });
-
-  it("when nothing matches as typed, the nearest spelling, said, as the notes do", () => {
-    const f = findTodos(withLists([ligar, haus]), "dentsta");
-    expect(f.tasks.map((t) => t.id)).toEqual(["l"]);
-    expect(f.expansions).toEqual([{ typed: "dentsta", matched: "dentista" }]);
-    expect(f.marks("Ligar para o dentista").length).toBe(1);
-  });
-
-  it("no typo answer for words too short to correct, or too far off", () => {
-    expect(findTodos(withLists([ligar]), "pra").tasks).toEqual([]);
-    expect(findTodos(withLists([ligar]), "xyzzyq").tasks).toEqual([]);
   });
 });

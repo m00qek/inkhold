@@ -10,6 +10,7 @@
 
 import type { Place } from "../../ui/place";
 import type { TodoPage } from "../todo/todoPage";
+import type { SearchItems } from "./searchItems";
 import type { DigestPage } from "../digest/digestPage";
 import type { DigestInk } from "../digest/digestInk";
 import type { DestinationMode } from "./libraryModes";
@@ -109,6 +110,8 @@ export interface LibraryCtx {
   todo: TodoPage;
   /** The Digest destination; built at start, like To-Do. */
   digest: DigestPage;
+  /** The apps' answers as search rows, kept for offline search. */
+  searchItems: SearchItems;
   bin: BinController;
 
   // ---- the parts ----

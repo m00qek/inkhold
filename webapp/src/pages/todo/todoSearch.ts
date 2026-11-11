@@ -1,12 +1,16 @@
-// To-dos in the library-wide search: the browser already holds them all, so
-// they are matched here (`todoModel.findTodos`) and painted as their own
-// group: the lists named like the query, then the tasks, each with the
-// matched words marked, and the typo fallback said as the notes say it.
+// To-dos in the library-wide search: a row in the search index per task and
+// per list (`todoRows`), matched there like everything else, and painted here
+// as their own group: the lists named like the query, then the tasks, each
+// with the matched words marked, and the typo ladder said as the notes say it.
 
 import { el } from "../../ui/dom";
 import { ICONS, svg } from "../../ui/icons";
 import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
-import { findTodos, homeView, openCount, viewPath, type TodoView } from "./todoModel";
+import { byTabletOrder, homeView, listName, newestDone, openCount, viewPath, type TodoView } from "./todoModel";
+import { insideQuery, matchesName, nameQuery, queryMarks, wordMarks, type NameQuery } from "../../search/match";
+import { fold } from "../../search/fold";
+import type { ItemRow } from "../../search/itemRows";
+import type { Expansion } from "../../search/localSearch";
 import { taskMeta } from "./todoView";
 import { expansionNotice } from "../noteSearch";
 import { onPlainClick } from "../../ui/link";
@@ -28,17 +32,77 @@ const plural = (n: number, one: string) => `${n} ${n === 1 ? one : `${one}s`}`;
 
 const onOpen = (a: HTMLElement, open: () => void) => onPlainClick(a, open);
 
+/** What a to-do is found by: its title, the notebook and words it was lassoed from, and its list. */
+function searchText(s: TodoSnapshot, t: TodoTask): string {
+  return [t.title, t.link?.name, t.link?.text, listName(s, t.listId)].filter(Boolean).join("\n");
+}
+
+const TASK = "t:";
+const LIST = "l:";
+
+/** The search index's rows for To-Do: one per task, one per list by its name, the Inbox too (key `l:`). */
+export function todoRows(s: TodoSnapshot): ItemRow[] {
+  if (!s.enabled) return [];
+  return [
+    ...s.tasks.map((t) => ({ key: TASK + t.id, text: searchText(s, t) })),
+    { key: LIST, text: "Inbox" },
+    ...s.lists.map((l) => ({ key: LIST + l.id, text: l.title })),
+  ];
+}
+
+export interface TodoFind {
+  /** Open tasks in list order, then done ones, newest first. */
+  readonly tasks: TodoTask[];
+  /** Lists named like the query; null is the Inbox. */
+  readonly lists: { readonly id: string | null; readonly name: string }[];
+  /** What the typo ladder put in place of the typed words; empty when they matched as typed. */
+  readonly expansions: readonly Expansion[];
+  /** Where the matched words are in a title or a list's name. */
+  marks(text: string): [number, number][];
+}
+
+/**
+ * The to-dos the index found (`keys`, `todoRows`'), in the tablet's order.
+ * When none matched as typed, the typed text anywhere in a to-do comes first
+ * ("abin" in "gabin", `match.ts`), then the typo ladder's answer.
+ */
+export function findTodos(s: TodoSnapshot, q: string, keys: readonly string[], expansions: readonly Expansion[]): TodoFind {
+  const lists = [{ id: null as string | null, name: "Inbox" }, ...s.lists.map((l) => ({ id: l.id as string | null, name: l.title }))];
+  if (keys.length > 0 && expansions.length === 0) return found(s, keys, lists, [], nameQuery(q));
+  const inside = insideQuery(q);
+  const tasks = s.tasks.filter((t) => matchesName(searchText(s, t), inside));
+  const named = lists.filter((l) => matchesName(l.name, inside));
+  if (tasks.length > 0 || named.length > 0) return { tasks: ordered(s, tasks), lists: named, expansions: [], marks: (text) => queryMarks(text, inside) };
+  return found(s, keys, lists, expansions, nameQuery(q));
+}
+
+function found(s: TodoSnapshot, keys: readonly string[], lists: TodoFind["lists"], expansions: readonly Expansion[], query: NameQuery | null): TodoFind {
+  const want = new Set(keys);
+  const tasks = s.tasks.filter((t) => want.has(TASK + t.id));
+  const named = lists.filter((l) => want.has(LIST + (l.id ?? "")));
+  const matched = new Set(expansions.map((e) => fold(e.matched)));
+  const marks = (text: string) =>
+    matched.size === 0 ? queryMarks(text, query) : [...queryMarks(text, query), ...wordMarks(text, (w) => matched.has(w))].sort((a, b) => a[0] - b[0]).filter((m, i, all) => i === 0 || m[0] !== all[i - 1]![0]);
+  return { tasks: ordered(s, tasks), lists: named, expansions, marks };
+}
+
+function ordered(s: TodoSnapshot, hit: TodoTask[]): TodoTask[] {
+  const listOrder = new Map<string | null, number>([[null, 0], ...s.lists.map((l, i): [string, number] => [l.id, i + 1])]);
+  const open = hit.filter((t) => !t.done).sort((a, b) => (listOrder.get(a.listId) ?? 0) - (listOrder.get(b.listId) ?? 0) || byTabletOrder(a, b));
+  const done = hit.filter((t) => t.done).sort(newestDone);
+  return [...open, ...done];
+}
+
 /** Null when nothing matched (or To-Do is off): the search says nothing about to-dos. */
 export function todoHits(
   snap: TodoSnapshot | null,
-  q: string,
+  found: TodoFind,
   now: number,
   open: (task: TodoTask) => void,
   chip: (task: TodoTask) => HTMLElement | null,
   openList: (view: TodoView) => void,
 ): HTMLElement | null {
   if (!snap?.enabled) return null;
-  const found = findTodos(snap, q);
   if (found.tasks.length === 0 && found.lists.length === 0) return null;
 
   const listRows = found.lists.map((l) => {

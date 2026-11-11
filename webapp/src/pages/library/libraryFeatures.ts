@@ -14,7 +14,7 @@ import { createCardActions } from "../cardActions";
 import { createHistoryController, type HistoryController } from "../historyPanel";
 import { createGallerySearch, type GallerySearch } from "../gallerySearch";
 import { BIN_KEY } from "../bin/bin";
-import { todoHits } from "../todo/todoSearch";
+import { findTodos, todoHits } from "../todo/todoSearch";
 import { homeView, viewPath } from "../todo/todoModel";
 import { type AccountHost } from "../account/account";
 import type { LibraryCtx } from "./libraryContext";
@@ -132,9 +132,15 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     moreResults: (q) => {
       // To-dos read at start can be stale: a search asks again (`load` repaints).
       ctx.todo.freshen();
+      const snap = ctx.searchItems.todo();
+      if (!snap?.enabled) return null;
+      const s = st.searchState;
+      const answered = s.kind === "results" && s.query === q.trim();
+      const found = findTodos(snap, q, answered ? s.items.todo : [], answered ? s.expansions : []);
+      if (found.tasks.length === 0 && found.lists.length === 0) return null;
       return todoHits(
-        ctx.todo?.snapshot() ?? null,
-        q,
+        snap,
+        found,
         Date.now(),
         (t) => {
           ctx.todo.reveal(t.id);

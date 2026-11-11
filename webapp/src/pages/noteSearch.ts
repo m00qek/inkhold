@@ -49,6 +49,8 @@ export interface NoteSearchDeps {
 
 export interface NoteSearchController {
   setQuery(raw: string): void;
+  /** Asks the query on screen again (what it searches changed), leaving its answer up until the new one. */
+  again(): void;
   reset(): void;
 }
 
@@ -123,6 +125,13 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
         timer = undefined;
         void run(query, mine);
       }, debounceMs);
+    },
+
+    again(): void {
+      if (active === null || active.length < MIN_GLOBAL_QUERY_LEN) return;
+      const query = active;
+      cancelPending();
+      void run(query, token);
     },
 
     reset(): void {

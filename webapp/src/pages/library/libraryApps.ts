@@ -10,6 +10,8 @@ import { createDigestInk } from "../digest/digestInk";
 import { createDigestThumbs } from "../digest/digestThumbs";
 import { parsePlace, placePath } from "../digest/digestModel";
 import type { LibraryCtx } from "./libraryContext";
+import { createSearchItems } from "./searchItems";
+import { openItemStore } from "../../cache/itemStore";
 
 /** The handwriting each app draws, kept in the persistent thumbnail store. */
 export function installAppInks(ctx: LibraryCtx): void {
@@ -21,6 +23,7 @@ export function installAppInks(ctx: LibraryCtx): void {
 /** Both pages, each read once at start: the rail shows an app only when the server keeps its data. */
 export function installAppPages(ctx: LibraryCtx): void {
   const { api, content, gallery, st } = ctx;
+  ctx.searchItems = createSearchItems({ service: ctx.searchService, store: openItemStore(), onChanged: () => ctx.search.again() });
   ctx.todo = createTodoPage({
     api,
     content,
@@ -41,7 +44,8 @@ export function installAppPages(ctx: LibraryCtx): void {
     handled: ctx.handled,
     onChanged: () => {
       ctx.rail.build();
-      // New to-dos reach an open search too.
+      // New to-dos reach an open search too: their rows change, and it asks again.
+      ctx.searchItems.setTodo(ctx.todo.snapshot());
       if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
     },
     go: (view) => go(todoHref(view)),
@@ -59,7 +63,10 @@ export function installAppPages(ctx: LibraryCtx): void {
     setMode: (open) => ctx.modes.setDestinationMode("digest", open),
     toast: ctx.toast,
     handled: ctx.handled,
-    onChanged: () => ctx.rail.build(),
+    onChanged: () => {
+      ctx.rail.build();
+      ctx.searchItems.setDigest(ctx.digest.snapshot());
+    },
     go: (path) => go(digestHref(path)),
     ink: ctx.digestInk,
     thumbs: createDigestThumbs({ api, thumbnails: ctx.thumbnails }),

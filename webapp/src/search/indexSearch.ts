@@ -77,6 +77,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   let pageCounts = new Map<string, number>();
   /** The last rows of each kind, for an engine made later. */
   const itemRows = new Map<ItemKind, readonly ItemRow[]>();
+  const hasItems = () => [...itemRows.values()].some((rows) => rows.length > 0);
 
   async function build(): Promise<SearchEngine> {
     const target = rows;
@@ -120,7 +121,8 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
 
   return {
     get ready() {
-      return (live !== null || (listing?.().length ?? 0) > 0) && sync.store.available;
+      // Names, to-dos and digests answer on their own, without a stored page.
+      return ((live !== null || (listing?.().length ?? 0) > 0) && sync.store.available) || hasItems();
     },
 
     async sync(signal) {
@@ -163,7 +165,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
 
     async search(query, signal): Promise<LocalResults> {
       // The same two sources `ready` accepts, so an offline cold start works.
-      if (!live && (listing?.().length ?? 0) === 0) throw new Error("local search has nothing to answer from");
+      if (!live && (listing?.().length ?? 0) === 0 && !hasItems()) throw new Error("local search has nothing to answer from");
       const idx = await engine();
       // The build is not abortable; a superseded search must just not paint.
       if (signal?.aborted) throw abortError();
