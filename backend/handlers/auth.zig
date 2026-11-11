@@ -148,7 +148,14 @@ pub fn logout(ctx: *Context, req: *Request, params: Params) anyerror!void {
     if (transport.presentedToken(req)) |tok| svc.logout(tok) catch |e| std.log.warn("logout: session not revoked: {t}", .{e});
     var cbuf: [128]u8 = undefined;
     const cleared = try sessionCookie(&cbuf, "", ctx.config.tls.enabled, 0); // Max-Age=0 expires it
-    try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, cleared);
+    // The browser's HTTP cache keeps opened pages and files for a year
+    // (`immutable`), and only the server can empty it; the app clears its own
+    // storage itself (`webapp/src/cache/forget.ts`). A tablet ignores it.
+    const headers = [_]std.http.Header{
+        .{ .name = "set-cookie", .value = cleared },
+        .{ .name = "clear-site-data", .value = "\"cache\"" },
+    };
+    try json.respondWith(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, &headers);
 }
 
 pub fn me(ctx: *Context, req: *Request, params: Params) anyerror!void {

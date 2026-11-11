@@ -4,6 +4,7 @@
 // silent no-op store.
 
 import { budgetForQuota, planEviction, type PersistedMeta } from "./idb";
+import { yieldOnVersionChange } from "./idbLife";
 import type { DocumentText, TextSegment } from "../search/docText";
 
 export interface TextKey {
@@ -96,7 +97,9 @@ export interface TextStoreOptions {
   budgetBytes?: number;
 }
 
-const DB_NAME = "sn-doctext";
+/** Documents' text, for excerpts and find. Cleared at sign-out (`forget.ts`). */
+export const TEXT_DB = "sn-doctext";
+const DB_NAME = TEXT_DB;
 const TEXT = "text";
 const META = "meta";
 /** v2 drops v1's `pins` store. */
@@ -173,7 +176,7 @@ export function openTextStore(opts: TextStoreOptions = {}): TextStore {
           // Records it protected are corrected by the next prefetch pass.
           if (d.objectStoreNames.contains("pins")) d.deleteObjectStore("pins");
         };
-        open.onsuccess = () => resolve(open.result);
+        open.onsuccess = () => resolve(yieldOnVersionChange(open.result));
         open.onerror = () => reject(open.error);
       });
       await seedMetas(db);

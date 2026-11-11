@@ -2,6 +2,8 @@
 // WebP bytes (raw RGBA was 20-40x larger; bytes, not Blobs: `StoredRecord`), under our own LRU byte cap clamped to
 // the origin quota. Never a source of truth: any failure degrades to a no-op.
 
+import { yieldOnVersionChange } from "./idbLife";
+
 /** Per-entry bookkeeping, mirrored in memory so eviction never reads records. */
 export interface PersistedMeta {
   key: string;
@@ -60,7 +62,9 @@ export interface ThumbStoreOptions {
   budgetBytes?: number;
 }
 
-const DB_NAME = "sn-thumbs";
+/** Rendered thumbnails and page pictures. Cleared at sign-out (`forget.ts`). */
+export const THUMBS_DB = "sn-thumbs";
+const DB_NAME = THUMBS_DB;
 const STORE = "thumbs";
 const VERSION = 1;
 const DEFAULT_BUDGET = 100 * 1024 * 1024;
@@ -134,7 +138,7 @@ export function openThumbStore(opts: ThumbStoreOptions = {}): PersistentThumbSto
           const d = open.result;
           if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE, { keyPath: "key" });
         };
-        open.onsuccess = () => resolve(open.result);
+        open.onsuccess = () => resolve(yieldOnVersionChange(open.result));
         open.onerror = () => reject(open.error);
       });
 
@@ -260,7 +264,8 @@ export interface DimsStore {
   clear(): Promise<void>;
 }
 
-const DIMS_DB = "sn-dims";
+/** Page and image sizes by file hash. Cleared at sign-out (`forget.ts`). */
+export const DIMS_DB = "sn-dims";
 const DIMS_STORE = "dims";
 const DIMS_VERSION = 1;
 
@@ -292,7 +297,7 @@ export function openDimsStore(opts: { dbName?: string } = {}): DimsStore {
         const d = open.result;
         if (!d.objectStoreNames.contains(DIMS_STORE)) d.createObjectStore(DIMS_STORE, { keyPath: "hash" });
       };
-      open.onsuccess = () => resolve(open.result);
+      open.onsuccess = () => resolve(yieldOnVersionChange(open.result));
       open.onerror = () => resolve(null);
     } catch {
       resolve(null);
@@ -338,7 +343,8 @@ export interface NoCoverStore {
   put(hash: string): Promise<void>;
 }
 
-const NOCOVER_DB = "sn-nocover";
+/** Which files have no cover, by hash. Cleared at sign-out (`forget.ts`). */
+export const NOCOVER_DB = "sn-nocover";
 const NOCOVER_STORE = "nocover";
 const NOCOVER_VERSION = 1;
 
@@ -362,7 +368,7 @@ export function openNoCoverStore(opts: { dbName?: string } = {}): NoCoverStore {
         const d = open.result;
         if (!d.objectStoreNames.contains(NOCOVER_STORE)) d.createObjectStore(NOCOVER_STORE, { keyPath: "hash" });
       };
-      open.onsuccess = () => resolve(open.result);
+      open.onsuccess = () => resolve(yieldOnVersionChange(open.result));
       open.onerror = () => resolve(null);
     } catch {
       resolve(null);

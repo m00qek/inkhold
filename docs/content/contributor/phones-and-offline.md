@@ -53,7 +53,8 @@ own files and the listings a person browses with: the folder tree, the bin,
 the storage meter. That is names and counts, never a file. Without a network
 the app opens, shows the library as last seen, and says "needs a connection"
 when a notebook is opened, instead of a viewer that never fills. Signing out,
-or the server refusing the session, forgets the listings.
+or the server refusing the session, forgets the listings and everything else
+the browser keeps of that person's library.
 
 ```mermaid
 flowchart TD

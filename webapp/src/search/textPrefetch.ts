@@ -73,7 +73,8 @@ export interface Refusals {
   add(key: string): void;
 }
 
-const REFUSALS_KEY = "inkhold:text-refused";
+/** Files whose text was refused, by key: about the person's files, so cleared at sign-out (`forget.ts`). */
+export const REFUSALS_KEY = "inkhold:text-refused";
 /** Enough for any household library; the oldest are forgotten first. */
 const REFUSALS_MAX = 500;
 
