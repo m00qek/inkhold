@@ -211,7 +211,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
       (e: unknown) => {
         busy = false;
         if (!host.handled(e)) host.toast("Couldn't move the digest. Check your connection and try again.");
-        paint();
+        // A comment being written is never repainted away.
+        if (editing === null) paint();
       },
     );
   }

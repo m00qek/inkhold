@@ -111,11 +111,31 @@ describe("a digest's source page", () => {
     const second = placed(thumbs.holder(d, "t"));
     await vi.waitFor(() => expect(second.querySelector("img")).not.toBeNull());
     const now = second.querySelector("img")!.getAttribute("src");
+    const made = vi.spyOn(URL, "createObjectURL");
+    const revoked = vi.spyOn(URL, "revokeObjectURL");
     slow(new Blob(["old"]));
     await new Promise((r) => setTimeout(r, 0));
     expect(first.querySelector("img")).toBeNull();
+    // Its picture, let go while it was drawn, is not kept.
+    expect(revoked).toHaveBeenCalledWith(made.mock.results[0]!.value);
+    made.mockRestore();
+    revoked.mockRestore();
     // A repaint shows the new version, at once.
     expect(thumbs.holder(d, "t")!.querySelector("img")!.getAttribute("src")).toBe(now);
+  });
+
+  it("the page shown longest ago goes, not one shown again since", async () => {
+    const { thumbs } = setup(meta("pdf", 20));
+    const at = (page: number) => digest("Document/a.pdf", page);
+    for (let page = 1; page <= 12; page++) {
+      const h = placed(thumbs.holder(at(page), "t"));
+      await vi.waitFor(() => expect(h.querySelector("img")).not.toBeNull());
+    }
+    expect(placed(thumbs.holder(at(1), "t")).querySelector("img")).not.toBeNull(); // back to the first
+    const h13 = placed(thumbs.holder(at(13), "t"));
+    await vi.waitFor(() => expect(h13.querySelector("img")).not.toBeNull());
+    expect(thumbs.holder(at(1), "t")!.querySelector("img")).not.toBeNull();
+    expect(thumbs.holder(at(2), "t")!.querySelector("img")).toBeNull();
   });
 
   it("keeps a dozen pages' pictures, letting the oldest go", async () => {

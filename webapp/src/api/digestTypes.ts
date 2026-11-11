@@ -57,7 +57,7 @@ export interface DigestEdit {
 /** The app's own limit on a comment, in characters. */
 export const MAX_COMMENT = 2000;
 
-/** A comment as the server keeps it: without the spaces, tabs and line breaks around it (`handlers/digest.zig`). */
+/** A comment as the server keeps and lists it: without the spaces, tabs and line breaks around it (`trimmed` in `handlers/digest.zig`). */
 export function trimComment(text: string): string {
   return text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
 }

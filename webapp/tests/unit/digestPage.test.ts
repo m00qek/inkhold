@@ -266,6 +266,22 @@ describe("the Digest page", () => {
     page.destroy();
   });
 
+  it("a failed move never rebuilds a comment box opened meanwhile", async () => {
+    let refuse: (e: Error) => void = () => {};
+    const h = host(async () => structuredClone(one), () => new Promise<void>((_ok, no) => (refuse = no)));
+    const page = createDigestPage(h);
+    page.open({ ...ALL, digest: "1" });
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-move")).not.toBeNull());
+    h.content.querySelector<HTMLButtonElement>("#digest-move")!.click();
+    [...document.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]")].find((b) => b.textContent?.includes("Grammar"))!.click();
+    h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.click();
+    const box = h.content.querySelector<HTMLTextAreaElement>("#digest-comment")!;
+    refuse(new Error("offline"));
+    await vi.waitFor(() => expect(h.toasts.at(-1)).toMatch(/Couldn't move the digest/));
+    expect(h.content.querySelector("#digest-comment")).toBe(box);
+    page.destroy();
+  });
+
   it("opening a digest checks its file's page picture again", async () => {
     const h = host(async () => structuredClone(one));
     const page = createDigestPage(h);

@@ -198,17 +198,23 @@ fn badComment(ctx: *Context, req: *Request) anyerror!void {
     return fail(ctx, req, .bad_request, "BAD_COMMENT", "a comment holds at most 2000 characters of text");
 }
 
-/// A comment as listed: as the browser's edit would keep it, without the
-/// blank space the tablet may have left around it; null when there is none.
+/// A comment without the blank space around it: what is listed and what an
+/// edit keeps, the one rule for both (the browser's `trimComment` is its copy).
+fn trimmed(c: []const u8) []const u8 {
+    return std.mem.trim(u8, c, " \t\r\n");
+}
+
+/// A comment as listed, without the blank space the tablet may have left
+/// around it; null when there is none.
 fn listedComment(c: ?[]const u8) ?[]const u8 {
-    const t = std.mem.trim(u8, c orelse return null, " \t\r\n");
+    const t = trimmed(c orelse return null);
     return if (t.len == 0) null else t;
 }
 
-/// The comment without the blank space around it; null when it is not text
-/// or longer than the app holds.
+/// The comment as an edit keeps it; null when it is not text or longer than
+/// the app holds.
 fn cleanComment(v: []const u8) ?[]const u8 {
-    const t = std.mem.trim(u8, v, " \t\r\n");
+    const t = trimmed(v);
     const n = std.unicode.utf8CountCodepoints(t) catch return null;
     return if (n > max_comment_chars) null else t;
 }
