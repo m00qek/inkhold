@@ -80,10 +80,11 @@ test.describe("Digest", () => {
     await expect(p.getByRole("button", { name: "Add a comment" })).toBeFocused();
 
     await p.getByRole("button", { name: "Add a comment" }).click();
-    await box.fill("Every three months, or the boiler scales");
+    await box.fill("Every three months,\nor the boiler scales");
     await p.getByRole("button", { name: "Save comment" }).click();
     await expect(box).toHaveCount(0);
-    await expect(p).toContainText("Every three months, or the boiler scales");
+    // Plain text, its line break kept.
+    await expect(p.locator(".digest-panel__part p").first()).toHaveText("Every three months,\nor the boiler scales", { useInnerText: true });
     await expect(p).toContainText("Waiting for the tablet");
     await expect(card(page, "Descale")).toContainText("Waiting for the tablet");
     await expect(p.getByRole("button", { name: "Edit" })).toBeFocused();

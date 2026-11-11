@@ -238,6 +238,7 @@
   margin: 0;
   color: var(--ink-soft);
   overflow-wrap: anywhere;
+  white-space: pre-line;
 }
 .digest-card__meta {
   display: flex;
@@ -322,9 +323,11 @@
 .digest-panel__part h3 {
   margin-bottom: var(--sp-2);
 }
+/* A comment is plain text, as on the tablet: its line breaks are its own. */
 .digest-panel__part p {
   margin: 0;
   overflow-wrap: anywhere;
+  white-space: pre-line;
 }
 /* The passage against a rule, the way a quote sits in a notebook. */
 .digest-panel__text {
