@@ -10,7 +10,7 @@ import type { DigestEdit, DigestSnapshot } from "../../src/api/digestTypes";
 
 const ink: DigestInk = { picture: async () => null, holder: () => null };
 
-function host(digests: () => Promise<DigestSnapshot>, digestEdit: (id: string, c: DigestEdit) => Promise<void> = async () => {}): DigestHost & { changed: number; toasts: string[] } {
+function host(digests: () => Promise<DigestSnapshot>, digestEdit: (id: string, c: DigestEdit) => Promise<void> = async () => {}): DigestHost & { changed: number; toasts: string[]; refreshed: number } {
   const h = {
     api: { digests, digestEdit },
     content: document.createElement("div"),
@@ -25,9 +25,10 @@ function host(digests: () => Promise<DigestSnapshot>, digestEdit: (id: string, c
     onChanged: () => void h.changed++,
     go: () => {},
     ink,
-    thumbs: { holder: () => null, refresh: () => {} },
+    thumbs: { holder: () => null, refresh: () => void h.refreshed++ },
     openFile: () => {},
     changed: 0,
+    refreshed: 0,
     toasts: [] as string[],
   };
   return h;
@@ -217,6 +218,60 @@ describe("the Digest page", () => {
     box.dispatchEvent(new Event("input"));
     h.content.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
     await vi.waitFor(() => expect(sent).toEqual([{ comment: "kept\u00a0" }]));
+    page.destroy();
+  });
+
+  it("a tablet comment with blank space around it, saved untouched, sends nothing", async () => {
+    const server = { ...structuredClone(one), digests: [{ ...one.digests[0]!, comment: "Note\n" }] };
+    const sent: DigestEdit[] = [];
+    const h = host(async () => structuredClone(server), async (_id, c) => void sent.push(c));
+    const page = createDigestPage(h);
+    page.open({ ...ALL, digest: "1" });
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-comment-edit")).not.toBeNull());
+    h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.click();
+    h.content.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+    expect(h.content.querySelector("#digest-comment")).toBeNull();
+    expect(sent).toEqual([]);
+    page.destroy();
+  });
+
+  it("a move's repaint never rebuilds a comment box opened meanwhile", async () => {
+    let server = structuredClone(one);
+    let moved: () => void = () => {};
+    const h = host(
+      async () => structuredClone(server),
+      () =>
+        new Promise<void>((r) => {
+          moved = () => {
+            server = { ...server, digests: server.digests.map((d) => ({ ...d, categoryUid: "kb-1", waiting: true })) };
+            r();
+          };
+        }),
+    );
+    const page = createDigestPage(h);
+    page.open({ ...ALL, digest: "1" });
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-move")).not.toBeNull());
+    h.content.querySelector<HTMLButtonElement>("#digest-move")!.click();
+    [...document.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]")].find((b) => b.textContent?.includes("Grammar"))!.click();
+    // While the move is out, the comment is opened and typed into.
+    h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.click();
+    const box = h.content.querySelector<HTMLTextAreaElement>("#digest-comment")!;
+    box.value = "half a thought";
+    box.dispatchEvent(new Event("input"));
+    moved();
+    await vi.waitFor(() => expect(h.toasts.at(-1)).toBe("Moved to Grammar."));
+    await page.load(); // a poll, answering as the last
+    expect(h.content.querySelector("#digest-comment")).toBe(box);
+    expect(box.value).toBe("half a thought");
+    page.destroy();
+  });
+
+  it("opening a digest checks its file's page picture again", async () => {
+    const h = host(async () => structuredClone(one));
+    const page = createDigestPage(h);
+    page.open(ALL);
+    page.open({ ...ALL, digest: "1" });
+    expect(h.refreshed).toBe(2);
     page.destroy();
   });
 

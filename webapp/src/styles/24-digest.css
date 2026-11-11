@@ -54,7 +54,7 @@
 }
 .digest-tabs {
   display: flex;
-  gap: 2px;
+  gap: calc(var(--sp-1) / 2);
   width: fit-content;
   margin-bottom: var(--sp-4);
   padding: var(--sp-1);
@@ -66,7 +66,8 @@
   align-items: center;
   min-height: var(--control-h);
   padding: 0 var(--sp-4);
-  border-radius: 6px;
+  /* Inside the bar's corner, by its padding. */
+  border-radius: calc(var(--radius-card) - var(--sp-1));
   color: var(--ink-soft);
   text-decoration: none;
 }

@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // A digest's source page, small: which digests have one, the page it shows,
-// a page the file no longer has, and a refresh that redraws only a changed file.
+// a page the file no longer has, a refresh that redraws only a changed file,
+// an old draw answering late, and how many pages are kept.
 
 import { describe, it, expect, vi } from "vitest";
 import { createDigestThumbs } from "../../src/pages/digest/digestThumbs";
@@ -15,10 +16,9 @@ const digest = (path: string, page: number | null, fileId: string | null = "9"):
 const meta = (fileType: string, pages: number): NoteMeta =>
   ({ id: "9", name: "a", fileType, fileHash: "h", size: 1, annotationsId: null, pages: Array.from({ length: pages }, (_, i) => ({ index: i, hash: `p${i}` })) }) as unknown as NoteMeta;
 
-function setup(first: NoteMeta) {
+function setup(first: NoteMeta, getThumbnail = vi.fn(async (_req: unknown, _kind: string) => new Blob(["png"]))) {
   let m = first;
   const getNoteMeta = vi.fn(async () => m);
-  const getThumbnail = vi.fn(async () => new Blob(["png"]));
   const thumbs = createDigestThumbs({ api: { getNoteMeta }, thumbnails: { getThumbnail } as never });
   return { thumbs, getNoteMeta, getThumbnail, becomes: (next: NoteMeta) => void (m = next) };
 }
@@ -93,5 +93,42 @@ describe("a digest's source page", () => {
     const again = placed(thumbs.holder(d, "t"));
     await vi.waitFor(() => expect(again.querySelector("img")).toBeNull());
     expect(again.classList.contains("has-thumb")).toBe(false);
+  });
+
+  it("an old version's draw answering after the new one's changes nothing", async () => {
+    let slow: (b: Blob) => void = () => {};
+    let calls = 0;
+    const getThumbnail = vi.fn(async () => {
+      calls++;
+      return calls === 1 ? new Promise<Blob>((r) => (slow = r)) : new Blob(["new"]);
+    });
+    const { thumbs, becomes } = setup(meta("pdf", 3), getThumbnail);
+    const d = digest("Document/a.pdf", 1);
+    const first = placed(thumbs.holder(d, "t"));
+    await vi.waitFor(() => expect(calls).toBe(1));
+    becomes({ ...meta("pdf", 3), fileHash: "h2" } as NoteMeta);
+    thumbs.refresh();
+    const second = placed(thumbs.holder(d, "t"));
+    await vi.waitFor(() => expect(second.querySelector("img")).not.toBeNull());
+    const now = second.querySelector("img")!.getAttribute("src");
+    slow(new Blob(["old"]));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(first.querySelector("img")).toBeNull();
+    // A repaint shows the new version, at once.
+    expect(thumbs.holder(d, "t")!.querySelector("img")!.getAttribute("src")).toBe(now);
+  });
+
+  it("keeps a dozen pages' pictures, letting the oldest go", async () => {
+    const revoked = vi.spyOn(URL, "revokeObjectURL");
+    const { thumbs, getThumbnail } = setup(meta("pdf", 20));
+    for (let page = 1; page <= 13; page++) {
+      const h = placed(thumbs.holder(digest("Document/a.pdf", page), "t"));
+      await vi.waitFor(() => expect(h.querySelector("img")).not.toBeNull());
+    }
+    expect(revoked).toHaveBeenCalledTimes(1);
+    expect(thumbs.holder(digest("Document/a.pdf", 13), "t")!.querySelector("img")).not.toBeNull();
+    expect(thumbs.holder(digest("Document/a.pdf", 1), "t")!.querySelector("img")).toBeNull();
+    await vi.waitFor(() => expect(getThumbnail).toHaveBeenCalledTimes(14));
+    revoked.mockRestore();
   });
 });

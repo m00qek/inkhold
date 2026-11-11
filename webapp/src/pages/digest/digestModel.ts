@@ -158,7 +158,6 @@ export function opensAtPage(d: Digest): boolean {
   return d.source.fileId !== null && (path.endsWith(".pdf") || path.endsWith(".note"));
 }
 
-/** At most `max` characters of `text`, cut at a word, with "…" when cut: a control's text, not a whole passage. */
 /** What a digest from a changed file says: its page may not hold the passage any more. */
 export function changedLine(d: Digest): string {
   return d.source.page === null
@@ -166,6 +165,7 @@ export function changedLine(d: Digest): string {
     : `This file has changed since the digest was taken: page ${d.source.page} may no longer hold the passage.`;
 }
 
+/** At most `max` characters of `text`, cut at a word, with "…" when cut: a control's text, not a whole passage. */
 export function shorten(text: string, max = 240): string {
   const flat = text.replace(/\s+/g, " ").trim();
   if (flat.length <= max) return flat;

@@ -82,7 +82,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
   let busy = false;
   /**
    * The page's own change is done: the next answer repaints, even one like
-   * the last, so its form or busy state goes. Whichever load answers first.
+   * the last, so its form or busy state goes. Whichever load answers first;
+   * any paint settles it.
    */
   let repaintDue = false;
   /**
@@ -99,10 +100,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
       if (mine !== loadToken) return;
       answeredAt = Date.now();
       if (snap !== null && !failed && sameSnapshot(snap, s)) {
-        if (repaintDue && open_) {
-          repaintDue = false;
-          paint();
-        }
+        // A comment being written is never repainted away.
+        if (repaintDue && open_ && editing === null) paint();
         return;
       }
       snap = s;
@@ -115,10 +114,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
     }
     host.onChanged();
     // A comment being written is never repainted away; its save re-reads.
-    if (open_ && editing === null) {
-      repaintDue = false;
-      paint();
-    }
+    if (open_ && editing === null) paint();
   }
 
   /** The shell's topbar dressed for Digest (`mine`), or handed back to the library. */
@@ -174,7 +170,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
       if (!editing || busy) return;
       const text = editing.draft;
       // What the server would keep is what is there: nothing to send.
-      if (trimComment(text) === (d.comment ?? "")) {
+      if (trimComment(text) === trimComment(d.comment ?? "")) {
         editing = null;
         focusNext = "comment-edit";
         paint();
@@ -222,6 +218,7 @@ export function createDigestPage(host: DigestHost): DigestPage {
 
   function paint(): void {
     if (!open_) return;
+    repaintDue = false;
     chrome(true);
     host.setPlace("Digest");
     keepingFocus(root, () => {
@@ -280,6 +277,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
         root.hidden = false;
         host.gallery.hidden = true;
       }
+      // A file may have changed while its digests did not: its page picture is checked again.
+      host.thumbs.refresh();
       paint();
       void load();
     },

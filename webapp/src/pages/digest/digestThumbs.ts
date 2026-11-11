@@ -32,6 +32,9 @@ export interface DigestThumbs {
   refresh(): void;
 }
 
+/** Pages whose pictures are kept, for going back and forth between digests. */
+const KEPT = 12;
+
 export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
   /** One metadata read per file until `refresh`; a failure is asked again next time. */
   const metas = new Map<string, Promise<NoteMeta>>();
@@ -39,8 +42,14 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
   const pictures = new Map<string, Promise<string | null>>();
   /** The pictures in, by the same key. */
   const drawn = new Map<string, string>();
-  /** A page's last picture shown (its versioned key), so a repaint shows it at once instead of blinking. */
+  /**
+   * A page's last picture shown (its versioned key), so a repaint shows it at
+   * once instead of blinking; the oldest go past {@link KEPT}, oldest first.
+   */
   const shown = new Map<string, string>();
+  /** Each page's latest fill: an older one answering late changes nothing. */
+  const fills = new Map<string, number>();
+  let fillCount = 0;
 
   /** `map`'s entry for `key`, dropped if it is still `p`: a newer one stays. */
   const dropIfSame = <T>(map: Map<string, T>, key: string, p: T) => void (map.get(key) === p && map.delete(key));
@@ -95,20 +104,36 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
     holder.classList.toggle("has-thumb", url !== null);
   }
 
+  /** Lets a page's pictures go, its URLs and entries, but for the version `keep`. */
+  function letGo(place: string, keep: string | null = null): void {
+    for (const key of [...pictures.keys()]) {
+      if (!key.startsWith(`${place}:`) || key === keep) continue;
+      const url = drawn.get(key);
+      if (url) URL.revokeObjectURL(url);
+      drawn.delete(key);
+      pictures.delete(key);
+    }
+  }
+
   /** The page's picture for the file as it is now; the one it replaces is let go. */
   async function fill(holder: HTMLElement, fileId: string, page: number, place: string): Promise<void> {
+    const mine = ++fillCount;
+    fills.set(place, mine);
     const m = await meta(fileId);
     const key = `${place}:${m.fileHash ?? ""}`;
     if (shown.get(place) === key && drawn.has(key)) return;
     const url = await picture(m, fileId, page, key);
-    const before = shown.get(place);
-    if (before !== undefined && before !== key) {
-      const old = drawn.get(before);
-      if (old) URL.revokeObjectURL(old);
-      drawn.delete(before);
-      pictures.delete(before);
-    }
+    // A newer fill took over: it lets go of what it doesn't show.
+    if (fills.get(place) !== mine) return;
+    letGo(place, key);
+    shown.delete(place);
     shown.set(place, key);
+    for (const oldest of shown.keys()) {
+      if (shown.size <= KEPT) break;
+      shown.delete(oldest);
+      fills.delete(oldest);
+      letGo(oldest);
+    }
     if (holder.isConnected) show(holder, url);
   }
 
