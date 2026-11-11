@@ -69,6 +69,8 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   let derivations = new Map<string, Derivation>();
 
   let index: SearchEngine | null = null;
+  /** The engine of a first build still running: item rows go to it too, queued after the build. */
+  let making: SearchEngine | null = null;
   let building: Promise<SearchEngine> | null = null;
   // Bumped when the store changed; a deletion needs no rebuild, the intersection hides it.
   let rows = 0;
@@ -86,16 +88,20 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     const docs: TermsDocument[] = stored;
     const fresh = index === null;
     const engine = index ?? createSearchEngine({ load });
+    // From here, `setItems` reaches this engine; the rows held so far go first.
+    if (fresh) making = engine;
     try {
       if (fresh) for (const [kind, rows] of itemRows) await engine.setItems(kind, rows);
       await engine.build(docs);
     } catch (err) {
       // Drop a failed or dead engine so the next search starts fresh.
+      if (making === engine) making = null;
       index = null;
       built = -1;
       engine.close();
       throw err;
     }
+    if (making === engine) making = null;
     index = engine;
     built = target;
     pageCounts = new Map(stored.map((d) => [d.md5, d.pageCount]));
@@ -147,7 +153,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
 
     setItems(kind, rows) {
       itemRows.set(kind, rows);
-      const engine = index;
+      const engine = index ?? making;
       // A failed write empties the engine's index: start over at the next search.
       engine?.setItems(kind, rows).catch(() => {
         if (index !== engine) return;
@@ -160,6 +166,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     drop() {
       index?.close();
       index = null;
+      making = null;
       built = -1;
     },
 

@@ -214,16 +214,18 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
 /** In-thread fallback, also what unit tests drive. Same ordering and abort semantics. */
 function inThreadEngine(load?: CoreLoader): SearchEngine {
   let index: SearchIndex | null = null;
+  /** One instance, however many calls wait on its opening; they then run in the order called. */
+  let opening: Promise<SearchIndex> | null = null;
+  const instance = (): Promise<SearchIndex> => {
+    opening ??= SearchIndex.open(load).then((i) => (index = i));
+    return opening;
+  };
   return {
     async build(docs) {
-      const engine = index ?? (await SearchIndex.open(load));
-      index = engine;
-      engine.rebuild(docs);
+      (await instance()).rebuild(docs);
     },
     async setItems(kind, rows) {
-      const engine = index ?? (await SearchIndex.open(load));
-      index = engine;
-      engine.setItems(kind, rows);
+      (await instance()).setItems(kind, rows);
     },
     async query(text, limit, fuzzy, signal) {
       if (signal?.aborted) throw abortError();
@@ -233,6 +235,7 @@ function inThreadEngine(load?: CoreLoader): SearchEngine {
     close() {
       index?.close();
       index = null;
+      opening = null;
     },
   };
 }

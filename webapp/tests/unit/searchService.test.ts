@@ -216,6 +216,22 @@ describe("createIndexSearch", () => {
     expect(loads()).toBe(1);
   });
 
+  it("keeps an item change that lands while the first build is still running", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { sync } = fakeSync();
+    const local = createIndexSearch({ sync, load: async () => (await gate, fakeCore()) });
+    await local.sync();
+    local.setItems("todo", [{ key: "t1", text: "old title" }]);
+    const first = local.search("old");
+    await new Promise((r) => setTimeout(r, 0));
+    local.setItems("todo", [{ key: "t1", text: "new title" }]);
+    release();
+    await first;
+    expect((await local.search("new")).items.todo).toEqual(["t1"]);
+    expect((await local.search("old")).items.todo).toEqual([]);
+  });
+
   it("writes the items again into an engine made after a drop", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();
