@@ -7,7 +7,7 @@ import { el } from "../../ui/dom";
 import { ICONS, svg } from "../../ui/icons";
 import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
 import { byTabletOrder, homeView, listName, newestDone, openCount, viewPath, type TodoView } from "./todoModel";
-import { insideQuery, matchesName, queryMarks, typedMarks } from "../../search/match";
+import { holdsInside, insideMarks, insideOf, typedMarks } from "../../search/match";
 import { fields, type ItemRow } from "../../search/itemRows";
 import type { Expansion } from "../../search/localSearch";
 import { taskMeta } from "./todoView";
@@ -67,10 +67,10 @@ export interface TodoFind {
 export function findTodos(s: TodoSnapshot, q: string, keys: readonly string[], expansions: readonly Expansion[]): TodoFind {
   const lists = [{ id: null as string | null, name: "Inbox" }, ...s.lists.map((l) => ({ id: l.id as string | null, name: l.title }))];
   if (keys.length > 0 && expansions.length === 0) return found(s, q, keys, lists, []);
-  const inside = insideQuery(q);
-  const tasks = s.tasks.filter((t) => matchesName(searchText(s, t), inside));
-  const named = lists.filter((l) => matchesName(l.name, inside));
-  if (tasks.length > 0 || named.length > 0) return { tasks: ordered(s, tasks), lists: named, corrected: false, marks: (text) => queryMarks(text, inside) };
+  const inside = insideOf(q);
+  const tasks = s.tasks.filter((t) => holdsInside(searchText(s, t), inside));
+  const named = lists.filter((l) => holdsInside(l.name, inside));
+  if (tasks.length > 0 || named.length > 0) return { tasks: ordered(s, tasks), lists: named, corrected: false, marks: (text) => insideMarks(text, inside) };
   return found(s, q, keys, lists, expansions);
 }
 

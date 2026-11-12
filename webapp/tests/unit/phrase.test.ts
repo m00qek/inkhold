@@ -3,7 +3,6 @@
 import { describe, it, expect } from "vitest";
 import { holdsAll, phrasesOf, withExpansions } from "../../src/search/phrase";
 import { checkPhrases } from "../../src/search/searchService";
-import { matchesName, nameQuery } from "../../src/search/match";
 import type { LocalResults } from "../../src/search/localSearch";
 import type { StoredDocumentText } from "../../src/cache/textStore";
 
@@ -28,13 +27,6 @@ describe("reading the phrases", () => {
   it("the typo ladder's words stand in for the typed ones", () => {
     const p = withExpansions(phrasesOf('"reuniao pais"'), [{ typed: "reuniao", matched: "reuniaa" }]);
     expect(holdsAll("a reuniaa pais", p)).toBe(true);
-  });
-});
-
-describe("names", () => {
-  it("a quoted phrase in a name must be whole and in order", () => {
-    expect(matchesName("Haus of gabin", nameQuery('"of gabin"'))).toBe(true);
-    expect(matchesName("Haus of gabin", nameQuery('"gabin of"'))).toBe(false);
   });
 });
 

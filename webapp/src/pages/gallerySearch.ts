@@ -7,7 +7,7 @@ import { cardList } from "./galleryCards";
 import { el } from "../ui/dom";
 import { answerFor, coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail/railPlaces";
-import { insideQuery, matchesName } from "../search/match";
+import { holdsInside, insideOf } from "../search/match";
 import type { SearchCoverage } from "./searchCoverage";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
@@ -105,13 +105,13 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     const found = notes.size > 0 || folders.size > 0;
     if (found && s.expansions.length === 0) return { notes, folders, corrected: false };
     // Before the typo ladder's answer, as for to-dos.
-    const inside = insideQuery(q);
+    const inside = insideOf(q);
     const inNotes = new Set<Id>();
     const inFolders = new Set<Id>();
     for (const cached of ctx.folders.values()) {
       for (const e of cached.entries) {
-        if (e.kind === "note" && matchesName(e.name, inside)) inNotes.add(e.id);
-        else if (e.kind === "folder" && matchesName(ctx.labelFor(e), inside)) inFolders.add(e.id);
+        if (e.kind === "note" && holdsInside(e.name, inside)) inNotes.add(e.id);
+        else if (e.kind === "folder" && holdsInside(ctx.labelFor(e), inside)) inFolders.add(e.id);
       }
     }
     if (inNotes.size > 0 || inFolders.size > 0) return { notes: inNotes, folders: inFolders, corrected: false };

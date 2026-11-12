@@ -4,7 +4,7 @@
 
 import { onPlainClick } from "../ui/link";
 import type { SearchExcerpts } from "./searchExcerpts";
-import { insideQuery, nameMarks, typedMarks } from "../search/match";
+import { insideMarks, insideOf, typedMarks } from "../search/match";
 import { el } from "../ui/dom";
 import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
 import { ICONS, svg, type IconName } from "../ui/icons";
@@ -156,7 +156,7 @@ function markedText(text: string, q: string, expansions: readonly Expansion[]): 
   const out: Node[] = [];
   let from = 0;
   const typed = typedMarks(text, q, expansions);
-  for (const [start, end] of typed.length > 0 ? typed : nameMarks(text, insideQuery(q))) {
+  for (const [start, end] of typed.length > 0 ? typed : insideMarks(text, insideOf(q))) {
     if (start > from) out.push(document.createTextNode(text.slice(from, start)));
     out.push(el("mark", { text: text.slice(start, end) }));
     from = end;
