@@ -54,8 +54,10 @@ export interface NoteSearchDeps {
 
 export interface NoteSearchController {
   setQuery(raw: string): void;
-  /** Asks the query on screen again (what it searches changed), leaving its answer up until the new one. */
-  again(): void;
+  /** What it searches changed: the answer held is out of date (`askIfStale` asks again). */
+  stale(): void;
+  /** Asks the query again if its answer is out of date, leaving that answer up until the new one. */
+  askIfStale(): void;
   reset(): void;
 }
 
@@ -74,6 +76,9 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
 
   /** The trimmed query pending, running or painted; makes `setQuery` idempotent. */
   let active: string | null = null;
+
+  /** What it searches changed since the last question was asked. */
+  let outdated = false;
 
   /** Aborted when superseded, so an engine honouring the signal stops the work. */
   let inflight: AbortController | null = null;
@@ -116,6 +121,8 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
       if (query === active) return; // same question; leave the answer in progress alone
       active = query;
       cancelPending();
+      // A new question reads what is there now.
+      outdated = false;
 
       if (query.length < MIN_GLOBAL_QUERY_LEN) {
         view.setState({ kind: "idle" });
@@ -131,7 +138,13 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
       }, debounceMs);
     },
 
-    again(): void {
+    stale(): void {
+      outdated = true;
+    },
+
+    askIfStale(): void {
+      if (!outdated) return;
+      outdated = false;
       if (active === null || active.length < MIN_GLOBAL_QUERY_LEN) return;
       const query = active;
       cancelPending();

@@ -36,8 +36,12 @@ export interface SearchItems {
   /** The page's answer; null (its load failed) keeps what search has. */
   setTodo(s: TodoSnapshot | null): void;
   setDigest(s: DigestSnapshot | null): void;
-  /** Reads the names again (the tree changed, or a search is about to run); a change re-asks the search. */
-  refreshNames(): void;
+  /**
+   * Reads the names again (the tree changed, or a search is about to run). A
+   * change re-asks the search, unless `quiet`: a question about to be asked
+   * reads them anyway.
+   */
+  refreshNames(quiet?: boolean): void;
 }
 
 export interface SearchItemsDeps {
@@ -99,13 +103,13 @@ export function createSearchItems(deps: SearchItemsDeps): SearchItems {
       void store.put("digest", s);
       useDigest(s);
     },
-    refreshNames() {
+    refreshNames(quiet = false) {
       const rows = deps.names();
       const held = rows.map((r) => `${r.key}\t${r.text}`).join("\n");
       if (held === namesHeld) return;
       namesHeld = held;
       service.setItems("name", rows);
-      deps.onChanged();
+      if (!quiet) deps.onChanged();
     },
   };
 }

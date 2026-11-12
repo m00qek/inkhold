@@ -1,4 +1,4 @@
-// The library's engines: the thumbnail facade, the gallery's lazy engine, native image lazy-loading and library-wide search.
+// The library's engines: the thumbnail facade, the gallery's lazy engine, native image lazy-loading and library-wide search, with what it finds besides pages.
 
 import { currentTheme } from "../../ui/theme";
 import { createLazyEngine, renderPage } from "../../render/lazy";
@@ -6,6 +6,8 @@ import { createThumbnails, createCanvasThumbPainter, createFetchThumbNet } from 
 import { createNoteSearch } from "../noteSearch";
 import { createSearchService } from "../../search/searchService";
 import type { LibraryCtx } from "./libraryContext";
+import { createSearchItems, nameRows } from "./searchItems";
+import { openItemStore } from "../../cache/itemStore";
 
 /** Builds the thumbnail facade, the lazy engine, native image lazy-loading and library search onto `ctx`. */
 export function installLibraryEngines(ctx: LibraryCtx): void {
@@ -62,6 +64,18 @@ export function installLibraryEngines(ctx: LibraryCtx): void {
             : [],
         ),
       ),
+  });
+
+  // What search finds besides pages: names now, the apps' answers once their pages load.
+  ctx.searchItems = createSearchItems({
+    service: ctx.searchService,
+    store: openItemStore(),
+    names: () => nameRows(ctx.folderCache, (f) => ctx.rail.labelFor(f)),
+    // Asked again at once while the results are on screen, else when they are painted next.
+    onChanged: () => {
+      ctx.search.stale();
+      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.search.askIfStale();
+    },
   });
 
   ctx.search = createNoteSearch({

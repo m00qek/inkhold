@@ -22,7 +22,7 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
     st.query = next;
     // Names and transcripts both arrive after the debounce, from the index;
     // its names are read again first. `rail: false`: typing can't change the tree.
-    ctx.searchItems.refreshNames();
+    ctx.searchItems.refreshNames(true);
     ctx.search.setQuery(st.query);
     ctx.render.renderGallery({ rail: false });
   }

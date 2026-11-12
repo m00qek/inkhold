@@ -85,6 +85,36 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("createNoteSearch", () => {
+  describe("an answer gone stale", () => {
+    it("is asked again only once marked stale, and without the debounce or a 'searching' state", async () => {
+      const h = harness();
+      h.controller.setQuery("roadmap");
+      await vi.advanceTimersByTimeAsync(DEBOUNCE);
+      await h.settle(0, [doc(1, [0])]);
+      const painted = h.states.length;
+
+      h.controller.askIfStale();
+      expect(h.calls).toEqual(["roadmap"]);
+
+      h.controller.stale();
+      h.controller.askIfStale();
+      expect(h.calls).toEqual(["roadmap", "roadmap"]);
+      expect(h.states.length).toBe(painted);
+      h.controller.askIfStale();
+      expect(h.calls).toHaveLength(2);
+    });
+
+    it("a new question clears it: that question reads what is there now", async () => {
+      const h = harness();
+      h.controller.stale();
+      h.controller.setQuery("roadmap");
+      h.controller.askIfStale();
+      expect(h.calls).toEqual([]);
+      await vi.advanceTimersByTimeAsync(DEBOUNCE);
+      expect(h.calls).toEqual(["roadmap"]);
+    });
+  });
+
   describe("debounce", () => {
     // The debounce buys main-thread frames now (worst short prefix 37.9 ms): smaller, not zero.
     it("defaults to a debounce well under the 220 ms a round trip once bought", () => {

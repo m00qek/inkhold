@@ -148,6 +148,8 @@ export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
         if (cov) ctx.gallery.append(cov);
         return;
       }
+      // What it searches changed while it was covered: ask again; this answer stays up meanwhile.
+      ctx.search.askIfStale();
       ctx.features.gallerySearch.renderSearch(q);
       return;
     }

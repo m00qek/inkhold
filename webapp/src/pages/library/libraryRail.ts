@@ -71,7 +71,7 @@ export function installLibraryRail(ctx: LibraryCtx): void {
     handled: ctx.handled,
     onWalked: (changed) => {
       ctx.rail.treeWalked(changed);
-      if (changed) ctx.searchItems?.refreshNames();
+      if (changed) ctx.searchItems.refreshNames();
     },
   });
 
