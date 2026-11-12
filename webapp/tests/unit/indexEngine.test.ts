@@ -42,7 +42,6 @@ const PLAN: TermsDocument = {
   pages: [{ p: 7, t: "orcamento anual dados" }],
 };
 const LIBRARY = [NOTES, BOOK, PLAN];
-const NO_ITEMS = { name: 0, todo: 0, digest: 0 };
 
 /** An index holding `LIBRARY`, built the way a first search would build it. */
 async function built(): Promise<SearchIndex> {
@@ -94,7 +93,7 @@ describe("SearchIndex build and query", () => {
       const r = index.query("reuniao ", 1);
       expect(r.total).toBe(2);
       expect(r.hits).toHaveLength(1);
-      expect(index.query("reuniao ", 0)).toEqual({ total: 2, hits: [], items: [], itemTotals: NO_ITEMS, expansions: [] });
+      expect(index.query("reuniao ", 0)).toEqual({ total: 2, hits: [], items: [], expansions: [] });
     } finally {
       index.close();
     }
@@ -157,7 +156,7 @@ describe("SearchIndex query folding to nothing", () => {
     const index = await built();
     try {
       for (const junk of ["", "   ", "-", '"', '""', "...", "( )", "*", "^", "-- ", "()"]) {
-        expect({ junk, ...index.query(junk, 10) }).toEqual({ junk, total: 0, hits: [], items: [], itemTotals: NO_ITEMS, expansions: [] });
+        expect({ junk, ...index.query(junk, 10) }).toEqual({ junk, total: 0, hits: [], items: [], expansions: [] });
       }
     } finally {
       index.close();
@@ -182,7 +181,7 @@ describe("SearchIndex lifecycle and refusals", () => {
       index.reset();
       expect(index.documentCount).toBe(0);
       expect(index.pageCount).toBe(0);
-      expect(index.query("caligrafia ", 10)).toEqual({ total: 0, hits: [], items: [], itemTotals: NO_ITEMS, expansions: [] });
+      expect(index.query("caligrafia ", 10)).toEqual({ total: 0, hits: [], items: [], expansions: [] });
       index.build([BOOK]);
       expect(index.query("caligrafia ", 10).total).toBe(1);
     } finally {
@@ -289,7 +288,7 @@ describe("SearchIndex scale", () => {
 describe("SearchIndex item rows", () => {
   const keys = (r: { items: { kind: string; key: string }[] }): string[] => r.items.map((i) => `${i.kind}:${i.key}`).sort();
 
-  it("answers pages and items in one query, each with its own total", async () => {
+  it("answers pages and items in one query", async () => {
     const index = await built();
     try {
       index.setItems("todo", [
@@ -301,7 +300,6 @@ describe("SearchIndex item rows", () => {
       expect(r.total).toBe(2);
       expect(places(r)).toEqual(["a0", "c7"]);
       expect(keys(r)).toEqual(["digest:d1", "todo:t1"]);
-      expect(r.itemTotals).toEqual({ name: 0, todo: 1, digest: 1 });
     } finally {
       index.close();
     }
@@ -316,7 +314,7 @@ describe("SearchIndex item rows", () => {
       expect(keys(index.query("pao ", 10))).toEqual([]);
       expect(keys(index.query("leite ", 10))).toEqual(["todo:t1"]);
       index.setItems("todo", []);
-      expect(index.query("leite ", 10).itemTotals.todo).toBe(0);
+      expect(keys(index.query("leite ", 10))).toEqual([]);
     } finally {
       index.close();
     }
@@ -327,7 +325,7 @@ describe("SearchIndex item rows", () => {
     try {
       index.setItems("name", [{ key: "f1", text: "Caligrafia" }]);
       index.build(LIBRARY);
-      expect(index.query("caligrafia ", 10).itemTotals.name).toBe(1);
+      expect(keys(index.query("caligrafia ", 10))).toEqual(["name:f1"]);
       index.rebuild([BOOK]);
       const r = index.query("caligrafia ", 10);
       expect(places(r)).toEqual(["b0"]);

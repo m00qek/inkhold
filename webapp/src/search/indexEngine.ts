@@ -4,7 +4,7 @@
 // dropping the index means dropping the instance.
 
 import type { Expansion } from "./localSearch";
-import { ITEM_KINDS, ItemTable, kindCode, KIND_SIZE, type ItemKind, type ItemRow } from "./itemRows";
+import { ItemTable, KIND_SIZE, type ItemKind, type ItemRow } from "./itemRows";
 
 /** The `idx_*` half of `sqlite-core.wasm` (`webapp/wasm/sqlite_core.zig`). */
 export interface SearchCoreExports {
@@ -69,8 +69,6 @@ export interface QueryResult {
   hits: PageRef[];
   /** Matching item rows, each kind capped at `limit`, in bm25 rank order within it. */
   items: ItemRef[];
-  /** Matching item rows of each kind. */
-  itemTotals: Record<ItemKind, number>;
   /** Typo-ladder substitutions; non-empty only for a fuzzy query whose exact pass found nothing. */
   expansions: Expansion[];
 }
@@ -330,8 +328,7 @@ export class SearchIndex {
       if (!ref) throw new Error(`rowid ${rowid} is not in the index's rowid tables`);
       hits.push(ref);
     }
-    const itemTotals = Object.fromEntries(ITEM_KINDS.map((k) => [k, this.core.idx_kind_total(kindCode(k))])) as Record<ItemKind, number>;
-    return { total: this.core.idx_kind_total(0), hits, items, itemTotals, expansions };
+    return { total: this.core.idx_kind_total(0), hits, items, expansions };
   }
 
   /** Parses `typed \t matched \n`; a line without both halves is dropped. */

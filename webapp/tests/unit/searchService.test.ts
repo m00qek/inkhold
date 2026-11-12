@@ -226,6 +226,47 @@ describe("createIndexSearch", () => {
     expect((await local.search("old")).items.todo).toEqual([]);
   });
 
+  it("a drop during the first build publishes nothing: the next search starts afresh", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let loads = 0;
+    const { sync } = fakeSync();
+    const local = createIndexSearch({ sync, load: async () => (loads++, await gate, fakeCore()) });
+    await local.sync();
+    local.setItems("todo", [{ key: "t1", text: "ana reuniao" }]);
+    const first = local.search("ana");
+    await new Promise((r) => setTimeout(r, 0));
+    local.drop();
+    release();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    expect((await local.search("ana")).items.todo).toEqual(["t1"]);
+    expect(loads).toBe(2);
+  });
+
+  it("a failed item write starts the engine over at the next search, rows and all", async () => {
+    const { sync } = fakeSync();
+    let failWrites = false;
+    let loads = 0;
+    const local = createIndexSearch({
+      sync,
+      load: async () => {
+        loads++;
+        const core = fakeCore();
+        const add = core.idx_add;
+        core.idx_add = (rowid, ptr, len) => (failWrites && rowid >= 2 ** 28 ? -1 : add(rowid, ptr, len));
+        return core;
+      },
+    });
+    await local.sync();
+    await local.search("reuniao");
+    failWrites = true;
+    local.setItems("todo", [{ key: "t1", text: "ana" }]);
+    await new Promise((r) => setTimeout(r, 0));
+    failWrites = false;
+    expect((await local.search("ana")).items.todo).toEqual(["t1"]);
+    expect(loads).toBe(2);
+  });
+
   it("writes the items again into an engine made after a drop", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();

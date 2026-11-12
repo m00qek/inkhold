@@ -198,7 +198,7 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
     async query(text, limit, fuzzy, signal) {
       const req: EngineRequest = { kind: "query", id: nextId++, text, limit, fuzzy };
       const res = expect(await enqueue(req, true, signal), "result");
-      return { total: res.total, hits: res.hits, items: res.items, itemTotals: res.itemTotals, expansions: res.expansions };
+      return { total: res.total, hits: res.hits, items: res.items, expansions: res.expansions };
     },
     close() {
       dead ??= new Error("this search engine is closed");
@@ -216,8 +216,14 @@ function inThreadEngine(load?: CoreLoader): SearchEngine {
   let index: SearchIndex | null = null;
   /** One instance, however many calls wait on its opening; they then run in the order called. */
   let opening: Promise<SearchIndex> | null = null;
+  let closed = false;
   const instance = (): Promise<SearchIndex> => {
-    opening ??= SearchIndex.open(load).then((i) => (index = i));
+    opening ??= SearchIndex.open(load).then((i) => {
+      // Closed while opening: this instance is no one's.
+      if (closed) i.close();
+      else index = i;
+      return i;
+    });
     return opening;
   };
   return {
@@ -229,13 +235,15 @@ function inThreadEngine(load?: CoreLoader): SearchEngine {
     },
     async query(text, limit, fuzzy, signal) {
       if (signal?.aborted) throw abortError();
+      // In turn behind a build or a write still waiting on the instance.
+      if (opening) await opening;
       if (!index) throw new Error("this search engine has nothing built to query");
       return index.query(text, limit, fuzzy);
     },
     close() {
+      closed = true;
       index?.close();
       index = null;
-      opening = null;
     },
   };
 }

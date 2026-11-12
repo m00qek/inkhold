@@ -25,7 +25,6 @@ export type EngineResponse =
       total: number;
       hits: PageRef[];
       items: ItemRef[];
-      itemTotals: Record<ItemKind, number>;
       expansions: Expansion[];
     }
   /** `name` travels separately: callers read `err.name`, which a structured clone drops. */
@@ -64,7 +63,6 @@ async function handle(req: EngineRequest): Promise<EngineResponse> {
         total: answer.total,
         hits: answer.hits,
         items: answer.items,
-        itemTotals: answer.itemTotals,
         expansions: answer.expansions,
       };
     }

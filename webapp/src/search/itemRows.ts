@@ -14,10 +14,6 @@ export const KIND_SIZE = 1 << 28;
 
 const CODE: Record<ItemKind, number> = { name: 1, todo: 2, digest: 3 };
 
-export function kindCode(kind: ItemKind): number {
-  return CODE[kind];
-}
-
 /** The wasm's `field_separator`, between a row's fields in `idx_add`'s text. */
 const FIELD_SEPARATOR = "\x1f";
 

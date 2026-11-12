@@ -72,6 +72,8 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   /** The engine of a first build still running: item rows go to it too, queued after the build. */
   let making: SearchEngine | null = null;
   let building: Promise<SearchEngine> | null = null;
+  /** Bumped by `drop`: a build begun before it publishes nothing. */
+  let generation = 0;
   // Bumped when the store changed; a deletion needs no rebuild, the intersection hides it.
   let rows = 0;
   let built = -1;
@@ -83,6 +85,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
 
   async function build(): Promise<SearchEngine> {
     const target = rows;
+    const mine = generation;
     // Dedupe again: `SearchIndex.build` throws on a repeated md5.
     const stored = newestPerDocument(await sync.documents());
     const docs: TermsDocument[] = stored;
@@ -96,12 +99,19 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     } catch (err) {
       // Drop a failed or dead engine so the next search starts fresh.
       if (making === engine) making = null;
+      engine.close();
+      // Dropped meanwhile, the engine closed under it: that, not how it failed.
+      if (mine !== generation) throw abortError();
       index = null;
       built = -1;
-      engine.close();
       throw err;
     }
     if (making === engine) making = null;
+    if (mine !== generation) {
+      // Dropped meanwhile (a sign-out): this engine holds a person's rows no one wants.
+      engine.close();
+      throw abortError();
+    }
     index = engine;
     built = target;
     pageCounts = new Map(stored.map((d) => [d.md5, d.pageCount]));
@@ -159,7 +169,9 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     },
 
     drop() {
+      generation++;
       index?.close();
+      making?.close();
       index = null;
       making = null;
       built = -1;
