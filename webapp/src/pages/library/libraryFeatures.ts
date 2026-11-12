@@ -14,13 +14,11 @@ import { createCardActions } from "../cardActions";
 import { createHistoryController, type HistoryController } from "../historyPanel";
 import { createGallerySearch, type GallerySearch } from "../gallerySearch";
 import { BIN_KEY } from "../bin/bin";
-import { findTodos, todoHits } from "../todo/todoSearch";
-import { digestHits, foundDigests } from "../digest/digestSearch";
 import { placePath } from "../digest/digestModel";
 import { homeView, viewPath } from "../todo/todoModel";
 import { type AccountHost } from "../account/account";
-import { answerFor } from "../noteSearch";
 import type { LibraryCtx } from "./libraryContext";
+import { appResults } from "./appResults";
 
 export interface LibraryFeatures {
   historyController: HistoryController;
@@ -132,36 +130,25 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     coverage: createSearchCoverage(ctx.api, () => {
       if (ctx.searchInView()) ctx.render.renderGallery();
     }),
-    moreResults: (q) => {
-      // Read at start, they can be stale: a search asks again (`load` repaints).
-      ctx.todo.freshen();
-      void ctx.digest.freshen();
-      // Like the names, only from the index's answer to this query: no group before it, or over a failure.
-      const s = answerFor(st.searchState, q);
-      if (!s) return null;
-      const digests = ctx.searchItems.digest();
-      const dHits = digests?.enabled
-        ? digestHits(digests, foundDigests(digests, s.items.digest), q, s.expansions, (place) => go(digestHref(placePath(place))))
-        : null;
-      const snap = ctx.searchItems.todo();
-      const found = snap?.enabled ? findTodos(snap, q, s.items.todo, s.expansions) : null;
-      const tHits = snap && found ? todoHits(
-        snap,
-        found,
-        Date.now(),
-        (t) => {
-          ctx.todo.reveal(t.id);
-          go(todoHref(viewPath(homeView(t))));
+    moreResults: (q) =>
+      appResults(
+        {
+          state: () => st.searchState,
+          todo: () => ctx.searchItems.todo(),
+          digest: () => ctx.searchItems.digest(),
+          freshenTodo: () => ctx.todo.freshen(),
+          freshenDigest: () => void ctx.digest.freshen(),
+          openDigest: (place) => go(digestHref(placePath(place))),
+          openTask: (t) => {
+            ctx.todo.reveal(t.id);
+            go(todoHref(viewPath(homeView(t))));
+          },
+          openList: (view) => go(todoHref(viewPath(view))),
+          chip: (t) => ctx.todoInk.chip(t),
+          now: () => Date.now(),
         },
-        (t) => ctx.todoInk.chip(t),
-        (view) => go(todoHref(viewPath(view))),
-      ) : null;
-      if (!dHits && !tHits) return null;
-      const node = document.createDocumentFragment();
-      node.append(...[dHits, tHits].filter((x): x is HTMLElement => x !== null));
-      // Digests come only from the index's answer, so from the ladder's spelling whenever it answered.
-      return { node, corrected: (dHits !== null && s.expansions.length > 0) || (tHits !== null && found!.corrected) };
-    },
+        q,
+      ),
   });
 
   /**
