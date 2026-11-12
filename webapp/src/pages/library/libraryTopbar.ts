@@ -90,8 +90,8 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     id: "search",
     type: "search",
     autocomplete: "off",
-    placeholder: "Search notes and to-dos — typed and handwritten",
-    "aria-label": "Search notes and to-dos",
+    placeholder: "Search notes, to-dos and digests — typed and handwritten",
+    "aria-label": "Search notes, to-dos and digests",
   }) as HTMLInputElement;
   // The first letter pushes (folder to results is a navigation); later letters
   // and clearing replace, so one search episode is one history entry.

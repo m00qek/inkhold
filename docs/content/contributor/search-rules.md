@@ -77,10 +77,12 @@ flowchart TD
 - **Rows change in place.** `setItems` writes only what changed (`idx_delete`,
   then the new row), so what was just saved is found at once; a rebuild writes
   them again. A change marks the answer on screen stale: it is asked again at
-  once if the results are in view, else when they are next shown. Names are read again from the cached tree when it changes and
-  before each query. To-dos and digests come from their pages' answers (read
-  at start, and by a search when over a minute old) and are kept in
-  `sn-search-items` so search finds them offline; only search reads that copy.
+  once if the results are in view, else when they are next shown. Names are
+  read again from the cached tree when it changes and before each query.
+  To-dos and digests come from their pages' answers (read at start, and by a
+  search when last asked over a minute ago for to-dos, half a minute for
+  digests) and are kept in `sn-search-items` so search finds them offline;
+  only search reads that copy.
 - **The typo ladder** runs in the wasm (Damerau-Levenshtein), and only when the
   exact query has no hits of any kind: the corpus is misspelt handwriting
   recognition. A half-typed word is compared with both the start and the whole
@@ -165,8 +167,8 @@ are drawn, and how a segment (a page, or a paragraph) is brought into view.
 
 - **Quoted phrases**: `"passé composé"` wants the words together and in
   order. Names, to-dos and digests are running text, so the index holds a
-  phrase to its order there itself, within one field. A page's terms are one set, so there the
-  index finds the candidate pages and the page's text decides
+  phrase to its order there itself, within one field. A page's terms are one
+  set, so there the index finds the candidate pages and the page's text decides
   (`search/phrase.ts`): library search checks against the text the browser
   already holds (`searchService.checkPhrases`), keeping and counting, never
   dropping, a document whose text it does not hold ("N results couldn't be

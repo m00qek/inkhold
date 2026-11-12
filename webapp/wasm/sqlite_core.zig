@@ -12,9 +12,8 @@
 //! `sqlite3_initialize()`, so `idx_open`, the first call, initialises.
 //!
 //! This module owns the schema and the query fold, so JS never runs a second
-//! tokenizer. `idx_errmsg_*` is set on failure and not
-//! cleared on success. `memory` can grow on any call; re-read pointers after
-//! each.
+//! tokenizer. `idx_errmsg_*` is set on failure and not cleared on success.
+//! `memory` can grow on any call; re-read pointers after each.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -37,7 +36,7 @@ else
 const tokenizer = @import("schema").fts_tokenizer;
 
 const sqlite_core_fuzzy = @import("sqlite_core_fuzzy.zig");
-pub const q = @import("sqlite_core_query.zig");
+const q = @import("sqlite_core_query.zig");
 
 /// A row's fields, each in a column of its own, so a quoted phrase never runs
 /// from one into the next (FTS5 matches a phrase within one column); the
@@ -161,6 +160,7 @@ export fn idx_close() void {
         db = null;
     }
     hits.clearRetainingCapacity();
+    @memset(&kind_totals, 0);
     match.clearRetainingCapacity();
     phrase_match.clearRetainingCapacity();
     expansion.clearRetainingCapacity();

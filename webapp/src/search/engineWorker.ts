@@ -1,5 +1,5 @@
 // The search worker: one reused `SearchIndex` off the main thread,
-// instantiated on the first `build`. There is no queue or cancel message here;
+// instantiated on the first `build` or `items`. There is no queue or cancel message here;
 // a running `idx_fuzzy` is synchronous, so abort is `searchEngine.ts`'s.
 
 import { SearchIndex, type ItemRef, type PageRef, type TermsDocument } from "./indexEngine";

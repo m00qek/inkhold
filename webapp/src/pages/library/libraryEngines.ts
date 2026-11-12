@@ -74,7 +74,7 @@ export function installLibraryEngines(ctx: LibraryCtx): void {
     // Asked again at once while the results are on screen, else when they are painted next.
     onChanged: () => {
       ctx.search.stale();
-      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.search.askIfStale();
+      if (ctx.searchInView()) ctx.search.askIfStale();
     },
   });
 

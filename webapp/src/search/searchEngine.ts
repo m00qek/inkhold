@@ -1,7 +1,7 @@
 // The main-thread half of the search worker: `SearchIndex` behind promises,
 // answered by `engineWorker.ts`, or in-thread where no `Worker` exists or a
 // `CoreLoader` is injected (functions cannot cross `postMessage`). Nothing is
-// constructed until the first `build`/`query`.
+// constructed until the first call.
 //
 // Abort lives on this side: a running `idx_fuzzy` is synchronous, so the
 // worker cannot see a cancel until it returns. At most one request is posted;

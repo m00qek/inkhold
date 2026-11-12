@@ -170,7 +170,7 @@ export function createLibraryData(ctx: LibraryCtx): LibraryData {
   function onIndex(status: IndexStatus): void {
     if (status.pending === st.indexPending) return;
     st.indexPending = status.pending;
-    if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
+    if (ctx.searchInView()) ctx.render.renderGallery();
   }
 
   return { enterPendingCategory, cancelLoadingPaint, navigate, galleryIsOnScreen, refetch, onBump, onIndex };

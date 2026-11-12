@@ -146,6 +146,8 @@ export interface LibraryCtx {
    */
   leaveDestinations(keep?: CoveringPlace): void;
   openAdmin(): void;
+  /** The search's results are on screen: a query, and nothing covering the gallery. */
+  searchInView(): boolean;
 }
 
 /** The places that cover the gallery and are left by `leaveDestinations`. */
@@ -157,7 +159,7 @@ export type LibraryCtxSeed = Pick<
   | "deps" | "identity" | "renderer" | "cache" | "live" | "api" | "historyScope" | "binScope" | "st"
   | "gallery" | "content" | "place" | "toastEl" | "destinationsOpen"
   | "failures" | "handled" | "sessionDidExpire" | "toast"
-  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "leaveDigest" | "leaveDestinations" | "openAdmin"
+  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "leaveDigest" | "leaveDestinations" | "openAdmin" | "searchInView"
 >;
 
 /**

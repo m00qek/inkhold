@@ -217,7 +217,7 @@ test.describe("To-Do", () => {
 
   test("each page's topbar: search and New list on the overview only, the menu on a list", async ({ page }) => {
     await openTodo(page);
-    const search = page.getByRole("searchbox", { name: "Search notes and to-dos" });
+    const search = page.getByRole("searchbox", { name: "Search notes, to-dos and digests" });
     await expect(search).toBeVisible();
     await expect(page.locator("#todo-new-list")).toBeVisible();
     await expect(page.locator("#todo-list-options")).toBeHidden();
@@ -234,7 +234,7 @@ test.describe("To-Do", () => {
 
   test("search finds to-dos, done ones after, and opens a done one in its list", async ({ page }) => {
     await openTodo(page);
-    await page.getByRole("searchbox", { name: "Search notes and to-dos" }).fill("weekly review");
+    await page.getByRole("searchbox", { name: "Search notes, to-dos and digests" }).fill("weekly review");
     const hits = page.locator(".todo-hits .todo-hit");
     // Matched through the notebook they came from; the open one first.
     await expect(hits.locator(".todo-hit__title")).toHaveText(["Revisar o passé composé", "Haus of gabin"]);
@@ -246,7 +246,7 @@ test.describe("To-Do", () => {
 
   test("search finds lists by name, marks the words, and corrects a typo as notes do", async ({ page }) => {
     await openTodo(page);
-    const box = page.getByRole("searchbox", { name: "Search notes and to-dos" });
+    const box = page.getByRole("searchbox", { name: "Search notes, to-dos and digests" });
     const group = page.locator(".todo-hits");
 
     await box.fill("casa dentista");

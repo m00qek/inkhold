@@ -20,7 +20,7 @@ export function installAppInks(ctx: LibraryCtx): void {
 
 /** Both pages, each read once at start: the rail shows an app only when the server keeps its data. */
 export function installAppPages(ctx: LibraryCtx): void {
-  const { api, content, gallery, st } = ctx;
+  const { api, content, gallery } = ctx;
   ctx.todo = createTodoPage({
     api,
     content,
@@ -43,7 +43,7 @@ export function installAppPages(ctx: LibraryCtx): void {
       ctx.rail.build();
       // New to-dos reach search: their rows change, and an open search asks again.
       ctx.searchItems.setTodo(ctx.todo.snapshot());
-      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
+      if (ctx.searchInView()) ctx.render.renderGallery();
     },
     go: (view) => go(todoHref(view)),
   });

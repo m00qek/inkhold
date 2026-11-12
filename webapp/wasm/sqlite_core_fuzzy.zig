@@ -9,7 +9,7 @@ const foldToken = sqlite_core.foldToken;
 const fold_ddl = sqlite_core.fold_ddl;
 const gpa = sqlite_core.gpa;
 const idx_query = sqlite_core.idx_query;
-const q = sqlite_core.q;
+const q = @import("sqlite_core_query.zig");
 const runMatch = sqlite_core.runMatch;
 const setErrDb = sqlite_core.setErrDb;
 

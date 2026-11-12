@@ -130,7 +130,7 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     indexPending: () => st.indexPending,
     // Repaints only an open search, as the index frame does.
     coverage: createSearchCoverage(ctx.api, () => {
-      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
+      if (ctx.searchInView()) ctx.render.renderGallery();
     }),
     moreResults: (q) => {
       // Read at start, they can be stale: a search asks again (`load` repaints).

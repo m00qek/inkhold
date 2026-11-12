@@ -241,6 +241,7 @@ export function createAppShell(deps: AppDeps): AppShell {
       if (keep !== "digest") ctx.leaveDigest();
     },
     openAdmin: () => ctx.adminDest.open(),
+    searchInView: () => st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null,
   });
 
   // ---- the parts that only read lazily ----
