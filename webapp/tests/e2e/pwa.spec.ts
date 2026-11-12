@@ -2,9 +2,9 @@ import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { note } from "./slowLink.shared";
 
-// The installable app: it can be installed, opens and browses with no
-// network, never keeps a file, forgets the listings on sign-out, and offers a
-// new version instead of swapping it in. Run with playwright.pwa.config.ts.
+// The installable app: it can be installed, opens, browses and searches with
+// no network, never keeps a file, forgets the listings on sign-out, and offers
+// a new version instead of swapping it in. Run with playwright.pwa.config.ts.
 
 const folder = (id: string, name: string, itemCount: number) => ({ kind: "folder", id, name, itemCount });
 const ME = { success: true, email: "ana@household.lan", isAdmin: false, mustChangePassword: false };
@@ -22,6 +22,13 @@ const NOTES = {
   syncVersion: 1,
 };
 
+const TODO = {
+  enabled: true,
+  lists: [],
+  tasks: [{ id: "t1", title: "Comprar pão", done: false, sort: 0, sortTime: 0 }],
+  waiting: false,
+};
+
 /** The backend, at the context so the worker's fetches are answered too. */
 async function backend(context: BrowserContext, me: { status: number; json: unknown } = { status: 200, json: ME }): Promise<void> {
   await context.unroute("**/*").catch(() => {});
@@ -36,6 +43,7 @@ async function backend(context: BrowserContext, me: { status: number; json: unkn
         const parent = url.searchParams.get("parent");
         return json(parent === "dir-note" ? NOTE_DIR : parent === "note" ? NOTES : ROOT);
       }
+      if (url.pathname === "/api/controlplane/todo") return json(TODO);
       if (url.pathname === "/api/controlplane/file/metadata/n1") {
         return json({ id: "n1", name: "Weekly review.note", pages: [], fileType: "note", size: 10 });
       }
@@ -96,6 +104,42 @@ test("with no network the app opens and the folders it has seen can be browsed",
   await context.setOffline(false);
 });
 
+test("with no network, search still finds the names and to-dos last seen", async ({ page, context }) => {
+  await page.goto("/?real");
+  await controlled(page);
+  await page.goto("/?real#/folder/note");
+  await expect(page.locator("#gallery").getByText("Weekly review")).toBeVisible();
+  // The to-dos search keeps, in this browser.
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          new Promise<boolean>((resolve) => {
+            const open = indexedDB.open("sn-search-items");
+            open.onsuccess = () => {
+              const db = open.result;
+              if (!db.objectStoreNames.contains("items")) return resolve(false);
+              const req = db.transaction("items").objectStore("items").getKey("todo");
+              req.onsuccess = () => {
+                db.close();
+                resolve(req.result !== undefined);
+              };
+            };
+          }),
+      ),
+    )
+    .toBe(true);
+
+  await context.setOffline(true);
+  await page.goto("/#/");
+  const box = page.getByRole("searchbox", { name: "Search notes, to-dos and digests" });
+  await box.fill("pão");
+  await expect(page.locator(".todo-hits .todo-hit__title")).toHaveText(["Comprar pão"]);
+  await box.fill("weekly");
+  await expect(page.locator("#gallery .card__title")).toHaveText(["Weekly review.note"]);
+  await context.setOffline(false);
+});
+
 test("the device keeps the app and the listings, never a file", async ({ page }) => {
   await page.goto("/?real");
   await controlled(page);
@@ -107,7 +151,9 @@ test("the device keeps the app and the listings, never a file", async ({ page })
   for (const u of urls.filter((x) => x.startsWith("inkhold-listings "))) {
     expect(u).toMatch(/ \/api\/(user\/me|controlplane\/(tree|bin|usage))(\?|$)/);
   }
-  expect(urls.filter((u) => /\.wasm$| \/(note|file|thumbnail)\//.test(u))).toEqual([]);
+  expect(urls.filter((u) => / \/(note|file|thumbnail)\//.test(u))).toEqual([]);
+  // Of the wasm, only search's: the readers' decoders come from the server.
+  expect(urls.filter((u) => /\.wasm$/.test(u)).map((u) => u.slice(u.lastIndexOf("/") + 1))).toEqual(["sqlite-core.wasm"]);
 });
 
 test("signing out leaves no listing behind", async ({ page, context }) => {

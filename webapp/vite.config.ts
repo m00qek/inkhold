@@ -9,7 +9,8 @@ import { DatabaseSync } from "node:sqlite";
 /**
  * Writes `sw.js` into the build: `sw/sw.js` with this build's files filled in
  * (every bundle file but source maps and the test fakes, and every public file
- * but the wasm decoders, which only reading needs) and a version that changes
+ * but the readers' wasm decoders, which only reading needs; search's
+ * `sqlite-core.wasm` is kept, so search answers offline) and a version that changes
  * whenever any of them does. Build only: in dev a worker would hold stale
  * modules.
  */
@@ -32,7 +33,7 @@ function inkholdServiceWorker(): Plugin {
       for (const f of fromBundle.sort()) hash.update(f);
       const fromPublic = publicDir
         ? walk(publicDir)
-            .filter((p) => !p.endsWith(".wasm"))
+            .filter((p) => !p.endsWith(".wasm") || p.endsWith("sqlite-core.wasm"))
             .map((p) => {
               hash.update(readFileSync(p));
               return relative(publicDir, p).split("\\").join("/");

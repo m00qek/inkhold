@@ -61,9 +61,9 @@ the browser keeps of that person's library.
 
 ```mermaid
 flowchart TD
-  sw["Service worker"] -->|"cache first"| app["The app's own files"]
+  sw["Service worker"] -->|"cache first"| app["The app's own files, search's wasm among them"]
   sw -->|"network first, stored copy when offline"| lists["Listings: me, the tree, the bin, storage"]
-  sw -->|"never kept"| files["Pages, PDFs, images, text, to-dos, the decoders"]
+  sw -->|"never kept"| files["Pages, PDFs, images, text, to-dos, the readers' decoders"]
   files --> need["Opening one offline: 'needs a connection', and stay put"]
 ```
 
