@@ -302,6 +302,8 @@ const TODO = 2 << 28;
     [TODO + 2, "paint the kitchen"],
     // Two fields: a phrase never runs from one into the next.
     [TODO + 3, "buy milk\x1finbox"],
+    // One edit from `chart`.
+    [TODO + 4, "chant at dawn"],
   ]) {
     const buf = put(body);
     equal(e.idx_add(id, buf[0], buf[1]), 0, `row ${id} is indexed`);
@@ -340,10 +342,17 @@ const TODO = 2 << 28;
     equal(e.idx_kind_total(2), 0, "...a kind it found nothing in, as none");
   }
 
+  // A word the index holds is not a typo: in a phrase a near-miss would replace it.
+  {
+    const r = fuzzy('"colour chart" ');
+    equal(r.expansion, "colour>color", "only the misspelt word of a phrase is corrected, not its neighbour one edit from `chant`");
+    check(r.hits.includes(TEXT + 1), "...so the phrase still finds its row", r.hits.join(","));
+  }
+
   equal(e.idx_delete(TODO + 1), 0, "a row is deleted by its rowid");
   equal(query("kitchen ").total, 2, "...and no longer answers");
   equal(e.idx_delete(TODO + 1), 0, "deleting a row already gone is no error");
-  for (const id of [16, TEXT + 1, TODO + 2, TODO + 3]) e.idx_delete(id);
+  for (const id of [16, TEXT + 1, TODO + 2, TODO + 3, TODO + 4]) e.idx_delete(id);
   equal(query("kitchen ").total, 0, "the kinds' rows are gone again");
 }
 

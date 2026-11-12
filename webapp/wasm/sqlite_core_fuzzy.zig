@@ -68,6 +68,9 @@ const FuzzyToken = struct {
     /// `term`'s length in codepoints, for `delta`.
     term_len: usize,
     budget: usize,
+    /// The index holds it as typed (or, being typed, a word it starts): it
+    /// is not a typo, and keeps no near-miss. In a phrase one would replace it.
+    present: bool = false,
     cands: std.ArrayList(Candidate) = .empty,
     alts: std.ArrayList([]const u8) = .empty,
 };
@@ -156,8 +159,11 @@ fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
             if (st.prefix) {
                 const cut = truncCodepoints(vterm, t.len);
                 if (editDistance(term, cut, t.budget)) |dc| {
-                    // Its start as typed: the exact pass would have found it.
-                    if (dc == 0) continue;
+                    // Its start as typed: a word the index holds.
+                    if (dc == 0) {
+                        t.present = true;
+                        continue;
+                    }
                     if (d == null or dc < d.?) {
                         d = dc;
                         cand = cut;
@@ -165,7 +171,10 @@ fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
                 }
             }
             const dist = d orelse continue;
-            if (dist == 0) continue;
+            if (dist == 0) {
+                t.present = true;
+                continue;
+            }
             const cand_len = cpLen(cand);
             offer(arena, t, max_fuzzy_terms, .{
                 .term = vterm,
@@ -176,6 +185,7 @@ fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
     }
 
     for (tokens) |*t| {
+        if (t.present) t.cands.clearRetainingCapacity();
         if (t.cands.items.len == 0) continue;
         const best = t.cands.items[0];
         var n: usize = 1;
