@@ -267,6 +267,30 @@ describe("createIndexSearch", () => {
     expect(loads).toBe(2);
   });
 
+  it("a failed query starts the engine over at the next search", async () => {
+    const { sync } = fakeSync();
+    let loads = 0;
+    let broken = false;
+    const local = createIndexSearch({
+      sync,
+      load: async () => {
+        loads++;
+        const core = fakeCore();
+        const run = core.idx_fuzzy;
+        core.idx_fuzzy = (ptr, len, limit) => (broken ? -11 : run(ptr, len, limit));
+        return core;
+      },
+    });
+    await local.sync();
+    local.setItems("todo", [{ key: "t1", text: "ana" }]);
+    await local.search("ana");
+    broken = true;
+    await expect(local.search("ana")).rejects.toThrow();
+    broken = false;
+    expect((await local.search("ana")).items.todo).toEqual(["t1"]);
+    expect(loads).toBe(2);
+  });
+
   it("writes the items again into an engine made after a drop", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();

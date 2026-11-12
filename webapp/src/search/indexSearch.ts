@@ -184,7 +184,18 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
       // The build is not abortable; a superseded search must just not paint.
       if (signal?.aborted) throw abortError();
       // With the typo ladder: handwriting recognition defeats exact matching.
-      const answer = await idx.query(query, ALL_PAGES, true, signal);
+      let answer: QueryResult;
+      try {
+        answer = await idx.query(query, ALL_PAGES, true, signal);
+      } catch (err) {
+        // A dead worker answers every later query the same: start over at the next search, rows and all.
+        if ((err as { name?: unknown })?.name !== "AbortError" && index === idx) {
+          idx.close();
+          index = null;
+          built = -1;
+        }
+        throw err;
+      }
       return { query, ...group(answer, live ?? offlineLive(), pageCounts) };
     },
   };
