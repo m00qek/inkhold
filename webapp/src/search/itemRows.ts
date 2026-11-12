@@ -17,7 +17,7 @@ const CODE: Record<ItemKind, number> = { name: 1, todo: 2, digest: 3 };
 /** The wasm's `field_separator`, between a row's fields in `idx_add`'s text. */
 const FIELD_SEPARATOR = "\x1f";
 
-/** The wasm's `fields`: columns a row has. */
+/** The wasm's `columns`: fields a row may have. */
 const MAX_FIELDS = 4;
 
 /** A row's text from its fields, the missing ones skipped; a field never holds the separator. */

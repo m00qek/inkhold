@@ -38,11 +38,12 @@ const tokenizer = @import("schema").fts_tokenizer;
 const sqlite_core_fuzzy = @import("sqlite_core_fuzzy.zig");
 const q = @import("sqlite_core_query.zig");
 
-/// A row's fields, each in a column of its own, so a quoted phrase never runs
-/// from one into the next (FTS5 matches a phrase within one column); the
-/// query's words may still come from any of them. A page is one field. In
-/// `idx_add`'s text they are separated by `field_separator`.
-const fields = 4;
+/// An item row's fields, each in a column of its own, so a quoted phrase never
+/// runs from one into the next (FTS5 matches a phrase within one column); the
+/// query's words may still come from any of them. In `idx_add`'s text they
+/// are separated by `field_separator`. A page is one field, whatever its text
+/// holds: it is a document's, and find in a document indexes it raw.
+const columns = 4;
 const field_separator = 0x1f;
 
 /// No `prefix=`: prefix queries measured fast without one, and it would grow
@@ -183,7 +184,7 @@ export fn idx_commit() i32 {
 
 /// `doc_id` is the rowid, its kind in the top bits (`kind_shift`), and under
 /// `rowid_end`; a repeat is a constraint failure, never an overwrite. The text
-/// is up to `fields` fields, split at `field_separator`.
+/// is up to `columns` fields, split at `field_separator`, a page's whole.
 export fn idx_add(doc_id: u32, ptr: [*]const u8, len: usize) i32 {
     const h = db orelse return no_db;
     if (doc_id >= rowid_end) {
@@ -194,17 +195,23 @@ export fn idx_add(doc_id: u32, ptr: [*]const u8, len: usize) i32 {
     var rc = cached(h, &add_stmt, "INSERT INTO docs(rowid, f0, f1, f2, f3) VALUES(?1, ?2, ?3, ?4, ?5)", &stmt);
     if (rc != 0) return rc;
     rc = c.sqlite3_bind_int64(stmt, 1, @intCast(doc_id));
-    var it = std.mem.splitScalar(u8, ptr[0..len], field_separator);
+    const text = ptr[0..len];
     var col: c_int = 2;
-    while (it.next()) |field| : (col += 1) {
-        if (col > fields + 1) {
-            setErr("more fields than columns");
-            return -c.SQLITE_RANGE;
+    // SQLITE_STATIC: the caller's buffer outlives the step, so no copy.
+    if (doc_id < text_base) {
+        if (rc == c.SQLITE_OK) rc = c.sqlite3_bind_text(stmt, col, text.ptr, @intCast(text.len), null);
+        col += 1;
+    } else {
+        var it = std.mem.splitScalar(u8, text, field_separator);
+        while (it.next()) |field| : (col += 1) {
+            if (col > columns + 1) {
+                setErr("more fields than columns");
+                return -c.SQLITE_RANGE;
+            }
+            if (rc == c.SQLITE_OK) rc = c.sqlite3_bind_text(stmt, col, field.ptr, @intCast(field.len), null);
         }
-        // SQLITE_STATIC: the caller's buffer outlives the step, so no copy.
-        if (rc == c.SQLITE_OK) rc = c.sqlite3_bind_text(stmt, col, field.ptr, @intCast(field.len), null);
     }
-    while (col <= fields + 1) : (col += 1) {
+    while (col <= columns + 1) : (col += 1) {
         if (rc == c.SQLITE_OK) rc = c.sqlite3_bind_null(stmt, col);
     }
     if (rc != c.SQLITE_OK) {

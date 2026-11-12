@@ -277,9 +277,14 @@ equal(fuzzy("xilofone ").expansion, "", "...and reports no substitution");
   equal(e.idx_add(2 ** 31, buf[0], buf[1]), -25, "a rowid past the last kind is refused (SQLITE_RANGE)");
   check(/out of range/.test(errorText()), "...and says why", errorText());
   const five = put("a\x1fb\x1fc\x1fd\x1fe");
-  equal(e.idx_add(99, five[0], five[1]), -25, "more fields than columns are refused");
+  equal(e.idx_add(2 ** 28 + 99, five[0], five[1]), -25, "an item row with more fields than columns is refused");
   drop(buf);
   drop(five);
+  // A page is one field, whatever its text holds: find in a document indexes it raw.
+  const page = put("a\x1fb\x1fc\x1fd\x1fe word");
+  equal(e.idx_add(98, page[0], page[1]), 0, "a page's text is never split, separators and all");
+  drop(page);
+  equal(e.idx_delete(98), 0, "...and goes like any row");
 }
 
 // ---- kinds of row ----
