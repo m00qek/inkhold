@@ -38,9 +38,14 @@ export interface SearchItemsDeps {
   onChanged(): void;
 }
 
-/** Two answers alike: plain data, so their JSON says it. */
-function same(a: unknown, b: unknown): boolean {
-  return b !== null && JSON.stringify(a) === JSON.stringify(b);
+/**
+ * Two answers alike for search: plain data, so their JSON says it, without
+ * what search neither finds nor shows (when a tablet last synced, whether one
+ * has yet to): a tablet's sync alone asks nothing.
+ */
+function same(a: TodoSnapshot | DigestSnapshot, b: TodoSnapshot | DigestSnapshot | null): boolean {
+  const seen = ({ tabletSyncedAt: _t, waiting: _w, ...rest }: TodoSnapshot | DigestSnapshot) => JSON.stringify(rest);
+  return b !== null && seen(a) === seen(b);
 }
 
 export function createSearchItems(deps: SearchItemsDeps): SearchItems {

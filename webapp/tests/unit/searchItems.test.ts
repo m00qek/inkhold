@@ -59,6 +59,14 @@ describe("search's items", () => {
     expect(h.items.todo()?.tasks[0]?.title).toBe("a");
   });
 
+  it("a tablet's sync alone, changing only when it synced, asks the search nothing", async () => {
+    const h = harness();
+    await settle();
+    h.items.setTodo(todo("a"));
+    h.items.setTodo({ ...todo("a"), tabletSyncedAt: 5, waiting: true });
+    expect(h.asked()).toBe(1);
+  });
+
   it("names are written again only when they changed", async () => {
     const h = harness({}, [{ key: "n:1", text: "Receitas" }]);
     h.items.refreshNames();
