@@ -9,7 +9,7 @@ import { ITEM_KINDS, type ItemKind, type ItemRow } from "./itemRows";
 import { createSearchEngine, type SearchEngine } from "./searchEngine";
 import { createIndexSync, type IndexSync, type SyncOutcome } from "./indexSync";
 import type { Derivation, ManifestRow } from "./manifestCodec";
-import { rankDocuments, type ItemHits, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
+import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
 
 /** No cap: the scan is full anyway, and a capped document would undercount its matches. */
 const ALL_PAGES = 0xffffffff;
@@ -209,7 +209,8 @@ function group(
       pageCount: pageCounts.get(md5) ?? null,
     });
   }
-  const items = Object.fromEntries(ITEM_KINDS.map((k) => [k, result.items.filter((i) => i.kind === k).map((i) => i.key)])) as unknown as ItemHits;
+  const items: Record<ItemKind, string[]> = { name: [], todo: [], digest: [] };
+  for (const i of result.items) items[i.kind].push(i.key);
   // Only with a surviving row, or "matched X" would sit over an empty list.
   const any = documents.length > 0 || ITEM_KINDS.some((k) => items[k].length > 0);
   const expansions = any ? result.expansions : [];

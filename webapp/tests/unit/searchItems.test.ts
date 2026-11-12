@@ -1,3 +1,5 @@
+// What search keeps of the apps and the library's names, and when it asks again (`pages/library/searchItems.ts`).
+
 import { describe, it, expect } from "vitest";
 import { createSearchItems } from "../../src/pages/library/searchItems";
 import type { ItemStore, StoredKind } from "../../src/cache/itemStore";

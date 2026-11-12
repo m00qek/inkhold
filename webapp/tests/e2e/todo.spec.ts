@@ -266,6 +266,27 @@ test.describe("To-Do", () => {
     await expect(group.locator(".todo-hit__title")).toHaveText(["Ligar para o dentista"]);
   });
 
+  test("search keeps the last to-dos and digests in this browser, for offline search", async ({ page }) => {
+    await openTodo(page);
+    const kept = async () =>
+      page.evaluate(
+        () =>
+          new Promise<string[]>((resolve) => {
+            const open = indexedDB.open("sn-search-items");
+            open.onsuccess = () => {
+              const db = open.result;
+              if (!db.objectStoreNames.contains("items")) return resolve([]);
+              const req = db.transaction("items").objectStore("items").getAllKeys();
+              req.onsuccess = () => {
+                db.close();
+                resolve((req.result as string[]).sort());
+              };
+            };
+          }),
+      );
+    await expect.poll(kept).toEqual(["digest", "todo"]);
+  });
+
   test("Download: this list on a list's page, all lists in All, none elsewhere", async ({ page }) => {
     await openTodo(page, "/list/" + "1".padStart(32, "0"));
     const btn = page.locator("#todo-download");

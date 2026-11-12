@@ -96,9 +96,6 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
     setState(next: SearchState) {
       state = next;
     },
-    setState(s: SearchState) {
-      state = s;
-    },
     emptyBody: () => gallery.querySelector(".empty")?.textContent ?? "",
     head: () => gallery.querySelector(".section-head")?.textContent ?? "",
     notices: () => [...gallery.querySelectorAll(".hits__notice")].map((n) => n.textContent),
