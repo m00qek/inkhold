@@ -39,7 +39,7 @@ function results(query: string, documents: LocalHit[], expansions: Expansion[] =
 }
 
 /** The renderer with every collaborator stubbed; `resultCard` records the join. */
-function harness(initial: { state: SearchState; pending: number | null; tree?: Entry[]; treeLoaded?: boolean; more?: () => HTMLElement }) {
+function harness(initial: { state: SearchState; pending: number | null; tree?: Entry[]; treeLoaded?: boolean; more?: () => HTMLElement; moreCorrected?: boolean }) {
   const gallery = document.createElement("section");
   let state = initial.state;
   let pending = initial.pending;
@@ -75,7 +75,7 @@ function harness(initial: { state: SearchState; pending: number | null; tree?: E
       return box;
     },
     indexPending: () => pending,
-    moreResults: initial.more ? () => initial.more!() : undefined,
+    moreResults: initial.more ? () => ({ node: initial.more!(), corrected: initial.moreCorrected ?? false }) : undefined,
   };
 
   const search = createGallerySearch(ctx);
@@ -448,11 +448,39 @@ describe("names follow the index's rule", () => {
     expect(g.querySelector(".section-head + ul.cards > .card--folder")?.textContent).toBe("Aulas de Francês");
   });
 
+  it("says the typo ladder's spelling once, over a name or folder it found", async () => {
+    const h = await indexed([folder("f1", "Projects"), note("1", "Receitas")]);
+    h.paint("Projcts");
+    expect(h.folderRows()).toEqual(["Projects"]);
+    expect(h.notices()).toEqual(["Matched projects instead of “Projcts”."]);
+  });
+
   it("a folder alone is an answer, not 'no matches'", async () => {
     const h = await indexed([folder("f1", "Receitas")]);
     h.paint("receitas");
     expect(h.folderRows()).toEqual(["Receitas"]);
     expect(h.gallery.querySelector(".empty")).toBeNull();
+  });
+});
+
+describe("the typo ladder's notice over the apps' groups", () => {
+  const group = () => {
+    const box = document.createElement("section");
+    box.className = "digest-hits";
+    return box;
+  };
+
+  const SUBLET: Expansion[] = [{ typed: "sublte", matched: "sublet" }];
+
+  it("is said once, above them, when they came from its spelling", () => {
+    const g = harness({ state: results("sublte", [], SUBLET), pending: 0, tree: [note("1", "One")], more: group, moreCorrected: true }).paint("sublte");
+    expect(g.querySelectorAll(".hits__notice")).toHaveLength(1);
+    expect(g.firstElementChild?.className).toBe("hits__notice");
+  });
+
+  it("is not said over a group matched as typed", () => {
+    const g = harness({ state: results("sublte", [], SUBLET), pending: 0, tree: [note("1", "One")], more: group }).paint("sublte");
+    expect(g.querySelectorAll(".hits__notice")).toHaveLength(0);
   });
 });
 

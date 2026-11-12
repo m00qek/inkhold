@@ -88,7 +88,7 @@ describe("finding to-dos: lists, lassoed words, typos, marks", () => {
   it("when nothing matches as typed, the nearest spelling, said, as the notes do", () => {
     const f = find(snap([ligar, haus]), "dentsta");
     expect(ids(f)).toEqual(["l"]);
-    expect(f.expansions).toEqual([{ typed: "dentsta", matched: "dentista" }]);
+    expect(f.corrected).toBe(true);
     expect(f.marks("Ligar para o dentista").length).toBe(1);
   });
 

@@ -65,6 +65,18 @@ export function queryMarks(text: string, query: NameQuery | null): [number, numb
   return wordMarks(text, (w) => query.whole.includes(w) || w.startsWith(query.start));
 }
 
+/**
+ * The words to mark in a result's name or title: the typed ones, accents and
+ * order aside, and where the typo ladder answered, its spellings of them.
+ */
+export function typedMarks(text: string, q: string, expansions: readonly { readonly matched: string }[]): [number, number][] {
+  const typed = queryMarks(text, nameQuery(q));
+  if (expansions.length === 0) return typed;
+  const matched = new Set(expansions.map((e) => fold(e.matched)));
+  const all = [...typed, ...wordMarks(text, (w) => matched.has(w))].sort((a, b) => a[0] - b[0]);
+  return all.filter((m, i) => i === 0 || m[0] !== all[i - 1]![0]);
+}
+
 /** Whole words of `text` (original positions) one of whose folded parts `accept` takes. */
 export function wordMarks(text: string, accept: (folded: string) => boolean): [number, number][] {
   const out: [number, number][] = [];

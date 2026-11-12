@@ -1,18 +1,16 @@
 // To-dos in the library-wide search: a row in the search index per task and
 // per list (`todoRows`), matched there like everything else, and painted here
 // as their own group: the lists named like the query, then the tasks, each
-// with the matched words marked, and the typo ladder said as the notes say it.
+// with the matched words marked; the typo ladder's notice is the search's own.
 
 import { el } from "../../ui/dom";
 import { ICONS, svg } from "../../ui/icons";
 import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
 import { byTabletOrder, homeView, listName, newestDone, openCount, viewPath, type TodoView } from "./todoModel";
-import { insideQuery, matchesName, nameQuery, queryMarks, wordMarks, type NameQuery } from "../../search/match";
-import { fold } from "../../search/fold";
+import { insideQuery, matchesName, queryMarks, typedMarks } from "../../search/match";
 import { fields, type ItemRow } from "../../search/itemRows";
 import type { Expansion } from "../../search/localSearch";
 import { taskMeta } from "./todoView";
-import { expansionNotice } from "../noteSearch";
 import { onPlainClick } from "../../ui/link";
 
 /** Text and `<mark>` around the given ranges; never markup: titles are the person's own text. */
@@ -55,8 +53,8 @@ export interface TodoFind {
   readonly tasks: TodoTask[];
   /** Lists named like the query; null is the Inbox. */
   readonly lists: { readonly id: string | null; readonly name: string }[];
-  /** What the typo ladder put in place of the typed words; empty when they matched as typed. */
-  readonly expansions: readonly Expansion[];
+  /** Found by the typo ladder's spelling, not as typed. */
+  readonly corrected: boolean;
   /** Where the matched words are in a title or a list's name. */
   marks(text: string): [number, number][];
 }
@@ -68,22 +66,20 @@ export interface TodoFind {
  */
 export function findTodos(s: TodoSnapshot, q: string, keys: readonly string[], expansions: readonly Expansion[]): TodoFind {
   const lists = [{ id: null as string | null, name: "Inbox" }, ...s.lists.map((l) => ({ id: l.id as string | null, name: l.title }))];
-  if (keys.length > 0 && expansions.length === 0) return found(s, keys, lists, [], nameQuery(q));
+  if (keys.length > 0 && expansions.length === 0) return found(s, q, keys, lists, []);
   const inside = insideQuery(q);
   const tasks = s.tasks.filter((t) => matchesName(searchText(s, t), inside));
   const named = lists.filter((l) => matchesName(l.name, inside));
-  if (tasks.length > 0 || named.length > 0) return { tasks: ordered(s, tasks), lists: named, expansions: [], marks: (text) => queryMarks(text, inside) };
-  return found(s, keys, lists, expansions, nameQuery(q));
+  if (tasks.length > 0 || named.length > 0) return { tasks: ordered(s, tasks), lists: named, corrected: false, marks: (text) => queryMarks(text, inside) };
+  return found(s, q, keys, lists, expansions);
 }
 
-function found(s: TodoSnapshot, keys: readonly string[], lists: TodoFind["lists"], expansions: readonly Expansion[], query: NameQuery | null): TodoFind {
+function found(s: TodoSnapshot, q: string, keys: readonly string[], lists: TodoFind["lists"], expansions: readonly Expansion[]): TodoFind {
   const want = new Set(keys);
   const tasks = s.tasks.filter((t) => want.has(TASK + t.id));
   const named = lists.filter((l) => want.has(LIST + (l.id ?? "")));
-  const matched = new Set(expansions.map((e) => fold(e.matched)));
-  const marks = (text: string) =>
-    matched.size === 0 ? queryMarks(text, query) : [...queryMarks(text, query), ...wordMarks(text, (w) => matched.has(w))].sort((a, b) => a[0] - b[0]).filter((m, i, all) => i === 0 || m[0] !== all[i - 1]![0]);
-  return { tasks: ordered(s, tasks), lists: named, expansions, marks };
+  const corrected = expansions.length > 0 && (tasks.length > 0 || named.length > 0);
+  return { tasks: ordered(s, tasks), lists: named, corrected, marks: (text) => typedMarks(text, q, expansions) };
 }
 
 function ordered(s: TodoSnapshot, hit: TodoTask[]): TodoTask[] {
@@ -141,18 +137,10 @@ export function todoHits(
   });
 
   const counts = [found.lists.length ? plural(found.lists.length, "list") : "", found.tasks.length ? plural(found.tasks.length, "to-do") : ""].filter(Boolean);
-  const notice = expansionNotice(found.expansions);
   return el(
     "section",
     { class: "todo-hits", "aria-label": "To-dos" },
     el("h2", { class: "section-head" }, el("span", { text: counts.join(" · ") })),
-    notice
-      ? el(
-          "p",
-          { class: "hits__notice", role: "status" },
-          ...notice.map((p) => (p.matched ? el("strong", { class: "hits__matched", text: p.text }) : document.createTextNode(p.text))),
-        )
-      : null,
     el("ul", { class: "todo-hits__list" }, ...listRows, ...taskRows),
   );
 }

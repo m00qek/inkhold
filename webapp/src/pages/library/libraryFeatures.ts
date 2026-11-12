@@ -144,9 +144,10 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
         ? digestHits(digests, foundDigests(digests, s.items.digest), q, s.expansions, (place) => go(digestHref(placePath(place))))
         : null;
       const snap = ctx.searchItems.todo();
-      const tHits = snap?.enabled ? todoHits(
+      const found = snap?.enabled ? findTodos(snap, q, s.items.todo, s.expansions) : null;
+      const tHits = snap && found ? todoHits(
         snap,
-        findTodos(snap, q, s.items.todo, s.expansions),
+        found,
         Date.now(),
         (t) => {
           ctx.todo.reveal(t.id);
@@ -156,9 +157,10 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
         (view) => go(todoHref(viewPath(view))),
       ) : null;
       if (!dHits && !tHits) return null;
-      const both = document.createDocumentFragment();
-      both.append(...[dHits, tHits].filter((x): x is HTMLElement => x !== null));
-      return both;
+      const node = document.createDocumentFragment();
+      node.append(...[dHits, tHits].filter((x): x is HTMLElement => x !== null));
+      // Digests come only from the index's answer, so from the ladder's spelling whenever it answered.
+      return { node, corrected: (dHits !== null && s.expansions.length > 0) || (tHits !== null && found!.corrected) };
     },
   });
 

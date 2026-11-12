@@ -4,8 +4,7 @@
 
 import { onPlainClick } from "../ui/link";
 import type { SearchExcerpts } from "./searchExcerpts";
-import { insideQuery, nameMarks, nameQuery, wordMarks } from "../search/match";
-import { fold } from "../search/fold";
+import { insideQuery, nameMarks, typedMarks } from "../search/match";
 import { el } from "../ui/dom";
 import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
 import { ICONS, svg, type IconName } from "../ui/icons";
@@ -150,17 +149,14 @@ function cardMarks(note: NoteSummary): HTMLElement {
 /**
 * Marks the query's words as text nodes and `<mark>`, never markup: names are
 * raw device text. A marked title is how a name match shows itself: by the
-* typed words, accents and order aside, else the typed text inside the name,
-* else the typo ladder's spelling of them.
+* typed words and the typo ladder's spellings (`typedMarks`), else the typed
+* text inside the name.
 */
 function markedText(text: string, q: string, expansions: readonly Expansion[]): Node[] {
   const out: Node[] = [];
   let from = 0;
-  const matched = new Set(expansions.map((e) => fold(e.matched)));
-  const strict = nameMarks(text, nameQuery(q));
-  const inside = strict.length > 0 ? strict : nameMarks(text, insideQuery(q));
-  const marks = inside.length > 0 || matched.size === 0 ? inside : wordMarks(text, (w) => matched.has(w));
-  for (const [start, end] of marks) {
+  const typed = typedMarks(text, q, expansions);
+  for (const [start, end] of typed.length > 0 ? typed : nameMarks(text, insideQuery(q))) {
     if (start > from) out.push(document.createTextNode(text.slice(from, start)));
     out.push(el("mark", { text: text.slice(start, end) }));
     from = end;

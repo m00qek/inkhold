@@ -262,7 +262,7 @@ test.describe("To-Do", () => {
 
     await openTodo(page);
     await box.fill("dentsta");
-    await expect(group.locator(".hits__notice")).toHaveText("Matched dentista instead of “dentsta”.");
+    await expect(page.locator(".gallery .hits__notice")).toHaveText("Matched dentista instead of “dentsta”.");
     await expect(group.locator(".todo-hit__title")).toHaveText(["Ligar para o dentista"]);
   });
 

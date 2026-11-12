@@ -31,6 +31,14 @@ export const FOLDER = "f:";
 interface NameHits {
   readonly notes: ReadonlySet<Id>;
   readonly folders: ReadonlySet<Id>;
+  /** Found by the typo ladder's spelling, not as typed. */
+  readonly corrected: boolean;
+}
+
+/** The digests' and to-dos' groups, and whether any of them came from the typo ladder's spelling. */
+export interface MoreResults {
+  readonly node: Node;
+  readonly corrected: boolean;
 }
 
 /** Read through getters so a paint reflects state at paint time. */
@@ -52,7 +60,7 @@ export interface GallerySearchCtx {
   */
   indexPending: () => number | null;
   /** The digests' and to-dos' groups, painted among the notes (see `renderSearch`); null: none. */
-  moreResults?: (q: string) => Node | null;
+  moreResults?: (q: string) => MoreResults | null;
   /** How much handwriting search can find (`searchCoverage.ts`); absent: not said. */
   coverage?: SearchCoverage;
 }
@@ -87,14 +95,15 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
    */
   function nameHits(q: string): NameHits {
     const s = answerFor(ctx.getSearchState(), q);
-    if (!s) return { notes: new Set(), folders: new Set() };
+    if (!s) return { notes: new Set(), folders: new Set(), corrected: false };
     const notes = new Set<Id>();
     const folders = new Set<Id>();
     for (const key of s.items.name) {
       if (key.startsWith(NOTE)) notes.add(key.slice(NOTE.length));
       else if (key.startsWith(FOLDER)) folders.add(key.slice(FOLDER.length));
     }
-    if ((notes.size > 0 || folders.size > 0) && s.expansions.length === 0) return { notes, folders };
+    const found = notes.size > 0 || folders.size > 0;
+    if (found && s.expansions.length === 0) return { notes, folders, corrected: false };
     // Before the typo ladder's answer, as for to-dos.
     const inside = insideQuery(q);
     const inNotes = new Set<Id>();
@@ -105,7 +114,8 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         else if (e.kind === "folder" && matchesName(ctx.labelFor(e), inside)) inFolders.add(e.id);
       }
     }
-    return inNotes.size > 0 || inFolders.size > 0 ? { notes: inNotes, folders: inFolders } : { notes, folders };
+    if (inNotes.size > 0 || inFolders.size > 0) return { notes: inNotes, folders: inFolders, corrected: false };
+    return { notes, folders, corrected: found };
   }
 
   /**
@@ -166,11 +176,12 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /**
-  * The "matched reunião" line, once as a header: a per-row line would be false
-  * on rows that matched by name. Only shown if a row with pages survived the join.
+  * The "matched reunião" line, once above every group: the typo ladder is one
+  * for all of them. Only over something it found, or it would be false over a
+  * name matched as typed, and contradict "No matches".
   */
-  function expansionBlock(expansions: readonly Expansion[], results: readonly SearchResult[]): HTMLElement | null {
-    if (!results.some((r) => r.pages.length > 0)) return null;
+  function expansionBlock(expansions: readonly Expansion[], shown: boolean): HTMLElement | null {
+    if (!shown) return null;
     const parts = expansionNotice(expansions);
     if (!parts) return null;
     return el(
@@ -202,7 +213,9 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     const pending = ctx.indexPending() ?? 0;
 
     const expansions = searchState.kind === "results" ? searchState.expansions : [];
-    const matched = expansionBlock(expansions, results);
+    const extra = ctx.moreResults?.(q) ?? null;
+    const more = extra?.node ?? null;
+    const matched = expansionBlock(expansions, results.some((r) => r.pages.length > 0) || names.corrected || extra?.corrected === true);
     if (matched) gallery.append(matched);
 
     // A phrase checked against text the browser doesn't hold for every result.
@@ -224,10 +237,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       gallery.append(cardList(...folders.map((f) => ctx.folderCard(f))));
     }
 
-    const more = ctx.moreResults?.(q) ?? null;
     if (results.length === 0 && (more || folders.length > 0)) {
-      // The notes may still answer; say so rather than "no notes".
-      if (searchState.kind === "searching") gallery.append(el("p", { class: "hits__notice", role: "status", text: "Searching handwriting…" }));
       if (more) gallery.append(more);
       const cov = coverageBlock();
       if (cov) gallery.append(cov);
@@ -259,14 +269,13 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         "h2",
         { class: "section-head" },
         el("span", { text: searchCountLabel(results.length, pages) }),
-        searchState.kind === "searching" ? el("span", { class: "hits__count", text: "Searching handwriting…" }) : null,
       ),
     );
-    // The to-dos are the person's writing: before the first document that is
-    // neither named like the query nor a note, else at the end.
+    // The digests and to-dos are the person's writing: before the first
+    // document that is neither named like the query nor a note, else at the end.
     const at = results.findIndex((r) => !r.nameMatched && !r.written);
     const cards = results.map((result, i) => ctx.resultCard(result, i, q, expansions));
-    // Two lists around the to-dos when they sit between the results.
+    // Two lists around them when they sit between the results.
     const split = more && at >= 0 ? at : cards.length;
     if (split > 0) gallery.append(cardList(...cards.slice(0, split)));
     if (more) gallery.append(more);
