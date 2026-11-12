@@ -50,7 +50,7 @@ export interface DigestPage {
   snapshot(): DigestSnapshot | null;
   /** Re-reads the server (shell start, tab back in focus). */
   load(): Promise<void>;
-  /** Re-reads the server only when the last answer is older than half a minute: a viewer opening a file. */
+  /** Re-reads the server only when it was last asked over half a minute ago, sharing a read in flight: a viewer opening a file, a search. */
   freshen(): Promise<void>;
   destroy(): void;
 }
@@ -74,8 +74,10 @@ export function createDigestPage(host: DigestHost): DigestPage {
   let open_ = false;
   let place: DigestPlace = { view: { kind: "category", uid: null }, digest: null };
   let loadToken = 0;
-  /** When the server last answered (ms); 0 before it has. */
-  let answeredAt = 0;
+  /** When the server was last asked (ms), answered or not; 0 before. */
+  let askedAt = 0;
+  /** The read in flight, for a viewer that waits on it rather than asking again. */
+  let reading: Promise<void> | null = null;
   /** The comment being edited: its digest and the text so far. */
   let editing: { id: string; draft: string } | null = null;
   /** A comment's save in flight. */
@@ -93,12 +95,20 @@ export function createDigestPage(host: DigestHost): DigestPage {
   let focusNext: "panel" | "comment-box" | "comment-edit" | "move" | { card: string } | null = null;
 
   /** Re-reads the server. An answer like the last one repaints nothing (unless one is due), so nothing on screen moves. */
-  async function load(): Promise<void> {
+  function load(): Promise<void> {
+    askedAt = Date.now();
+    const p = read().finally(() => {
+      if (reading === p) reading = null;
+    });
+    reading = p;
+    return p;
+  }
+
+  async function read(): Promise<void> {
     const mine = ++loadToken;
     try {
       const s = await host.api.digests();
       if (mine !== loadToken) return;
-      answeredAt = Date.now();
       if (snap !== null && !failed && sameSnapshot(snap, s)) {
         // A comment being written is never repainted away.
         if (repaintDue && open_ && editing === null) paint();
@@ -295,7 +305,8 @@ export function createDigestPage(host: DigestHost): DigestPage {
     place: () => (open_ ? place : null),
     snapshot: () => snap,
     load: () => load(),
-    freshen: () => (Date.now() - answeredAt < FRESH_MS ? Promise.resolve() : load()),
+    // Asked, not answered: a failing or slow server is not asked again on every search paint.
+    freshen: () => reading ?? (Date.now() - askedAt < FRESH_MS ? Promise.resolve() : load()),
     destroy() {
       clearInterval(poll);
       root.removeEventListener("keydown", onKey);
