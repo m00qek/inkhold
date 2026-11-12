@@ -342,7 +342,14 @@ const TODO = 2 << 28;
     equal(e.idx_kind_total(2), 0, "...a kind it found nothing in, as none");
   }
 
-  // A word the index holds is not a typo: in a phrase a near-miss would replace it.
+  // Outside quotes a word the index holds keeps its near-misses: a page the
+  // tablet misread may hold one ("chant" for "chart").
+  {
+    const r = fuzzy("chart dawn ");
+    check(r.expansion.includes("chart>chant"), "an unquoted word the index holds still gets its near-misses", r.expansion);
+    check(r.hits.includes(TODO + 4), "...so a row with the misread word is found", r.hits.join(","));
+  }
+  // In a phrase a word the index holds is taken as typed: a near-miss would replace it.
   {
     const r = fuzzy('"colour chart" ');
     equal(r.expansion, "colour>color", "only the misspelt word of a phrase is corrected, not its neighbour one edit from `chant`");

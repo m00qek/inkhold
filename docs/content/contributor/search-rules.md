@@ -85,8 +85,10 @@ flowchart TD
   only search reads that copy.
 - **The typo ladder** runs in the wasm (Damerau-Levenshtein), and only when the
   exact query has no hits of any kind: the corpus is misspelt handwriting
-  recognition. Only a word the index does not hold as typed is corrected, so a
-  phrase keeps its other words. A half-typed word is compared with both the
+  recognition. Outside quotes any word may get near-misses beside it, as a
+  page the tablet misread may hold one of a word spelt right elsewhere; inside
+  a quoted phrase a word the index holds is taken as typed, since a near-miss
+  would replace it there. A half-typed word is compared with both the
   start and the whole of each vocabulary word. English-oriented stemmers and
   spellfix were rejected; the corpus is Portuguese.
 - **The fallback inside a name.** When the index matched no name or to-do as

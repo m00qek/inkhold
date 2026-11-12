@@ -68,8 +68,10 @@ const FuzzyToken = struct {
     /// `term`'s length in codepoints, for `delta`.
     term_len: usize,
     budget: usize,
-    /// The index holds it as typed (or, being typed, a word it starts): it
-    /// is not a typo, and keeps no near-miss. In a phrase one would replace it.
+    /// The index holds it as typed (or, being typed, a word it starts). In a
+    /// quoted phrase that word is taken as typed: a near-miss would replace
+    /// it there. Outside quotes it keeps its near-misses beside it, as a page
+    /// the tablet misread may hold one.
     present: bool = false,
     cands: std.ArrayList(Candidate) = .empty,
     alts: std.ArrayList([]const u8) = .empty,
@@ -184,8 +186,9 @@ fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
         }
     }
 
-    for (tokens) |*t| {
-        if (t.present) t.cands.clearRetainingCapacity();
+    for (tokens, s.tokens) |*t, st| {
+        const quoted = if (st.phrase) |pi| s.phrases[pi].terms >= 2 else false;
+        if (t.present and quoted) t.cands.clearRetainingCapacity();
         if (t.cands.items.len == 0) continue;
         const best = t.cands.items[0];
         var n: usize = 1;
