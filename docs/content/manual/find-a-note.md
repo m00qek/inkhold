@@ -34,8 +34,9 @@ of PDFs and text files, your to-dos and your digests.
 - **Digests**, by the passage, your comment, the category and the document
   it came from, all together: "whale obsession" finds the passage about the
   whale you commented "Ahab's obsession". A digest opens on the Digest page.
-- **Close spellings.** With no exact match, it says "No exact match — showing
-  close matches.", so a typo still finds the word you meant.
+- **Close spellings.** With no exact match, it looks for the nearest spelling
+  and says so above the results, for example "Matched dentista instead of
+  “dentsta”.", so a typo still finds the word you meant.
 
 Search runs in your browser: the first search after opening the library may
 take a moment while it gathers what it needs.

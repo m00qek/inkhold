@@ -6,7 +6,8 @@ import { createThumbnails, createCanvasThumbPainter, createFetchThumbNet } from 
 import { createNoteSearch } from "../noteSearch";
 import { createSearchService } from "../../search/searchService";
 import type { LibraryCtx } from "./libraryContext";
-import { createSearchItems, nameRows } from "./searchItems";
+import { createSearchItems } from "./searchItems";
+import { nameRows } from "../nameRows";
 import { openItemStore } from "../../cache/itemStore";
 
 /** Builds the thumbnail facade, the lazy engine, native image lazy-loading and library search onto `ctx`. */

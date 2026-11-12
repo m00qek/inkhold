@@ -43,7 +43,7 @@ export function todoRows(s: TodoSnapshot): ItemRow[] {
   if (!s.enabled) return [];
   return [
     ...s.tasks.map((t) => ({ key: TASK + t.id, text: searchText(s, t) })),
-    { key: LIST, text: "Inbox" },
+    { key: LIST, text: fields("Inbox") },
     ...s.lists.map((l) => ({ key: LIST + l.id, text: fields(l.title) })),
   ];
 }

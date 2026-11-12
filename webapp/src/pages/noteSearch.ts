@@ -94,6 +94,8 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
   }
 
   async function run(query: string, mine: number): Promise<void> {
+    // This run reads what is there now.
+    outdated = false;
     const ac = new AbortController();
     inflight = ac;
     try {

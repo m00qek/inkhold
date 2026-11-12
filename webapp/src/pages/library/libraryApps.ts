@@ -41,9 +41,8 @@ export function installAppPages(ctx: LibraryCtx): void {
     handled: ctx.handled,
     onChanged: () => {
       ctx.rail.build();
-      // New to-dos reach search: their rows change, and an open search asks again.
+      // New to-dos reach search: their rows change, and an open search asks again and repaints.
       ctx.searchItems.setTodo(ctx.todo.snapshot());
-      if (ctx.searchInView()) ctx.render.renderGallery();
     },
     go: (view) => go(todoHref(view)),
   });

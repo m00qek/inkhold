@@ -95,9 +95,10 @@ flowchart TD
 - **Marks** are drawn in the browser (`fold.ts`, pinned to the wasm by
   `foldAgreement.test.ts`). They never decide a match: a divergence loses a
   highlight, never a result.
-- **Measured** with `npm run bench:search` on a laptop, 2026-11-05, with the
-  real wasm and libraries shaped like the hub's (45 documents, 231 pages of
-  text, 54 distinct words a page). A whole rebuild, which every sync that
+- **Measured** with `npm run bench:search` on a laptop, 2026-11-05, before
+  names, to-dos and digests were rows of the index and before its four
+  columns, with the real wasm and libraries shaped like the hub's (45
+  documents, 231 pages of text, 54 distinct words a page). A whole rebuild, which every sync that
   brings something new costs the next search: 4 ms at the hub's size, 24 ms at
   ten times it (450 documents), 674 ms at a hundred times (4,500 documents,
   58 MB). Queries stay under 10 ms; a typo-ladder scan is 90 ms at a hundred

@@ -1,8 +1,8 @@
 // What search finds besides document pages, written into the search index as
-// rows of their own: the library's names (`nameRows`), read from the cached
-// tree, and the tablet's apps, the last To-Do and Digest answers (`todoRows`,
-// `digestRows`), kept on the device (`cache/itemStore.ts`) so search finds
-// them offline too (#18). The pages hand each answer over; until the first
+// rows of their own: the library's names (`pages/nameRows.ts`), read from the
+// cached tree, and the tablet's apps, the last To-Do and Digest answers
+// (`todoRows`, `digestRows`), kept on the device (`cache/itemStore.ts`) so
+// search finds them offline too (#18). The pages hand each answer over; until the first
 // one, the stored one stands in. A change re-asks an open search, so what was
 // just saved is found at once.
 
@@ -10,24 +10,9 @@ import type { TodoSnapshot } from "../../api/todoTypes";
 import type { DigestSnapshot } from "../../api/digestTypes";
 import type { ItemStore } from "../../cache/itemStore";
 import type { SearchService } from "../../search/searchService";
-import { fields, type ItemRow } from "../../search/itemRows";
-import type { FolderCache } from "../folderCache";
-import { FOLDER, NOTE } from "../gallerySearch";
-import type { Folder } from "../../core/types";
+import type { ItemRow } from "../../search/itemRows";
 import { todoRows } from "../todo/todoSearch";
 import { digestRows } from "../digest/digestSearch";
-
-/** The search index's rows for names: every note's, and every folder's by the label the rail shows. */
-export function nameRows(folders: Pick<FolderCache, "values">, labelFor: (folder: Folder) => string): ItemRow[] {
-  const rows = new Map<string, string>();
-  for (const cached of folders.values()) {
-    for (const e of cached.entries) {
-      if (e.kind === "note") rows.set(NOTE + e.id, fields(e.name));
-      else rows.set(FOLDER + e.id, fields(labelFor(e)));
-    }
-  }
-  return [...rows].map(([key, text]) => ({ key, text }));
-}
 
 export interface SearchItems {
   /** The To-Do answer search uses: the page's last, or the stored one. */

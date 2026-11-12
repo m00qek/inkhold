@@ -61,7 +61,7 @@ export interface ItemRef {
   key: string;
 }
 
-/** A query's answer. Totals are EXACT and independent of `limit` (§9.5). */
+/** A query's answer. `total` is EXACT and independent of `limit` (§9.5); the caller asks for every item, so `items` is whole. */
 export interface QueryResult {
   /** Matching pages. */
   total: number;

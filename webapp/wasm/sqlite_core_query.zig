@@ -87,7 +87,7 @@ pub fn scan(h: *c.sqlite3, arena: std.mem.Allocator, fold: FoldFn, query: []cons
 
 /// Appends `term` as a quoted FTS5 string, doubling `"` so the expression is
 /// safe regardless of tokenizer.
-pub fn appendQuoted(alloc: std.mem.Allocator, out: *std.ArrayList(u8), term: []const u8) !void {
+fn appendQuoted(alloc: std.mem.Allocator, out: *std.ArrayList(u8), term: []const u8) !void {
     try out.append(alloc, '"');
     for (term) |ch| {
         if (ch == '"') try out.append(alloc, '"');

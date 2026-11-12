@@ -8,6 +8,7 @@ import { el } from "../ui/dom";
 import { answerFor, coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail/railPlaces";
 import { holdsInside, insideOf } from "../search/match";
+import { namedIds } from "./nameRows";
 import type { SearchCoverage } from "./searchCoverage";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
@@ -22,10 +23,6 @@ function plural(n: number, one: string): string {
 function segmentKind(note: NoteSummary): number {
   return note.fileType.trim().toLowerCase() === "txt" ? 1 : 0;
 }
-
-/** Name rows' keys (`nameRows`): a note's id, a folder's. */
-export const NOTE = "n:";
-export const FOLDER = "f:";
 
 /** What matched by name: notes and folders, by id. */
 interface NameHits {
@@ -96,12 +93,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   function nameHits(q: string): NameHits {
     const s = answerFor(ctx.getSearchState(), q);
     if (!s) return { notes: new Set(), folders: new Set(), corrected: false };
-    const notes = new Set<Id>();
-    const folders = new Set<Id>();
-    for (const key of s.items.name) {
-      if (key.startsWith(NOTE)) notes.add(key.slice(NOTE.length));
-      else if (key.startsWith(FOLDER)) folders.add(key.slice(FOLDER.length));
-    }
+    const { notes, folders } = namedIds(s.items.name);
     const found = notes.size > 0 || folders.size > 0;
     if (found && s.expansions.length === 0) return { notes, folders, corrected: false };
     // Before the typo ladder's answer, as for to-dos.
