@@ -46,6 +46,8 @@ export function createReaderLifecycle(ctx: ReaderCtx): Reader {
     ctx.linkLayer.clear();
     ctx.linksByPage.clear();
     st.meta = null;
+    // A paint still in flight belongs to the note just closed.
+    st.paintToken++;
   }
 
   return {

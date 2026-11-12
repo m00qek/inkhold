@@ -336,6 +336,35 @@ test.describe("the reader's note stage, mid-fetch", () => {
     expect((await dropped).failure()?.errorText ?? "").toMatch(/ABORTED|cancelled/);
   });
 
+  // Regression: closing set `meta` to null under a paint still in flight, which then
+  // read `meta.pages` to warm the neighbours: an unhandled TypeError.
+  test("closing the reader while its page is still loading throws nothing", async ({ page }) => {
+    await mockApi(page, {
+      "controlplane/file/metadata": { json: layeredMeta(2, []) },
+      "controlplane/tree": {
+        json: { folderId: null, path: [], entries: [layeredEntry({ firstPageLayered: false, pageCount: 2 })], syncVersion: 1 },
+      },
+      "user/me": { json: ME },
+    });
+    await serveLayeredPages(page, { index: 0, ms: 1500 });
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    // Every request for the page, the hover prefetch's and the paint's, until it is answered.
+    let pending = 0;
+    const isPage = (url: string) => new URL(url).pathname === `/note/${LAY}/page/0`;
+    page.on("request", (r) => void (isPage(r.url()) && pending++));
+    page.on("requestfinished", (r) => void (isPage(r.url()) && pending--));
+    await page.goto("/?real");
+    await page.locator(".card__open", { hasText: "Layered field sketch" }).click();
+    await expect(page.getByRole("region", { name: "Reader" })).toBeVisible();
+    await page.goBack();
+    await expect(page.getByRole("region", { name: "Reader" })).toBeHidden();
+    await expect.poll(() => pending, { timeout: 5000 }).toBe(0);
+    // The paint draws after its answer; give it that turn.
+    await page.waitForTimeout(300);
+    expect(errors).toEqual([]);
+  });
+
   // With layers on the listing's `firstPage`, the stack is up before `getNoteMeta` lands.
   test("a listing-originated open paints the stack before the metadata lands", async ({ page }) => {
     await mockApi(page, {

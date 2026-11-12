@@ -197,6 +197,7 @@ export function createReaderPaint(ctx: ReaderCtx): ReaderPaint {
         dispatchApiFailure(ctx.failures, e, noteId, page);
       }
     }
+    if (token !== st.paintToken) return; // superseded, or the reader closed
 
     // Warm the neighbours so paging is instant.
     for (const j of [st.pageIndex - 1, st.pageIndex + 1]) {
