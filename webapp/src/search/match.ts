@@ -1,79 +1,41 @@
-// The one rule for matching a query against a name: what the index does to
-// note text, applied to the things the index doesn't hold (note and folder
-// names, to-dos). The query's words are folded like the index's
-// (`unicode61 remove_diacritics 2`, imitated by `fold.ts`); each must be a
-// whole word of the name, in any order, and the last may be the start of one,
-// as the index treats the word still being typed.
-//
-// When that finds no names at all, callers fall back to `insideQuery`: the
-// typed text anywhere in a name ("style" in "MyStyle"). A fallback, never a
-// widening, like the index's typo ladder.
+// What the browser still does with a query itself, beside the index, which
+// decides every word match (names, to-dos and digests are rows there): the
+// one fallback FTS5 cannot do, the typed text anywhere in a name ("style" in
+// "MyStyle"), used only when the index matched no name or to-do as typed (a
+// fallback, never a widening); and marking the matched words, folded as the
+// index folds them (`fold.ts`).
 
 import { fold, words } from "./fold";
-import { holdsAll, phrasesOf, type Phrase } from "./phrase";
 
-/** A query ready to test names against; null when it has no words. */
-export interface NameQuery {
-  readonly whole: readonly string[];
-  /** The last word, matched as the start of a word. */
-  readonly start: string;
-  /** The fallback's: the folded query, matched anywhere in the folded name. */
-  readonly inside?: string;
-  /** Quoted phrases: their words next to each other, in order (`phrase.ts`). */
-  readonly phrases?: readonly Phrase[];
+/** The fallback's needle: the typed text, folded, without quotes; null when blank. */
+export function insideOf(q: string): string | null {
+  const needle = fold(q).replace(/"/g, "").replace(/\s+/g, " ").trim();
+  return needle === "" ? null : needle;
 }
 
-export function nameQuery(q: string): NameQuery | null {
-  const terms = words(q);
-  if (terms.length === 0) return null;
-  return { whole: terms.slice(0, -1), start: terms[terms.length - 1]!, phrases: phrasesOf(q) };
+/** True when the folded `text` holds `needle` anywhere. */
+export function holdsInside(text: string, needle: string | null): boolean {
+  return needle !== null && fold(text).includes(needle);
 }
 
-/** The fallback: the typed text, folded, anywhere in a name. Null when blank. */
-export function insideQuery(q: string): NameQuery | null {
-  const inside = fold(q).replace(/"/g, "").replace(/\s+/g, " ").trim();
-  return inside === "" ? null : { whole: [], start: "", inside };
-}
-
-/** The word rule, or `insideQuery` when it matches no name in `texts`. */
-export function nameQueryFor(q: string, texts: Iterable<string>): NameQuery | null {
-  const strict = nameQuery(q);
-  for (const t of texts) if (matchesName(t, strict)) return strict;
-  return insideQuery(q);
-}
-
-/** True when every query word is a word of `text` (the last, the start of one). */
-export function matchesName(text: string, query: NameQuery | null): boolean {
-  if (!query) return false;
-  if (query.inside !== undefined) return fold(text).includes(query.inside);
-  const have = words(text);
-  if (!query.whole.every((t) => have.includes(t))) return false;
-  if (!have.some((w) => w.startsWith(query.start))) return false;
-  return holdsAll(text, query.phrases ?? []);
-}
-
-/** A word of the name, by where it sits in the original string. */
+/** A word of the text, by where it sits in the original string. */
 const WORD = /[\p{L}\p{M}\p{N}]+/gu;
 
 /**
- * Where the query's words sit in `text`, as [start, end) ranges of the
- * original string, for marking. Whole words are marked, also for the last
- * query word, which may have matched only the start of one.
+ * The words to mark in a result's name or title, as [start, end) ranges of
+ * the original string: the typed ones, accents and order aside, the last
+ * also as the start of a word while it is being typed (no space after it, the
+ * index's rule), and where the typo ladder answered, its spellings of them.
+ * Whole words are marked.
  */
-export function nameMarks(text: string, query: NameQuery | null): [number, number][] {
-  if (!query || !matchesName(text, query)) return [];
-  return queryMarks(text, query);
-}
-
-/**
- * The query's words in `text`, whether or not `text` matched on its own: a
- * to-do matches on its title, notebook and list together, and its title shows
- * whichever of the words it holds.
- */
-export function queryMarks(text: string, query: NameQuery | null): [number, number][] {
-  if (!query) return [];
-  if (query.inside !== undefined) return text === "" ? [] : insideMarks(text, query.inside);
-  return wordMarks(text, (w) => query.whole.includes(w) || w.startsWith(query.start));
+export function typedMarks(text: string, q: string, expansions: readonly { readonly matched: string }[]): [number, number][] {
+  const typed = words(q);
+  if (typed.length === 0) return [];
+  const open = !/\s$/.test(q);
+  const whole = new Set(open ? typed.slice(0, -1) : typed);
+  const start = open ? typed[typed.length - 1]! : null;
+  const matched = new Set(expansions.map((e) => fold(e.matched)));
+  return wordMarks(text, (w) => whole.has(w) || (start !== null && w.startsWith(start)) || matched.has(w));
 }
 
 /** Whole words of `text` (original positions) one of whose folded parts `accept` takes. */
@@ -86,7 +48,8 @@ export function wordMarks(text: string, accept: (folded: string) => boolean): [n
 }
 
 /** Each occurrence of `needle` in the folded `text`, mapped back to the original. */
-function insideMarks(text: string, needle: string): [number, number][] {
+export function insideMarks(text: string, needle: string | null): [number, number][] {
+  if (needle === null || text === "") return [];
   // Folded code units and, for each, the original index it came from.
   let folded = "";
   const from: number[] = [];

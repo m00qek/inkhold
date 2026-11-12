@@ -1,6 +1,6 @@
 ---
 title: "Find a note"
-description: "Search names, handwriting, PDFs and text files, and see which notes can't be searched."
+description: "Search names, handwriting, PDFs, text files, to-dos and digests, and see which notes can't be searched."
 weight: 2120
 extra:
   reader: household
@@ -10,7 +10,7 @@ extra:
 # Find a note
 
 Search everything at once: notebook and file names, your handwriting, the text
-of PDFs and text files, and your to-dos.
+of PDFs and text files, your to-dos and your digests.
 
 1. Type in the search box at the top of the library. On a phone, choose
    **Search** in the bar at the bottom.
@@ -31,8 +31,12 @@ of PDFs and text files, and your to-dos.
   recognises the notebook.
 - **PDFs and text files**, from their own text. Handwriting on a PDF is not
   searchable: see [What doesn't work yet](@/manual/limits.md).
-- **Close spellings.** With no exact match, it says "No exact match — showing
-  close matches.", so a typo still finds the word you meant.
+- **Digests**, by the passage, your comment, the category and the document
+  it came from, all together: "whale obsession" finds the passage about the
+  whale you commented "Ahab's obsession". A digest opens on the Digest page.
+- **Close spellings.** With no exact match, it looks for the nearest spelling
+  and says so above the results, for example "Matched dentista instead of
+  “dentsta”.", so a typo still finds the word you meant.
 
 Search runs in your browser: the first search after opening the library may
 take a moment while it gathers what it needs.

@@ -1,6 +1,6 @@
 // The library's feature wiring: version history, rename, card actions, gallery cards and search rows, uploads, and the account page's host.
 
-import { destinationHref, folderHref, go, todoHref } from "../../router";
+import { destinationHref, digestHref, folderHref, go, todoHref } from "../../router";
 import type { Entry } from "../../core/types";
 import { NameTakenError } from "../../api/client";
 import { openRenameDialog } from "../../ui/renameDialog";
@@ -14,10 +14,11 @@ import { createCardActions } from "../cardActions";
 import { createHistoryController, type HistoryController } from "../historyPanel";
 import { createGallerySearch, type GallerySearch } from "../gallerySearch";
 import { BIN_KEY } from "../bin/bin";
-import { todoHits } from "../todo/todoSearch";
+import { placePath } from "../digest/digestModel";
 import { homeView, viewPath } from "../todo/todoModel";
 import { type AccountHost } from "../account/account";
 import type { LibraryCtx } from "./libraryContext";
+import { appResults } from "./appResults";
 
 export interface LibraryFeatures {
   historyController: HistoryController;
@@ -127,23 +128,27 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     indexPending: () => st.indexPending,
     // Repaints only an open search, as the index frame does.
     coverage: createSearchCoverage(ctx.api, () => {
-      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
+      if (ctx.searchInView()) ctx.render.renderGallery();
     }),
-    moreResults: (q) => {
-      // To-dos read at start can be stale: a search asks again (`load` repaints).
-      ctx.todo.freshen();
-      return todoHits(
-        ctx.todo?.snapshot() ?? null,
-        q,
-        Date.now(),
-        (t) => {
-          ctx.todo.reveal(t.id);
-          go(todoHref(viewPath(homeView(t))));
+    moreResults: (q) =>
+      appResults(
+        {
+          state: () => st.searchState,
+          todo: () => ctx.searchItems.todo(),
+          digest: () => ctx.searchItems.digest(),
+          freshenTodo: () => ctx.todo.freshen(),
+          freshenDigest: () => void ctx.digest.freshen(),
+          openDigest: (place) => go(digestHref(placePath(place))),
+          openTask: (t) => {
+            ctx.todo.reveal(t.id);
+            go(todoHref(viewPath(homeView(t))));
+          },
+          openList: (view) => go(todoHref(viewPath(view))),
+          chip: (t) => ctx.todoInk.chip(t),
+          now: () => Date.now(),
         },
-        (t) => ctx.todoInk.chip(t),
-        (view) => go(todoHref(viewPath(view))),
-      );
-    },
+        q,
+      ),
   });
 
   /**

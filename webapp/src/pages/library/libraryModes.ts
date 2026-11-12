@@ -20,8 +20,9 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
     // The results belong in the gallery, which the console or account page covers.
     ctx.leaveDestinations();
     st.query = next;
-    // Names paint on the keystroke from the cached tree; transcripts arrive after
-    // the debounce. `rail: false`: typing can't change the tree.
+    // Names and transcripts both arrive after the debounce, from the index;
+    // its names are read again first. `rail: false`: typing can't change the tree.
+    ctx.searchItems.refreshNames(true);
     ctx.search.setQuery(st.query);
     ctx.render.renderGallery({ rail: false });
   }

@@ -52,15 +52,18 @@ The app installs as a PWA with a service worker. What it keeps is the app's
 own files and the listings a person browses with: the folder tree, the bin,
 the storage meter. That is names and counts, never a file. Without a network
 the app opens, shows the library as last seen, and says "needs a connection"
-when a notebook is opened, instead of a viewer that never fills. Signing out,
+when a notebook is opened, instead of a viewer that never fills. Search keeps
+what it answers from in the browser's own storage, apart from these: the
+documents' words and text, and the last to-dos and digests, so it answers
+offline too; the To-Do and Digest pages still need the server. Signing out,
 or the server refusing the session, forgets the listings and everything else
 the browser keeps of that person's library.
 
 ```mermaid
 flowchart TD
-  sw["Service worker"] -->|"cache first"| app["The app's own files"]
+  sw["Service worker"] -->|"cache first"| app["The app's own files, search's wasm among them"]
   sw -->|"network first, stored copy when offline"| lists["Listings: me, the tree, the bin, storage"]
-  sw -->|"never kept"| files["Pages, PDFs, images, text, to-dos, the decoders"]
+  sw -->|"never kept"| files["Pages, PDFs, images, text, to-dos, the note and PDF decoders"]
   files --> need["Opening one offline: 'needs a connection', and stay put"]
 ```
 

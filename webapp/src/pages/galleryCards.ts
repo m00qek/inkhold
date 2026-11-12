@@ -4,7 +4,7 @@
 
 import { onPlainClick } from "../ui/link";
 import type { SearchExcerpts } from "./searchExcerpts";
-import { insideQuery, nameMarks, nameQuery } from "../search/match";
+import { insideMarks, insideOf, typedMarks } from "../search/match";
 import { el } from "../ui/dom";
 import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
 import { ICONS, svg, type IconName } from "../ui/icons";
@@ -148,15 +148,15 @@ function cardMarks(note: NoteSummary): HTMLElement {
 
 /**
 * Marks the query's words as text nodes and `<mark>`, never markup: names are
-* raw device text. A marked title is how a name match shows itself. The words
-* are the ones `search/match.ts` matched on, accents and order aside.
+* raw device text. A marked title is how a name match shows itself: by the
+* typed words and the typo ladder's spellings (`typedMarks`), else the typed
+* text inside the name.
 */
-function markedText(text: string, q: string): Node[] {
+function markedText(text: string, q: string, expansions: readonly Expansion[]): Node[] {
   const out: Node[] = [];
   let from = 0;
-  // The word rule's marks, or the fallback's when the name matched only that way.
-  const strict = nameMarks(text, nameQuery(q));
-  for (const [start, end] of strict.length > 0 ? strict : nameMarks(text, insideQuery(q))) {
+  const typed = typedMarks(text, q, expansions);
+  for (const [start, end] of typed.length > 0 ? typed : insideMarks(text, insideOf(q))) {
     if (start > from) out.push(document.createTextNode(text.slice(from, start)));
     out.push(el("mark", { text: text.slice(start, end) }));
     from = end;
@@ -388,7 +388,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
         el(
           "div",
           { class: "card__main" },
-          el("div", { class: "card__title" }, ...(result.nameMatched ? markedText(note.name, q) : [document.createTextNode(note.name)])),
+          el("div", { class: "card__title" }, ...(result.nameMatched ? markedText(note.name, q, expansions) : [document.createTextNode(note.name)])),
           el(
             "div",
             { class: "card__meta" },

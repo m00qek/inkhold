@@ -1,16 +1,8 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import {
-  MAPPING_FORMAT_VERSION,
-  SearchIndex,
-  SearchIndexError,
-  StaleSnapshotError,
-  type CoreLoader,
-  type IndexSnapshot,
-  type SearchCoreExports,
-  type TermsDocument,
-} from "../../src/search/indexEngine";
+import { SearchIndex, SearchIndexError, type CoreLoader, type SearchCoreExports, type TermsDocument } from "../../src/search/indexEngine";
+import { fields } from "../../src/search/itemRows";
 
 // Against the real `public/sqlite-core.wasm` (built by the `pretest` hook): the
 // tokenizer is what is under test. It imports nothing, so Node can instantiate it.
@@ -101,7 +93,7 @@ describe("SearchIndex build and query", () => {
       const r = index.query("reuniao ", 1);
       expect(r.total).toBe(2);
       expect(r.hits).toHaveLength(1);
-      expect(index.query("reuniao ", 0)).toEqual({ total: 2, hits: [], expansions: [] });
+      expect(index.query("reuniao ", 0)).toEqual({ total: 2, hits: [], items: [], expansions: [] });
     } finally {
       index.close();
     }
@@ -164,7 +156,7 @@ describe("SearchIndex query folding to nothing", () => {
     const index = await built();
     try {
       for (const junk of ["", "   ", "-", '"', '""', "...", "( )", "*", "^", "-- ", "()"]) {
-        expect({ junk, ...index.query(junk, 10) }).toEqual({ junk, total: 0, hits: [], expansions: [] });
+        expect({ junk, ...index.query(junk, 10) }).toEqual({ junk, total: 0, hits: [], items: [], expansions: [] });
       }
     } finally {
       index.close();
@@ -182,96 +174,6 @@ describe("SearchIndex query folding to nothing", () => {
   });
 });
 
-describe("SearchIndex persistence", () => {
-  it("round-trips through a FRESH instance and answers identically", async () => {
-    const source = await built();
-    let snapshot: IndexSnapshot;
-    const before: Record<string, string[]> = {};
-    const QUERIES = ["reunião ", "caligrafia ", "orcamento projeto ", "cali", "dados "];
-    try {
-      for (const q of QUERIES) before[q] = places(source.query(q, 10));
-      snapshot = source.serialize();
-    } finally {
-      source.close();
-    }
-    expect(snapshot.image.length).toBeGreaterThan(0);
-    expect(snapshot.mappingVersion).toBe(MAPPING_FORMAT_VERSION);
-
-    // A fresh instance: `idx_image_alloc` is its first call, where `OMIT_AUTOINIT` bites.
-    const restored = await SearchIndex.restore(snapshot, loadCore);
-    try {
-      for (const q of QUERIES) expect(places(restored.query(q, 10))).toEqual(before[q]);
-    } finally {
-      restored.close();
-    }
-  });
-
-  it("carries the rowid mapping across the round trip", async () => {
-    const source = await built();
-    const snapshot = source.serialize();
-    source.close();
-
-    const restored = await SearchIndex.restore(snapshot, loadCore);
-    try {
-      expect(restored.documents()).toEqual(LIBRARY.map((d) => d.md5));
-      expect(restored.documentCount).toBe(3);
-      expect(restored.pageCount).toBe(6);
-      expect(restored.query("conclusao ", 10).hits).toEqual([{ md5: NOTES.md5, page: 11 }]);
-      expect(places(restored.query("caligrafia ", 10))).toEqual(["a3", "b0"]);
-      const again = restored.serialize();
-      expect(again.docs).toEqual(snapshot.docs);
-      expect(again.image.length).toBe(snapshot.image.length);
-    } finally {
-      restored.close();
-    }
-  });
-
-  it("restores into an instance that is already open, without re-instantiating", async () => {
-    const index = await built();
-    try {
-      const snapshot = index.serialize();
-      index.reset();
-      index.build([PLAN]);
-      expect(index.query("caligrafia ", 10).total).toBe(0);
-      index.deserialize(snapshot);
-      expect(index.query("caligrafia ", 10).total).toBe(2);
-      expect(index.documentCount).toBe(3);
-    } finally {
-      index.close();
-    }
-  });
-
-  it("refuses a snapshot from a different index shape rather than answering wrongly", async () => {
-    const index = await built();
-    const snapshot = index.serialize();
-    index.close();
-
-    // Either version can move with nothing server-side moving: a distinguishable error.
-    const fresh = await SearchIndex.open(loadCore);
-    try {
-      expect(() => fresh.deserialize({ ...snapshot, schemaVersion: snapshot.schemaVersion + 1 })).toThrow(
-        StaleSnapshotError,
-      );
-      expect(() => fresh.deserialize({ ...snapshot, mappingVersion: 99 })).toThrow(StaleSnapshotError);
-      expect(fresh.query("caligrafia ", 10).total).toBe(0);
-      fresh.deserialize(snapshot);
-      expect(fresh.query("caligrafia ", 10).total).toBe(2);
-    } finally {
-      fresh.close();
-    }
-  });
-
-  it("states the wasm's schema version, so a caller can check before restoring", async () => {
-    const index = await SearchIndex.open(loadCore);
-    try {
-      expect(index.schemaVersion).toBeGreaterThanOrEqual(1);
-      expect(index.serialize().schemaVersion).toBe(index.schemaVersion);
-    } finally {
-      index.close();
-    }
-  });
-});
-
 describe("SearchIndex lifecycle and refusals", () => {
   it("empties on reset and keeps answering", async () => {
     const index = await built();
@@ -279,7 +181,7 @@ describe("SearchIndex lifecycle and refusals", () => {
       index.reset();
       expect(index.documentCount).toBe(0);
       expect(index.pageCount).toBe(0);
-      expect(index.query("caligrafia ", 10)).toEqual({ total: 0, hits: [], expansions: [] });
+      expect(index.query("caligrafia ", 10)).toEqual({ total: 0, hits: [], items: [], expansions: [] });
       index.build([BOOK]);
       expect(index.query("caligrafia ", 10).total).toBe(1);
     } finally {
@@ -322,17 +224,17 @@ describe("SearchIndex lifecycle and refusals", () => {
     index.close();
     expect(() => index.query("reuniao ", 10)).toThrow(/closed/);
     expect(() => index.build([BOOK])).toThrow(/closed/);
-    expect(() => index.serialize()).toThrow(/closed/);
+    expect(() => index.setItems("todo", [])).toThrow(/closed/);
     index.close();
   });
 
   it("reports a wasm-side refusal as SearchIndexError with the module's message", async () => {
     const index = await SearchIndex.open(loadCore);
     try {
-      index.addPage(1, "reuniao");
+      index.addRow(1, "reuniao");
       let caught: unknown;
       try {
-        index.addPage(1, "outra coisa");
+        index.addRow(1, "outra coisa");
       } catch (err) {
         caught = err;
       }
@@ -374,8 +276,6 @@ describe("SearchIndex scale", () => {
       expect(index.query("pagina7x50 ", 10).hits).toEqual([
         { md5: "7".padStart(32, "0"), page: 150 },
       ]);
-      const snapshot = index.serialize();
-      index.deserialize(snapshot);
       expect(index.query("pagina39x99 ", 10).hits).toEqual([
         { md5: "39".padStart(32, "0"), page: 297 },
       ]);
@@ -383,4 +283,94 @@ describe("SearchIndex scale", () => {
       index.close();
     }
   });
+});
+
+describe("SearchIndex item rows", () => {
+  const keys = (r: { items: { kind: string; key: string }[] }): string[] => r.items.map((i) => `${i.kind}:${i.key}`).sort();
+
+  it("answers pages and items in one query", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [
+        { key: "t1", text: "Rever o orçamento" },
+        { key: "t2", text: "Comprar pão" },
+      ]);
+      index.setItems("digest", [{ key: "d1", text: "O orçamento anual\nUm comentário" }]);
+      const r = index.query("orcamento ", 10);
+      expect(r.total).toBe(2);
+      expect(places(r)).toEqual(["a0", "c7"]);
+      expect(keys(r)).toEqual(["digest:d1", "todo:t1"]);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("rewrites only what changed, so a saved item is found at once", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [{ key: "t1", text: "Comprar pão" }]);
+      expect(keys(index.query("pao ", 10))).toEqual(["todo:t1"]);
+      index.setItems("todo", [{ key: "t1", text: "Comprar leite" }]);
+      expect(keys(index.query("pao ", 10))).toEqual([]);
+      expect(keys(index.query("leite ", 10))).toEqual(["todo:t1"]);
+      index.setItems("todo", []);
+      expect(keys(index.query("leite ", 10))).toEqual([]);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("keeps the item rows across a rebuild, and writes ones set before the first build", async () => {
+    const index = await SearchIndex.open(loadCore);
+    try {
+      index.setItems("name", [{ key: "f1", text: "Caligrafia" }]);
+      index.build(LIBRARY);
+      expect(keys(index.query("caligrafia ", 10))).toEqual(["name:f1"]);
+      index.rebuild([BOOK]);
+      const r = index.query("caligrafia ", 10);
+      expect(places(r)).toEqual(["b0"]);
+      expect(keys(r)).toEqual(["name:f1"]);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("holds a quoted phrase within one field of an item; its words may come from any", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [{ key: "t1", text: fields("Comprar leite", "Casa") }]);
+      expect(keys(index.query('"leite casa" ', 10))).toEqual([]);
+      expect(keys(index.query("leite casa ", 10))).toEqual(["todo:t1"]);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("holds a quoted phrase to its order in an item, not on a page of words", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [
+        { key: "in-order", text: "notas sobre o projeto" },
+        { key: "apart", text: "sobre as notas" },
+      ]);
+      const r = index.query('"notas sobre" ', 10);
+      expect(places(r)).toEqual(["b1"]);
+      expect(keys(r)).toEqual(["todo:in-order"]);
+    } finally {
+      index.close();
+    }
+  });
+
+  it("corrects a typo over the items' words too", async () => {
+    const index = await built();
+    try {
+      index.setItems("todo", [{ key: "t1", text: "Ligar para a farmácia" }]);
+      const r = index.query("farmacai ", 10, true);
+      expect(keys(r)).toEqual(["todo:t1"]);
+      expect(r.expansions).toEqual([{ typed: "farmacai", matched: "farmacia" }]);
+    } finally {
+      index.close();
+    }
+  });
+
 });

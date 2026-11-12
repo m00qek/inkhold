@@ -14,10 +14,11 @@
 import { DIMS_DB, NOCOVER_DB, THUMBS_DB } from "./idb";
 import { TERMS_DB } from "./termsStore";
 import { TEXT_DB } from "./textStore";
+import { ITEMS_DB } from "./itemStore";
 import { REFUSALS_KEY } from "../search/textPrefetch";
 
 /** Every database that holds something of the person's library. */
-export const PERSON_DATABASES: readonly string[] = [TERMS_DB, TEXT_DB, THUMBS_DB, DIMS_DB, NOCOVER_DB];
+export const PERSON_DATABASES: readonly string[] = [TERMS_DB, TEXT_DB, ITEMS_DB, THUMBS_DB, DIMS_DB, NOCOVER_DB];
 
 /** localStorage entries about the person's files, not the device's preferences. */
 export const PERSON_KEYS: readonly string[] = [REFUSALS_KEY];

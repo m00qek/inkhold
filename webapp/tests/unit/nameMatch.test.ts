@@ -1,64 +1,54 @@
-// The one rule names are matched by: the index's, applied in the browser.
+// What the browser still does with a query beside the index (`search/match.ts`):
+// the match-inside fallback, and marking the matched words.
 
 import { describe, it, expect } from "vitest";
-import { insideQuery, matchesName, nameMarks, nameQuery, nameQueryFor } from "../../src/search/match";
+import { holdsInside, insideMarks, insideOf, typedMarks } from "../../src/search/match";
 
-const m = (text: string, q: string) => matchesName(text, nameQuery(q));
+const cut = (text: string, marks: [number, number][]) => marks.map(([a, b]) => text.slice(a, b));
 
-describe("matching a name", () => {
-  it("folds accents and case on both sides", () => {
-    expect(m("Reunião", "REUNIAO")).toBe(true);
-    expect(m("Reuniao", "reunião")).toBe(true);
+describe("marking a result's words", () => {
+  it("marks the typed words whole, accents and order aside, the last as the start of one", () => {
+    const text = "Reunião de pais";
+    expect(cut(text, typedMarks(text, "pa reuniao", []))).toEqual(["Reunião"]);
+    expect(cut(text, typedMarks(text, "reuniao pa", []))).toEqual(["Reunião", "pais"]);
   });
 
-  it("needs every word, in any order", () => {
-    expect(m("Haus of gabin", "gabin haus")).toBe(true);
-    expect(m("Haus of gabin", "haus casa")).toBe(false);
-  });
-
-  it("the last word as the start of a word, the rest whole", () => {
-    expect(m("Haus of gabin", "haus ga")).toBe(true);
-    expect(m("Haus of gabin", "ha gabin")).toBe(false);
-    expect(m("Haus of gabin", "abin")).toBe(false);
+  it("after a space, the last word is whole, as the index then takes it", () => {
+    expect(typedMarks("Art and artist", "art ", []).length).toBe(1);
+    expect(typedMarks("Art and artist", "art", []).length).toBe(2);
   });
 
   it("splits where the index splits: apostrophes, hyphens, dots", () => {
-    expect(m("l'école", "ecole")).toBe(true);
-    expect(m("page-range", "range")).toBe(true);
-    expect(m("Apostila.note", "apostila")).toBe(true);
+    expect(cut("l'école", typedMarks("l'école", "ecole", []))).toEqual(["école"]);
+    expect(cut("page-range", typedMarks("page-range", "range ", []))).toEqual(["range"]);
   });
 
-  it("a query of only punctuation matches nothing", () => {
-    expect(nameQuery(" -- ")).toBeNull();
-    expect(m("anything", "--")).toBe(false);
-  });
-});
-
-describe("marking a matched name", () => {
-  it("marks the whole words that matched, in the original string", () => {
-    const text = "Reunião de pais";
-    expect(nameMarks(text, nameQuery("reuniao pa")).map(([a, b]) => text.slice(a, b))).toEqual(["Reunião", "pais"]);
+  it("marks the typo ladder's spellings too", () => {
+    const text = "Caligrafia japonesa";
+    expect(cut(text, typedMarks(text, "caligafia", [{ matched: "caligrafia" }]))).toEqual(["Caligrafia"]);
   });
 
-  it("marks nothing when the name did not match", () => {
-    expect(nameMarks("Haus of gabin", nameQuery("casa"))).toEqual([]);
+  it("marks nothing for a query of only punctuation", () => {
+    expect(typedMarks("anything", " -- ", [])).toEqual([]);
   });
 });
 
 describe("the fallback: typed text anywhere in a name", () => {
-  it("is used only when the word rule matches no name", () => {
-    expect(nameQueryFor("style", ["MyStyle", "Style guide"])?.inside).toBeUndefined();
-    expect(nameQueryFor("style", ["MyStyle"])?.inside).toBe("style");
-  });
-
   it("folds accents and case, and marks the original letters", () => {
-    expect(matchesName("Lição 3", insideQuery("icao"))).toBe(true);
+    expect(holdsInside("Lição 3", insideOf("icao"))).toBe(true);
+    expect(holdsInside("MyStyle", insideOf("tyle"))).toBe(true);
+    expect(holdsInside("MyStyle", insideOf("guide"))).toBe(false);
     const text = "Lição 3";
-    expect(nameMarks(text, insideQuery("icao")).map(([a, b]) => text.slice(a, b))).toEqual(["ição"]);
+    expect(cut(text, insideMarks(text, insideOf("icao")))).toEqual(["ição"]);
   });
 
   it("keeps a decomposed accent with its letter", () => {
-    const text = "Lic\u0327a\u0303o";
-    expect(nameMarks(text, insideQuery("cao")).map(([a, b]) => text.slice(a, b))).toEqual(["c\u0327a\u0303o"]);
+    const text = "Lição";
+    expect(cut(text, insideMarks(text, insideOf("cao")))).toEqual(["ção"]);
+  });
+
+  it("a blank query holds nothing", () => {
+    expect(insideOf(' " ')).toBeNull();
+    expect(holdsInside("anything", insideOf(""))).toBe(false);
   });
 });

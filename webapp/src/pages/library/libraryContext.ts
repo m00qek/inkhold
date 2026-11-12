@@ -10,6 +10,7 @@
 
 import type { Place } from "../../ui/place";
 import type { TodoPage } from "../todo/todoPage";
+import type { SearchItems } from "./searchItems";
 import type { DigestPage } from "../digest/digestPage";
 import type { DigestInk } from "../digest/digestInk";
 import type { DestinationMode } from "./libraryModes";
@@ -109,6 +110,8 @@ export interface LibraryCtx {
   todo: TodoPage;
   /** The Digest destination; built at start, like To-Do. */
   digest: DigestPage;
+  /** The apps' answers as search rows, kept for offline search. */
+  searchItems: SearchItems;
   bin: BinController;
 
   // ---- the parts ----
@@ -143,6 +146,8 @@ export interface LibraryCtx {
    */
   leaveDestinations(keep?: CoveringPlace): void;
   openAdmin(): void;
+  /** The search's results are on screen: a query, and nothing covering the gallery. */
+  searchInView(): boolean;
 }
 
 /** The places that cover the gallery and are left by `leaveDestinations`. */
@@ -154,7 +159,7 @@ export type LibraryCtxSeed = Pick<
   | "deps" | "identity" | "renderer" | "cache" | "live" | "api" | "historyScope" | "binScope" | "st"
   | "gallery" | "content" | "place" | "toastEl" | "destinationsOpen"
   | "failures" | "handled" | "sessionDidExpire" | "toast"
-  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "leaveDigest" | "leaveDestinations" | "openAdmin"
+  | "key" | "scheduleSpan" | "setReading" | "hideActiveViewer" | "account" | "leaveAccount" | "leaveAdmin" | "leaveTodo" | "leaveDigest" | "leaveDestinations" | "openAdmin" | "searchInView"
 >;
 
 /**

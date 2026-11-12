@@ -3,7 +3,7 @@
 // token; a response whose token has moved on is dropped, not painted.
 
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
-import type { Expansion, LocalHit, LocalSearch } from "../search/localSearch";
+import { NO_ITEM_HITS, type Expansion, type ItemHits, type LocalHit, type LocalSearch } from "../search/localSearch";
 
 /**
 * One or two characters match nearly the whole index (the expensive case).
@@ -28,10 +28,17 @@ export type SearchState =
       documents: readonly LocalHit[];
       /** What the typo ladder substituted, per token rather than per document. */
       expansions: readonly Expansion[];
+      /** The matching names, to-dos and digests, by kind. */
+      items: ItemHits;
       /** Kept for a quoted phrase without being checked (`LocalResults.unchecked`). */
       unchecked?: number;
     }
   | { kind: "error"; query: string };
+
+/** The index's answer to `q` (trimmed), or null before it, after a failure, or for another query. */
+export function answerFor(state: SearchState, q: string): Extract<SearchState, { kind: "results" }> | null {
+  return state.kind === "results" && state.query === q.trim() ? state : null;
+}
 
 export interface SearchView {
   setState(state: SearchState): void;
@@ -47,12 +54,15 @@ export interface NoteSearchDeps {
 
 export interface NoteSearchController {
   setQuery(raw: string): void;
+  /** What it searches changed: the answer held is out of date (`askIfStale` asks again). */
+  stale(): void;
+  /** Asks the query again if its answer is out of date, leaving that answer up until the new one. */
+  askIfStale(): void;
   reset(): void;
 }
 
 export const noLocalSearch: LocalSearch = {
-  ready: false,
-  search: (query) => Promise.resolve({ query, totalPages: 0, documents: [], expansions: [] }),
+  search: (query) => Promise.resolve({ query, totalPages: 0, documents: [], expansions: [], items: NO_ITEM_HITS }),
 };
 
 export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
@@ -66,6 +76,9 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
 
   /** The trimmed query pending, running or painted; makes `setQuery` idempotent. */
   let active: string | null = null;
+
+  /** What it searches changed since the last question was asked. */
+  let outdated = false;
 
   /** Aborted when superseded, so an engine honouring the signal stops the work. */
   let inflight: AbortController | null = null;
@@ -81,6 +94,8 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
   }
 
   async function run(query: string, mine: number): Promise<void> {
+    // This run reads what is there now.
+    outdated = false;
     const ac = new AbortController();
     inflight = ac;
     try {
@@ -91,6 +106,7 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
         query,
         documents: results.documents,
         expansions: results.expansions,
+        items: results.items,
         // Only a phrase search that couldn't check everything says so.
         ...(results.unchecked ? { unchecked: results.unchecked } : {}),
       });
@@ -107,6 +123,8 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
       if (query === active) return; // same question; leave the answer in progress alone
       active = query;
       cancelPending();
+      // A new question reads what is there now.
+      outdated = false;
 
       if (query.length < MIN_GLOBAL_QUERY_LEN) {
         view.setState({ kind: "idle" });
@@ -120,6 +138,19 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
         timer = undefined;
         void run(query, mine);
       }, debounceMs);
+    },
+
+    stale(): void {
+      outdated = true;
+    },
+
+    askIfStale(): void {
+      if (!outdated) return;
+      outdated = false;
+      if (active === null || active.length < MIN_GLOBAL_QUERY_LEN) return;
+      const query = active;
+      cancelPending();
+      void run(query, token);
     },
 
     reset(): void {

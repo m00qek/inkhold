@@ -1,104 +1,8 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect } from "vitest";
-import { createGallerySearch, type GallerySearchCtx } from "../../src/pages/gallerySearch";
-import type { SearchState } from "../../src/pages/noteSearch";
-import type { SearchResult } from "../../src/pages/galleryCards";
-import type { Entry, Id, Listing, NoteSummary } from "../../src/core/types";
-import type { Expansion, LocalHit } from "../../src/search/localSearch";
-
-function doc(fileId: number, pages: number[], updatedAt = 0): LocalHit {
-  return { md5: `md5-${fileId}`, fileId, pages, updatedAt, tier: "note", pageCount: null };
-}
-
-function note(id: string, name: string, fileType = "note"): NoteSummary {
-  return {
-    kind: "note",
-    id,
-    name,
-    pageCount: 1,
-    firstPage: { index: 0, hash: null },
-    updatedAt: 0,
-    fileType,
-    fileHash: null,
-    hasRecognizedText: true,
-  } as NoteSummary;
-}
-
-function listing(entries: Entry[]): Listing {
-  return { folderId: null, path: [], entries, syncVersion: 1 };
-}
-
-function results(query: string, documents: LocalHit[], expansions: Expansion[] = []): SearchState {
-  return { kind: "results", query, documents, expansions };
-}
-
-/** The renderer with every collaborator stubbed; `resultCard` records the join. */
-function harness(initial: { state: SearchState; pending: number | null; tree?: Entry[]; treeLoaded?: boolean; more?: () => HTMLElement }) {
-  const gallery = document.createElement("section");
-  let state = initial.state;
-  let pending = initial.pending;
-  const tree = initial.tree ?? [];
-  const built: SearchResult[] = [];
-  const handed: (readonly Expansion[] | undefined)[] = [];
-
-  const ctx: GallerySearchCtx = {
-    gallery,
-    getSearchState: () => state,
-    folders: { values: () => (tree.length === 0 ? [] : [listing(tree)]) },
-    treeLoaded: () => initial.treeLoaded ?? true,
-    labelFor: (f) => f.name,
-    resultCard: (r, _i, _q, expansions) => {
-      built.push(r);
-      handed.push(expansions);
-      const card = document.createElement("article");
-      card.className = "card--result";
-      card.textContent = r.note.name;
-      return card;
-    },
-    folderCard: (f) => {
-      const card = document.createElement("article");
-      card.className = "card--folder";
-      card.textContent = f.name;
-      return card;
-    },
-    emptyState: (title, body) => {
-      const box = document.createElement("div");
-      box.className = "empty";
-      box.dataset["title"] = title;
-      box.textContent = body;
-      return box;
-    },
-    indexPending: () => pending,
-    moreResults: initial.more ? () => initial.more!() : undefined,
-  };
-
-  const search = createGallerySearch(ctx);
-  return {
-    gallery,
-    built,
-    handed,
-    paint(q = "rutabaga") {
-      gallery.replaceChildren();
-      built.length = 0;
-      handed.length = 0;
-      search.renderSearch(q);
-      return gallery;
-    },
-    setPending(n: number | null) {
-      pending = n;
-    },
-    setState(s: SearchState) {
-      state = s;
-    },
-    emptyBody: () => gallery.querySelector(".empty")?.textContent ?? "",
-    head: () => gallery.querySelector(".section-head")?.textContent ?? "",
-    notices: () => [...gallery.querySelectorAll(".hits__notice")].map((n) => n.textContent),
-    matchedWords: () => [...gallery.querySelectorAll(".hits__matched")].map((n) => n.textContent),
-    rows: () => [...gallery.querySelectorAll(".card--result")].map((n) => n.textContent),
-    folderRows: () => [...gallery.querySelectorAll(".card--folder")].map((n) => n.textContent),
-  };
-}
+import type { Expansion } from "../../src/search/localSearch";
+import { doc, harness, note, results } from "./gallerySearch.shared";
 
 describe("the join between a hit and the listing", () => {
   it("names a transcript hit from the cached tree and counts its pages", () => {
@@ -150,7 +54,7 @@ describe("the join between a hit and the listing", () => {
 describe("the name half of the query", () => {
   it("still merges filename matches that no transcript hit named", () => {
     const h = harness({
-      state: results("rut", [doc(7, [1])]),
+      state: results("rut", [doc(7, [1])], [], ["n:8"]),
       pending: 0,
       tree: [note("7", "Weekly review"), note("8", "Rutabaga plans")],
     });
@@ -162,7 +66,7 @@ describe("the name half of the query", () => {
 
   it("marks a document that matched BOTH ways once, as a name match", () => {
     const h = harness({
-      state: results("weekly", [doc(7, [1, 2])]),
+      state: results("weekly", [doc(7, [1, 2])], [], ["n:7"]),
       pending: 0,
       tree: [note("7", "Weekly review")],
     });
@@ -175,7 +79,7 @@ describe("the name half of the query", () => {
 
   it("puts name matches first and otherwise keeps the engine's rank order", () => {
     const h = harness({
-      state: results("plan", [doc(1, [0, 1, 2]), doc(2, [5])]),
+      state: results("plan", [doc(1, [0, 1, 2]), doc(2, [5])], [], ["n:3"]),
       pending: 0,
       tree: [note("1", "Alpha"), note("2", "Beta"), note("3", "Plan B")],
     });
@@ -380,51 +284,24 @@ describe("the search renderer's pending sentences", () => {
   });
 });
 
-describe("names follow the index's rule", () => {
-  const folder = (id: string, name: string): Entry => ({ kind: "folder", id, name }) as Entry;
-  const idle: SearchState = results("x", []);
+describe("the typo ladder's notice over the apps' groups", () => {
+  const group = () => {
+    const box = document.createElement("section");
+    box.className = "digest-hits";
+    return box;
+  };
 
-  it("ignores accents and case, and takes the words in any order", () => {
-    const h = harness({ state: idle, pending: 0, tree: [note("1", "Reunião de pais"), note("2", "Haus of gabin"), note("3", "Ideias")] });
-    h.paint("reuniao");
-    expect(h.rows()).toEqual(["Reunião de pais"]);
-    h.paint("gabin haus");
-    expect(h.rows()).toEqual(["Haus of gabin"]);
+  const SUBLET: Expansion[] = [{ typed: "sublte", matched: "sublet" }];
+
+  it("is said once, above them, when they came from its spelling", () => {
+    const g = harness({ state: results("sublte", [], SUBLET), pending: 0, tree: [note("1", "One")], more: group, moreCorrected: true }).paint("sublte");
+    expect(g.querySelectorAll(".hits__notice")).toHaveLength(1);
+    expect(g.firstElementChild?.className).toBe("hits__notice");
   });
 
-  it("the last word may be the start of one; the others are whole words", () => {
-    const h = harness({ state: idle, pending: 0, tree: [note("1", "Haus of gabin")] });
-    h.paint("haus gab");
-    expect(h.rows()).toEqual(["Haus of gabin"]);
-    h.paint("hau gabin");
-    expect(h.rows()).toEqual([]);
-  });
-
-  it("falls back to the text inside a name only when no name matched by words", () => {
-    const h = harness({ state: idle, pending: 0, tree: [note("1", "MyStyle"), note("2", "Style guide")] });
-    // "style" is a word of "Style guide": the word rule answers, alone.
-    h.paint("style");
-    expect(h.rows()).toEqual(["Style guide"]);
-    // No name has the word "tyle": then anywhere inside a name.
-    h.paint("tyle");
-    expect(h.rows()).toEqual(["MyStyle", "Style guide"]);
-  });
-
-  it("finds folders by name, in their own group before the notes", () => {
-    const h = harness({ state: idle, pending: 0, tree: [folder("f1", "Aulas de Francês"), note("1", "Francês 3")] });
-    const g = h.paint("frances");
-    expect(h.folderRows()).toEqual(["Aulas de Francês"]);
-    expect(h.rows()).toEqual(["Francês 3"]);
-    expect(g.querySelector(".section-head")?.textContent).toBe("1 folder");
-    // The folders' heading, then their list.
-    expect(g.querySelector(".section-head + ul.cards > .card--folder")?.textContent).toBe("Aulas de Francês");
-  });
-
-  it("a folder alone is an answer, not 'no matches'", () => {
-    const h = harness({ state: idle, pending: 0, tree: [folder("f1", "Receitas")] });
-    h.paint("receitas");
-    expect(h.folderRows()).toEqual(["Receitas"]);
-    expect(h.gallery.querySelector(".empty")).toBeNull();
+  it("is not said over a group matched as typed", () => {
+    const g = harness({ state: results("sublte", [], SUBLET), pending: 0, tree: [note("1", "One")], more: group }).paint("sublte");
+    expect(g.querySelectorAll(".hits__notice")).toHaveLength(0);
   });
 });
 

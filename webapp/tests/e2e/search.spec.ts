@@ -95,7 +95,8 @@ test.describe("universal search", () => {
     await railSettled(page);
     await searchBox(page).fill("Project");
 
-    expect(await results(page).count()).toBeGreaterThan(0);
+    // Names come with the index's answer, after the debounce.
+    await expect(results(page)).not.toHaveCount(0);
 
     await expect(page.locator(".hit__snippet")).toHaveCount(0);
     await expect(page.getByRole("button", { name: "More results" })).toHaveCount(0);
@@ -223,7 +224,7 @@ test.describe("universal search", () => {
     await expect(results(page)).not.toHaveCount(0);
 
     // A folder named like the query has its own header, before the notes'.
-    const head = page.locator(".gallery .section-head").filter({ hasNotText: /folders?$/ });
+    const head = page.locator(".gallery .section-head").filter({ hasNotText: /(folders?|digests?)$/ });
     await expect(head).toHaveText(/^\d+ notes?$/);
     await expect(head).not.toContainText("+");
   });

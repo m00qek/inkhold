@@ -57,28 +57,51 @@ flowchart TD
 
 ## Matching
 
+- **One index for everything search finds.** Besides the documents' pages, the
+  browser writes rows of its own into the same FTS5 table: file and folder
+  names (`nameRows`), to-dos (`todoRows`) and digests (`digestRows`). A
+  rowid's top bits are its kind (`search/itemRows.ts`, `kind_shift` in
+  `sqlite_core.zig`), so one query answers every kind with its own exact total.
+  So accents, prefixes, phrases and the typo ladder work the same for all of
+  them, by the one tokenizer.
+- **A unit is a row**: what must hold every word of the query. A notebook or
+  PDF page; a `.txt` paragraph; a name; a to-do (its title, its notebook, the
+  words it was lassoed from, `link_text`, so a renamed task is still found by
+  what was written, and its list's name); a list, by its name; a digest (its
+  passage, its comment, its category and its source's name). A document
+  matches by its name or by its text, never by words split across both. A
+  to-do's and a digest's parts are fields, each its own column (`fields` in
+  `itemRows.ts`): the query's words may come from any of them, but a quoted
+  phrase lies within one. A digest's handwritten note is not searchable: the
+  tablet does not recognise it.
+- **Rows change in place.** `setItems` writes only what changed (`idx_delete`,
+  then the new row), so what was just saved is found at once; a rebuild writes
+  them again. A change marks the answer on screen stale: it is asked again at
+  once if the results are in view, else when they are next shown. Names are
+  read again from the cached tree when it changes and before each query.
+  To-dos and digests come from their pages' answers (read at start, and by a
+  search when last asked over a minute ago for to-dos, half a minute for
+  digests) and are kept in `sn-search-items` so search finds them offline;
+  only search reads that copy.
 - **The typo ladder** runs in the wasm (Damerau-Levenshtein), and only when the
-  exact query has no hits: the corpus is misspelt handwriting recognition.
-  English-oriented stemmers and spellfix were rejected; the corpus is
-  Portuguese.
-- **To-dos in search** (`todoModel.findTodos`, `todo/todoSearch.ts`). A task
-  is found by its title, its notebook, the words it was lassoed from
-  (`link_text`, so a renamed task is still found by what was written) and its
-  list's name, all taken together under the rule for names below; a list named
-  like the query is a result too. Matched words are marked. When nothing
-  matches as typed, the typo ladder's rules (`search/typo.ts`, a browser copy
-  of the wasm's) pick the nearest spelling and say so, as for notes. To-dos are
-  read when the app starts and, while the To-Do page is closed, again by a
-  search when they are over a minute old; the answer repaints the open search.
-- **One rule for names.** Notebook and folder names and to-dos are not in the
-  index. `webapp/src/search/match.ts` matches them by the index's own rule: the
-  query's words folded the same way, all present in any order, and only the
-  last one allowed to match the start of a word. Only when that matches no name
-  at all does the typed text match anywhere inside a name ("style" in
-  "MyStyle"): a fallback, never a widening, like the typo ladder.
-- **Measured** with `npm run bench:search` on a laptop, 2026-11-05, with the
-  real wasm and libraries shaped like the hub's (45 documents, 231 pages of
-  text, 54 distinct words a page). A whole rebuild, which every sync that
+  exact query has no hits of any kind: the corpus is misspelt handwriting
+  recognition. Outside quotes any word may get near-misses beside it, as a
+  page the tablet misread may hold one of a word spelt right elsewhere; inside
+  a quoted phrase a word the index holds is taken as typed, since a near-miss
+  would replace it there. A half-typed word is compared with both the
+  start and the whole of each vocabulary word. English-oriented stemmers and
+  spellfix were rejected; the corpus is Portuguese.
+- **The fallback inside a name.** When the index matched no name or to-do as
+  typed, the typed text anywhere in one matches (`search/match.ts`: "style" in
+  "MyStyle"), before the typo ladder's answer for them. FTS5 cannot do this.
+  A fallback, never a widening.
+- **Marks** are drawn in the browser (`fold.ts`, pinned to the wasm by
+  `foldAgreement.test.ts`). They never decide a match: a divergence loses a
+  highlight, never a result.
+- **Measured** with `npm run bench:search` on a laptop, 2026-11-05, before
+  names, to-dos and digests were rows of the index and before its four
+  columns, with the real wasm and libraries shaped like the hub's (45
+  documents, 231 pages of text, 54 distinct words a page). A whole rebuild, which every sync that
   brings something new costs the next search: 4 ms at the hub's size, 24 ms at
   ten times it (450 documents), 674 ms at a hundred times (4,500 documents,
   58 MB). Queries stay under 10 ms; a typo-ladder scan is 90 ms at a hundred
@@ -87,16 +110,19 @@ flowchart TD
 
 ## Ranking
 
-- Names matched by words come first; then, only when none did, names matched
-  inside; then documents by relevance (`search/localSearch.ts`).
+- Results are grouped by kind: folders, then documents, with digests and
+  to-dos as groups of their own. Names matched come first; then documents by
+  relevance (`search/localSearch.ts`).
 - A document's relevance is its matching pages over its page count plus two,
   weighted by what the person wrote: 1 for a notebook, 0.8 for a document they
   wrote on (a `.mark`: its ink is not indexed, only the printed words, but it
   was worked with), 0.6 for a PDF or `.txt` as it came. Recency breaks ties.
   The weight is a weight, not an order: a document about the words still beats
   a notebook that mentions them once.
-- To-dos, also the person's own writing, sit before the first document that is
-  neither named like the query nor a notebook.
+- Digests and to-dos, also the person's own writing, sit before the first
+  document that is neither named like the query nor a notebook. Digests come
+  newest first; to-dos open ones first, list by list as the tablet orders
+  them, then done ones, newest first.
 - bm25 is not used: the terms are one set per page, so it cannot tell a page
   about a word from one that mentions it.
 - How close together the words sit picks a document's excerpt, not its place
@@ -143,14 +169,17 @@ are drawn, and how a segment (a page, or a paragraph) is brought into view.
 
 ## Phrases and excerpts
 
-- **Quoted phrases** (`search/phrase.ts`): `"passé composé"` wants the words
-  together and in order. The terms are one set per page, so the index finds
-  the candidate pages and the page's text decides. Library search checks
-  against the text the browser already holds (`searchService.checkPhrases`),
-  keeping and counting, never dropping, a document whose text it does not hold
-  ("N results couldn't be checked"). Find in a document checks the segments it
-  has loaded; names and to-dos check their own words. A quote still being typed
-  is a phrase whose last word may be a prefix; a single quoted word is a word.
+- **Quoted phrases**: `"passé composé"` wants the words together and in
+  order. Names, to-dos and digests are running text, so the index holds a
+  phrase to its order there itself, within one field. A page's terms are one
+  set, so there the index finds the candidate pages and the page's text decides
+  (`search/phrase.ts`): library search checks against the text the browser
+  already holds (`searchService.checkPhrases`), keeping and counting, never
+  dropping, a document whose text it does not hold ("N results couldn't be
+  checked"), and find in a document checks the segments it has loaded. A quote
+  still being typed is a phrase whose last word may be a prefix; a single
+  quoted word is a word. Where the typo ladder answered, its best spelling
+  stands in for the word inside a phrase.
 - **Excerpts** (`search/excerpt.ts`, `pages/searchExcerpts.ts`): a result's
   line is cut in the browser from text it already holds; a search never fetches
   text. After each sync the browser fetches text ahead of time

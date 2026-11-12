@@ -1,7 +1,7 @@
 // The main-thread half of the search worker: `SearchIndex` behind promises,
 // answered by `engineWorker.ts`, or in-thread where no `Worker` exists or a
 // `CoreLoader` is injected (functions cannot cross `postMessage`). Nothing is
-// constructed until the first `build`/`query`.
+// constructed until the first call.
 //
 // Abort lives on this side: a running `idx_fuzzy` is synchronous, so the
 // worker cannot see a cancel until it returns. At most one request is posted;
@@ -15,10 +15,13 @@ import {
   type TermsDocument,
 } from "./indexEngine";
 import type { EngineRequest, EngineResponse } from "./engineWorker";
+import type { ItemKind, ItemRow } from "./itemRows";
 
-/** Narrower than `SearchIndex`: no `serialize`, so no 10 MB image crosses the wire. */
+/** What a search needs of `SearchIndex`, behind promises, on the worker or in this thread. */
 export interface SearchEngine {
   build(docs: readonly TermsDocument[]): Promise<void>;
+  /** Replaces one kind's item rows (`itemRows.ts`); kept across builds. Never superseded. */
+  setItems(kind: ItemKind, rows: readonly ItemRow[]): Promise<void>;
   /** Rejects with `AbortError` on `signal`, or when superseded before posting. */
   query(text: string, limit: number, fuzzy: boolean, signal?: AbortSignal): Promise<QueryResult>;
   /** Terminate the worker or close the instance, freeing its memory. */
@@ -70,6 +73,7 @@ export function createSearchEngine(opts: SearchEngineOptions = {}): SearchEngine
 
   return {
     build: (docs) => target().build(docs),
+    setItems: (kind, rows) => target().setItems(kind, rows),
     query: (text, limit, fuzzy, signal) => target().query(text, limit, fuzzy, signal),
     close() {
       delegate?.close();
@@ -188,10 +192,13 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
     async build(docs) {
       expect(await enqueue({ kind: "build", id: nextId++, docs }, false), "built");
     },
+    async setItems(of, rows) {
+      expect(await enqueue({ kind: "items", id: nextId++, of, rows }, false), "written");
+    },
     async query(text, limit, fuzzy, signal) {
       const req: EngineRequest = { kind: "query", id: nextId++, text, limit, fuzzy };
       const res = expect(await enqueue(req, true, signal), "result");
-      return { total: res.total, hits: res.hits, expansions: res.expansions };
+      return { total: res.total, hits: res.hits, items: res.items, expansions: res.expansions };
     },
     close() {
       dead ??= new Error("this search engine is closed");
@@ -207,18 +214,34 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
 /** In-thread fallback, also what unit tests drive. Same ordering and abort semantics. */
 function inThreadEngine(load?: CoreLoader): SearchEngine {
   let index: SearchIndex | null = null;
+  /** One instance, however many calls wait on its opening; they then run in the order called. */
+  let opening: Promise<SearchIndex> | null = null;
+  let closed = false;
+  const instance = (): Promise<SearchIndex> => {
+    opening ??= SearchIndex.open(load).then((i) => {
+      // Closed while opening: this instance is no one's.
+      if (closed) i.close();
+      else index = i;
+      return i;
+    });
+    return opening;
+  };
   return {
     async build(docs) {
-      const engine = index ?? (await SearchIndex.open(load));
-      index = engine;
-      engine.rebuild(docs);
+      (await instance()).rebuild(docs);
+    },
+    async setItems(kind, rows) {
+      (await instance()).setItems(kind, rows);
     },
     async query(text, limit, fuzzy, signal) {
       if (signal?.aborted) throw abortError();
+      // In turn behind a build or a write still waiting on the instance.
+      if (opening) await opening;
       if (!index) throw new Error("this search engine has nothing built to query");
       return index.query(text, limit, fuzzy);
     },
     close() {
+      closed = true;
       index?.close();
       index = null;
     },

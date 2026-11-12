@@ -69,7 +69,10 @@ export function installLibraryRail(ctx: LibraryCtx): void {
   ctx.folderCache = createFolderCache({
     api: ctx.api,
     handled: ctx.handled,
-    onWalked: (changed) => ctx.rail.treeWalked(changed),
+    onWalked: (changed) => {
+      ctx.rail.treeWalked(changed);
+      if (changed) ctx.searchItems.refreshNames();
+    },
   });
 
   ctx.rail = createRail({

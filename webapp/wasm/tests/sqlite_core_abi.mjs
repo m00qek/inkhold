@@ -1,7 +1,7 @@
 // ABI check for `sqlite-core.wasm` (`zig build wasm-sqlite-core-test`): the
 // TEMP_STORE refusal (a dropped flag is otherwise unobservable), both ABIs in
-// one instance, the serialize/restore path through a fresh instance, and the
-// typo ladder (its only description since it left the server).
+// one instance, rowid kinds, fields and phrases, and the typo ladder (its only
+// description since it left the server).
 //
 // Usage: node sqlite_core_abi.mjs <sqlite-core.wasm> <fixture.spd>
 
@@ -64,7 +64,8 @@ function query(text, limit = 10) {
   const total = e.idx_query(buf[0], buf[1], limit);
   const hits = [];
   if (total >= 0) {
-    for (let i = 0; i < Math.min(total, limit); i++) hits.push(e.idx_hit(i));
+    // Up to `limit` of each kind: read until the -1 past the last.
+    for (let i = 0, h = e.idx_hit(0); i < total && h >= 0; h = e.idx_hit(++i)) hits.push(h);
   }
   drop(buf);
   return { total, hits, expansion: expansionText() };
@@ -75,7 +76,8 @@ function fuzzy(text, limit = 10) {
   const total = e.idx_fuzzy(buf[0], buf[1], limit);
   const hits = [];
   if (total >= 0) {
-    for (let i = 0; i < Math.min(total, limit); i++) hits.push(e.idx_hit(i));
+    // Up to `limit` of each kind: read until the -1 past the last.
+    for (let i = 0, h = e.idx_hit(0); i < total && h >= 0; h = e.idx_hit(++i)) hits.push(h);
   }
   drop(buf);
   return { total, hits, expansion: expansionText() };
@@ -98,11 +100,10 @@ function expansionText() {
 
 // ---- exports (both ABIs, one module) ----
 for (const name of [
-  "idx_alloc", "idx_free", "idx_schema_version",
+  "idx_alloc", "idx_free",
   "idx_open", "idx_close", "idx_begin", "idx_add", "idx_commit",
-  "idx_query", "idx_hit",
+  "idx_query", "idx_hit", "idx_kind_total", "idx_delete",
   "idx_fuzzy", "idx_expansion_ptr", "idx_expansion_len",
-  "idx_serialize", "idx_image_ptr", "idx_image_alloc", "idx_deserialize",
   "idx_errmsg_ptr", "idx_errmsg_len",
   "spd_alloc", "spd_free", "spd_open", "spd_close",
   "spd_layer_count", "spd_layer_id", "spd_tiles_begin", "spd_tile_next",
@@ -123,7 +124,6 @@ check(
 equal(opened, 0, "an index opens on a fresh instance");
 if (failures > 0) process.exit(1);
 
-check(e.idx_schema_version() >= 1, "the module reports a schema version for the stored image to carry");
 
 // ---- build ----
 // Real diacritics: documents 1 and 2 spell the same word differently.
@@ -247,6 +247,13 @@ equal(query('"caligrafia" ').total, 2, "a quoted word searches for the word");
   equal(r.expansion, "calugraf>caligrafia", "...to the term it was truncated against");
 }
 
+// No space after it, but typed in full and a letter short: the whole term answers.
+{
+  const r = fuzzy("caligafia");
+  equal(r.total, 2, "a whole word missing a letter, not yet followed by a space, is still corrected");
+  equal(r.expansion, "caligafia>caligrafia", "...to the whole term");
+}
+
 for (const junk of ["", "   ", "-", "..."]) {
   equal(fuzzy(junk).total, 0, `fuzzy ${JSON.stringify(junk)} is no results rather than an error`);
   equal(fuzzy(junk).expansion, "", `...and substitutes nothing`);
@@ -262,6 +269,98 @@ equal(fuzzy("xilofone ").expansion, "", "...and reports no substitution");
     if (query(i % 2 === 0 ? "reunião " : "japonesa ").total !== (i % 2 === 0 ? 2 : 1)) drifted += 1;
   }
   equal(drifted, 0, "the query fold does not accumulate across 200 searches");
+}
+
+// ---- rowids and fields ----
+{
+  const buf = put("x");
+  equal(e.idx_add(2 ** 31, buf[0], buf[1]), -25, "a rowid past the last kind is refused (SQLITE_RANGE)");
+  check(/out of range/.test(errorText()), "...and says why", errorText());
+  const five = put("a\x1fb\x1fc\x1fd\x1fe");
+  equal(e.idx_add(2 ** 28 + 99, five[0], five[1]), -25, "an item row with more fields than columns is refused");
+  drop(buf);
+  drop(five);
+  // A page is one field, whatever its text holds: find in a document indexes it raw.
+  const page = put("a\x1fb\x1fc\x1fd\x1fe word");
+  equal(e.idx_add(98, page[0], page[1]), 0, "a page's text is never split, separators and all");
+  drop(page);
+  equal(e.idx_delete(98), 0, "...and goes like any row");
+}
+
+// ---- kinds of row ----
+// A rowid's top bits are its kind (`rowid >> 28`); kind 0 is a document page,
+// a set of words, and the others are running text.
+const TEXT = 1 << 28;
+const TODO = 2 << 28;
+{
+  e.idx_begin();
+  for (const [id, body] of [
+    // A page whose words are those of the phrase, out of order.
+    [16, "set chart color"],
+    [TEXT + 1, "color chart for the kitchen"],
+    [TODO + 1, "chart the color of the kitchen"],
+    [TODO + 2, "paint the kitchen"],
+    // Two fields: a phrase never runs from one into the next.
+    [TODO + 3, "buy milk\x1finbox"],
+    // One edit from `chart`.
+    [TODO + 4, "chant at dawn"],
+  ]) {
+    const buf = put(body);
+    equal(e.idx_add(id, buf[0], buf[1]), 0, `row ${id} is indexed`);
+    drop(buf);
+  }
+  e.idx_commit();
+
+  const all = query("kitchen ");
+  equal(all.total, 3, "one query answers every kind of row");
+  equal(e.idx_kind_total(0), 0, "...and counts each kind on its own: no page says kitchen");
+  equal(e.idx_kind_total(1), 1, "...one text row");
+  equal(e.idx_kind_total(2), 2, "...two to-dos");
+  equal(e.idx_kind_total(9), 0, "a kind past the last is none");
+
+  const capped = query("kitchen ", 1);
+  equal(capped.total, 3, "the limit caps what is buffered, per kind, not the total");
+  equal(capped.hits.length, 2, "...one hit of each kind that has any");
+
+  // In order on text rows; only the words on a page (phrase.ts checks there).
+  const phrase = query('"color chart" ');
+  equal(phrase.hits.slice().sort((a, b) => a - b).join(","), `16,${TEXT + 1}`, "a quoted phrase finds the text row holding it in order, and every page with its words");
+  equal(e.idx_kind_total(2), 0, "...but not the to-do with the words apart");
+  equal(query('"color char').hits.includes(TEXT + 1), true, "a phrase still being typed matches its last word as a start");
+  equal(query('"color char" ').hits.includes(TEXT + 1), false, "...and a closed one matches it whole");
+  equal(query('"kitchen" paint').total, 1, "a single quoted word is just a word");
+  equal(query('"the kitchen" paint').hits[0], TODO + 2, "a phrase ANDs with the words beside it");
+  equal(query('"milk inbox" ').total, 0, "a phrase is held within one field");
+  equal(query("milk inbox ").hits[0], TODO + 3, "...while the words alone may come from any of them");
+
+  // The typo ladder keeps the order: its best near-miss stands in.
+  {
+    const r = fuzzy('"colour chart" ');
+    equal(r.expansion, "colour>color", "a misspelt word in a phrase is corrected");
+    check(r.hits.includes(TEXT + 1) && !r.hits.includes(TODO + 1), "...and the phrase still holds its order", r.hits.join(","));
+    equal(e.idx_kind_total(1), 1, "...and the widened pass counts each kind too");
+    equal(e.idx_kind_total(2), 0, "...a kind it found nothing in, as none");
+  }
+
+  // Outside quotes a word the index holds keeps its near-misses: a page the
+  // tablet misread may hold one ("chant" for "chart").
+  {
+    const r = fuzzy("chart dawn ");
+    check(r.expansion.includes("chart>chant"), "an unquoted word the index holds still gets its near-misses", r.expansion);
+    check(r.hits.includes(TODO + 4), "...so a row with the misread word is found", r.hits.join(","));
+  }
+  // In a phrase a word the index holds is taken as typed: a near-miss would replace it.
+  {
+    const r = fuzzy('"colour chart" ');
+    equal(r.expansion, "colour>color", "only the misspelt word of a phrase is corrected, not its neighbour one edit from `chant`");
+    check(r.hits.includes(TEXT + 1), "...so the phrase still finds its row", r.hits.join(","));
+  }
+
+  equal(e.idx_delete(TODO + 1), 0, "a row is deleted by its rowid");
+  equal(query("kitchen ").total, 2, "...and no longer answers");
+  equal(e.idx_delete(TODO + 1), 0, "deleting a row already gone is no error");
+  for (const id of [16, TEXT + 1, TODO + 2, TODO + 3, TODO + 4]) e.idx_delete(id);
+  equal(query("kitchen ").total, 0, "the kinds' rows are gone again");
 }
 
 // ---- the .spd half of the same instance ----
@@ -289,46 +388,12 @@ equal(fuzzy("xilofone ").expansion, "", "...and reports no substitution");
 
 equal(query("reunião ").total, 2, "the search index still answers after a .spd parse");
 
-// ---- serialize / restore ----
-const imageLen = e.idx_serialize();
-check(imageLen > 0, "the index serializes to an image", `got ${imageLen} (${errorText()})`);
-const image = Buffer.from(new Uint8Array(e.memory.buffer, e.idx_image_ptr(), imageLen));
+// ---- closed ----
 e.idx_close();
-
 // -21 is SQLITE_MISUSE: no open database.
 equal(query("reunião ").total, -21, "a query with no open index is refused");
 equal(fuzzy("reunaio ").total, -21, "...and so is a fuzzy one, with the same code");
-
-{
-  e = await freshInstance();
-  // Both traps: the target must be on SQLite's heap, and this is the fresh
-  // instance's first call, where OMIT_AUTOINIT would trap `sqlite3_malloc64`.
-  const dst = e.idx_image_alloc(image.length);
-  check(dst !== 0, "idx_image_alloc works as the FIRST call into a fresh instance");
-  new Uint8Array(e.memory.buffer, dst, image.length).set(image);
-  equal(e.idx_deserialize(dst, image.length), 0, "the image deserializes");
-
-  equal(query("reunião ").total, 2, "the restored index answers the accented query");
-  equal(query("cali").total, 2, "...and still expands a prefix");
-  equal(query("projeto reuni").hits[0], 12, "...and still ANDs two tokens");
-
-  // The per-query `IF NOT EXISTS` DDL recreates the fold table on a new
-  // connection.
-  equal(query("-").total, 0, "...and still folds punctuation to nothing");
-
-  // Likewise the temp `fts5vocab` pool, which a pool created once at open
-  // would miss.
-  {
-    const r = fuzzy("reunaio ");
-    equal(r.total, 2, "the restored index still corrects a typo");
-    equal(r.expansion, "reunaio>reuniao", "...and still says what it substituted");
-    equal(fuzzy("caligrafia ").expansion, "", "...and still leaves a matching query alone");
-  }
-
-  const again = e.idx_serialize();
-  equal(again, imageLen, "the restored index serializes back to the same length");
-  e.idx_close();
-}
+equal(e.idx_delete(11), -21, "...and so is a delete");
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);

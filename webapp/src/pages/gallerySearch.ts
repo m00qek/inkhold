@@ -1,12 +1,14 @@
-// The library-wide search renderer: merges name matches from the cached tree
-// with transcript hits from the index into one list, painted whole (no append
-// path; a corpus change is a repaint).
+// The library-wide search renderer: merges name matches and transcript hits,
+// joined to the cached tree, into one list, painted whole (no append path; a
+// corpus change is a repaint). Both come from the index, the names as rows of
+// their own (`nameRows`), but for the match-inside fallback (`nameHits`).
 
 import { cardList } from "./galleryCards";
 import { el } from "../ui/dom";
-import { coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
+import { answerFor, coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail/railPlaces";
-import { matchesName, nameQueryFor, type NameQuery } from "../search/match";
+import { holdsInside, insideOf } from "../search/match";
+import { namedIds } from "./nameRows";
 import type { SearchCoverage } from "./searchCoverage";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
@@ -20,6 +22,20 @@ function plural(n: number, one: string): string {
 /** `.txt` ordinals count paragraphs (1), `.note` pages (0); the index has no kind. */
 function segmentKind(note: NoteSummary): number {
   return note.fileType.trim().toLowerCase() === "txt" ? 1 : 0;
+}
+
+/** What matched by name: notes and folders, by id. */
+interface NameHits {
+  readonly notes: ReadonlySet<Id>;
+  readonly folders: ReadonlySet<Id>;
+  /** Found by the typo ladder's spelling, not as typed. */
+  readonly corrected: boolean;
+}
+
+/** The digests' and to-dos' groups, and whether any of them came from the typo ladder's spelling. */
+export interface MoreResults {
+  readonly node: Node;
+  readonly corrected: boolean;
 }
 
 /** Read through getters so a paint reflects state at paint time. */
@@ -40,8 +56,8 @@ export interface GallerySearchCtx {
   * frame, or `null` if unknown. Read at paint time.
   */
   indexPending: () => number | null;
-  /** Another group of results painted after the notes (the to-dos); null: none. */
-  moreResults?: (q: string) => HTMLElement | null;
+  /** The digests' and to-dos' groups, painted among the notes (see `renderSearch`); null: none. */
+  moreResults?: (q: string) => MoreResults | null;
   /** How much handwriting search can find (`searchCoverage.ts`); absent: not said. */
   coverage?: SearchCoverage;
 }
@@ -70,11 +86,36 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /**
+   * The names the index matched for `q`, once it answered. Only when none
+   * matched as typed, the typed text anywhere in a name ("style" in
+   * "MyStyle"), then the typo ladder's: fallbacks, never a widening.
+   */
+  function nameHits(q: string): NameHits {
+    const s = answerFor(ctx.getSearchState(), q);
+    if (!s) return { notes: new Set(), folders: new Set(), corrected: false };
+    const { notes, folders } = namedIds(s.items.name);
+    const found = notes.size > 0 || folders.size > 0;
+    if (found && s.expansions.length === 0) return { notes, folders, corrected: false };
+    // Before the typo ladder's answer, as for to-dos.
+    const inside = insideOf(q);
+    const inNotes = new Set<Id>();
+    const inFolders = new Set<Id>();
+    for (const cached of ctx.folders.values()) {
+      for (const e of cached.entries) {
+        if (e.kind === "note" && holdsInside(e.name, inside)) inNotes.add(e.id);
+        else if (e.kind === "folder" && holdsInside(ctx.labelFor(e), inside)) inFolders.add(e.id);
+      }
+    }
+    if (inNotes.size > 0 || inFolders.size > 0) return { notes: inNotes, folders: inFolders, corrected: false };
+    return { notes, folders, corrected: found };
+  }
+
+  /**
   * Joins index hits (md5, file id, ordinals; no names) to the cached tree and
   * drops hits the tree doesn't name: the local index may be a superset of the
   * live library. Name matches first; otherwise the engine's order is kept.
   */
-  function searchResults(query: NameQuery | null): SearchResult[] {
+  function searchResults(names: NameHits): SearchResult[] {
     const searchState = ctx.getSearchState();
     const cached = allCachedNotes();
     const byId = new Map<Id, SearchResult>();
@@ -89,7 +130,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
           noteId,
           note: known.note,
           folderPath: known.folderPath,
-          nameMatched: matchesName(known.note.name, query),
+          nameMatched: names.notes.has(noteId),
           pages: doc.pages,
           kind: segmentKind(known.note),
           md5: doc.md5,
@@ -99,7 +140,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     }
 
     for (const [noteId, { note, folderPath }] of cached) {
-      if (byId.has(noteId) || !matchesName(note.name, query)) continue;
+      if (byId.has(noteId) || !names.notes.has(noteId)) continue;
       byId.set(noteId, { noteId, note, folderPath, nameMatched: true, pages: [], kind: segmentKind(note), md5: null, written: true });
     }
 
@@ -114,19 +155,12 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     return ctx.coverage.block((id) => notes.get(id)?.note.name ?? null);
   }
 
-  /** Every note and folder name the search can show, for choosing the rule. */
-  function* allNames(): Generator<string> {
-    for (const cached of ctx.folders.values()) {
-      for (const e of cached.entries) yield e.kind === "folder" ? ctx.labelFor(e) : e.name;
-    }
-  }
-
   /** Folders named like the query, by the label the rail shows; each once. */
-  function folderResults(query: NameQuery | null): Folder[] {
+  function folderResults(names: NameHits): Folder[] {
     const seen = new Map<Id, Folder>();
     for (const cached of ctx.folders.values()) {
       for (const e of cached.entries) {
-        if (e.kind !== "folder" || seen.has(e.id) || !matchesName(ctx.labelFor(e), query)) continue;
+        if (e.kind !== "folder" || seen.has(e.id) || !names.folders.has(e.id)) continue;
         seen.set(e.id, e);
       }
     }
@@ -134,11 +168,12 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /**
-  * The "matched reunião" line, once as a header: a per-row line would be false
-  * on rows that matched by name. Only shown if a row with pages survived the join.
+  * The "matched reunião" line, once above every group: the typo ladder is one
+  * for all of them. Only over something it found, or it would be false over a
+  * name matched as typed, and contradict "No matches".
   */
-  function expansionBlock(expansions: readonly Expansion[], results: readonly SearchResult[]): HTMLElement | null {
-    if (!results.some((r) => r.pages.length > 0)) return null;
+  function expansionBlock(expansions: readonly Expansion[], shown: boolean): HTMLElement | null {
+    if (!shown) return null;
     const parts = expansionNotice(expansions);
     if (!parts) return null;
     return el(
@@ -157,21 +192,22 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /**
-  * Names paint on the keystroke; transcripts join when the engine answers.
+  * Names and transcripts paint when the engine answers.
   * "Searching", "failed" and "nothing" stay three distinct states.
   */
   function renderSearch(q: string): void {
     const searchState = ctx.getSearchState();
-    // The word rule; typed text anywhere in a name only when no name matched it.
-    const query = nameQueryFor(q, allNames());
-    const results = searchResults(query);
-    const folders = folderResults(query);
+    const names = nameHits(q);
+    const results = searchResults(names);
+    const folders = folderResults(names);
     const pages = results.reduce((n, r) => n + r.pages.length, 0);
 
     const pending = ctx.indexPending() ?? 0;
 
     const expansions = searchState.kind === "results" ? searchState.expansions : [];
-    const matched = expansionBlock(expansions, results);
+    const extra = ctx.moreResults?.(q) ?? null;
+    const more = extra?.node ?? null;
+    const matched = expansionBlock(expansions, results.some((r) => r.pages.length > 0) || names.corrected || extra?.corrected === true);
     if (matched) gallery.append(matched);
 
     // A phrase checked against text the browser doesn't hold for every result.
@@ -193,10 +229,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       gallery.append(cardList(...folders.map((f) => ctx.folderCard(f))));
     }
 
-    const more = ctx.moreResults?.(q) ?? null;
     if (results.length === 0 && (more || folders.length > 0)) {
-      // The notes may still answer; say so rather than "no notes".
-      if (searchState.kind === "searching") gallery.append(el("p", { class: "hits__notice", role: "status", text: "Searching handwriting…" }));
       if (more) gallery.append(more);
       const cov = coverageBlock();
       if (cov) gallery.append(cov);
@@ -207,11 +240,11 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       if (searchState.kind === "error" && ctx.treeLoaded()) {
         // Gated on the walk: the index raises while the tree cache is still empty,
         // which is early, not failed.
-        gallery.append(ctx.emptyState("Couldn't search", "The recognised text couldn't be searched. Keep typing to retry."));
+        gallery.append(ctx.emptyState("Couldn't search", "Something went wrong in this browser's search. Keep typing to try again."));
       } else if (searchState.kind === "searching" || searchState.kind === "idle" || !ctx.treeLoaded()) {
         // No "No matches" until the walk lands (`rail.settle()` repaints); the empty
         // transcript answer usually arrives before the tree the name half needs.
-        gallery.append(ctx.emptyState("Searching…", "Looking through every note — names, typing and handwriting."));
+        gallery.append(ctx.emptyState("Searching…", "Looking through everything in your library search can read."));
       } else {
         const still = pendingLine(pending);
         // The coverage block says the rest, with numbers, once it has them.
@@ -228,14 +261,13 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         "h2",
         { class: "section-head" },
         el("span", { text: searchCountLabel(results.length, pages) }),
-        searchState.kind === "searching" ? el("span", { class: "hits__count", text: "Searching handwriting…" }) : null,
       ),
     );
-    // The to-dos are the person's writing: before the first document that is
-    // neither named like the query nor a note, else at the end.
+    // The digests and to-dos are the person's writing: before the first
+    // document that is neither named like the query nor a note, else at the end.
     const at = results.findIndex((r) => !r.nameMatched && !r.written);
     const cards = results.map((result, i) => ctx.resultCard(result, i, q, expansions));
-    // Two lists around the to-dos when they sit between the results.
+    // Two lists around them when they sit between the results.
     const split = more && at >= 0 ? at : cards.length;
     if (split > 0) gallery.append(cardList(...cards.slice(0, split)));
     if (more) gallery.append(more);

@@ -22,13 +22,6 @@
   font-weight: 600;
   color: var(--ink);
 }
-.hits__count {
-  font-family: var(--font-mono);
-  font-size: var(--fs-eyebrow);
-  letter-spacing: 0.16em;
-  color: var(--ink-faint);
-}
-
 /* A path, shared by bin rows (home is gone) and search (results span the library). */
 .card__path {
   color: var(--ink-soft);
@@ -68,7 +61,8 @@
 /* Mirrors `.ocr__body mark`: one highlight look in titles and transcripts. */
 .card__title mark,
 .card__excerpt mark,
-.todo-hit__title mark {
+.todo-hit__title mark,
+.digest-hit mark {
   background: color-mix(in srgb, var(--accent) 24%, transparent);
   color: var(--ink);
   border-radius: 2px;

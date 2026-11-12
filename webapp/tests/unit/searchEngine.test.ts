@@ -22,7 +22,8 @@ class FakeWorker extends EventTarget {
   answer(): void {
     const last = this.sent[this.sent.length - 1]!;
     if (last.kind === "build") this.reply({ kind: "built", id: last.id });
-    else this.reply({ kind: "result", id: last.id, total: 0, hits: [], expansions: [] });
+    else if (last.kind === "items") this.reply({ kind: "written", id: last.id });
+    else this.reply({ kind: "result", id: last.id, total: 0, hits: [], items: [], expansions: [] });
   }
   die(message = "boom"): void {
     this.dispatchEvent(Object.assign(new Event("error"), { message }));
@@ -133,6 +134,24 @@ describe("a search engine over a worker", () => {
     await expect(one).resolves.toBeUndefined();
     await expect(two).resolves.toBeUndefined();
     expect(worker.sent).toHaveLength(2);
+  });
+
+  it("posts item rows in turn, and a query never supersedes them", async () => {
+    const { worker, e } = engine();
+    const write = e.setItems("todo", [{ key: "t1", text: "ana" }]);
+    // Superseded while waiting by the next one; the write is not.
+    const ask = expect(e.query("ana", 10, true)).rejects.toMatchObject({ name: "AbortError" });
+    const later = e.query("ana b", 10, true);
+    await settle();
+    expect(worker.sent.map((r) => r.kind)).toEqual(["items"]);
+    expect(worker.sent[0]).toMatchObject({ kind: "items", of: "todo", rows: [{ key: "t1", text: "ana" }] });
+    worker.answer();
+    await expect(write).resolves.toBeUndefined();
+    await settle();
+    await ask;
+    expect(worker.sent.map((r) => r.kind)).toEqual(["items", "query"]);
+    worker.answer();
+    await expect(later).resolves.toMatchObject({ items: [] });
   });
 
   it("carries a wasm-side refusal across as an Error with its own name", async () => {

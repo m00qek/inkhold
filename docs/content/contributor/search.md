@@ -66,11 +66,12 @@ document's terms once. After that, searching costs it nothing.
 
 ## Step four: a query
 
-A result must hold every word typed, in its name or in its text. Names
-(notebooks, folders, to-dos) are not in the index; the browser matches them by
-the index's own rule, so a name and a page agree on what a word is. If nothing
-matches as typed, a typo ladder looks for the nearest spellings, because the
-corpus is misspelt handwriting recognition, and says so.
+A result must hold every word typed, in its name or in its text. What the
+browser holds itself (file and folder names, to-dos, digests) goes into the
+same index as rows of its own, beside the pages, so a name, a to-do and a page
+agree on what a word is, and one query answers them all. If nothing matches as
+typed, a typo ladder looks for the nearest spellings, because the corpus is
+misspelt handwriting recognition, and says so.
 
 Ranking is a weight, not bm25: the index knows one set of words per page, so
 it cannot tell a page about a word from a page that mentions it. A document

@@ -5,12 +5,11 @@ const spd = @import("spd");
 const c = spd.sqlite.c;
 const no_db: i32 = -c.SQLITE_MISUSE;
 const sqlite_core = @import("sqlite_core.zig");
-const appendQuoted = sqlite_core.appendQuoted;
-const buildMatch = sqlite_core.buildMatch;
 const foldToken = sqlite_core.foldToken;
 const fold_ddl = sqlite_core.fold_ddl;
 const gpa = sqlite_core.gpa;
 const idx_query = sqlite_core.idx_query;
+const q = @import("sqlite_core_query.zig");
 const runMatch = sqlite_core.runMatch;
 const setErrDb = sqlite_core.setErrDb;
 
@@ -28,8 +27,8 @@ const max_fuzzy_terms: usize = 32;
 /// Longer tokens stay exact; also sizes `editDistance`'s stack rows.
 const max_fuzzy_term_cp: usize = 64;
 
-/// `fts5vocab` over the index's terms, created per call: a deserialized
-/// connection has no temp tables.
+/// `fts5vocab` over the index's terms, created per call: every `idx_open` is a
+/// fresh connection, without the temp tables.
 const vocab_ddl =
     "CREATE VIRTUAL TABLE IF NOT EXISTS temp.docs_vocab USING fts5vocab('main','docs','row');";
 
@@ -61,18 +60,19 @@ fn betterCandidate(a: Candidate, b: Candidate) bool {
 }
 
 const FuzzyToken = struct {
-    /// As typed, for the UI.
-    raw: []const u8,
-    terms: []const []const u8,
     /// The term when the token folded to exactly one and the ladder allows
     /// edits; only then can it expand.
     term: ?[]const u8,
-    prefix: bool,
     /// `raw`'s length in term-codepoints.
     len: usize,
     /// `term`'s length in codepoints, for `delta`.
     term_len: usize,
     budget: usize,
+    /// The index holds it as typed (or, being typed, a word it starts). In a
+    /// quoted phrase that word is taken as typed: a near-miss would replace
+    /// it there. Outside quotes it keeps its near-misses beside it, as a page
+    /// the tablet misread may hold one.
+    present: bool = false,
     cands: std.ArrayList(Candidate) = .empty,
     alts: std.ArrayList([]const u8) = .empty,
 };
@@ -96,11 +96,10 @@ fn offer(alloc: std.mem.Allocator, t: *FuzzyToken, cap: usize, cand: Candidate) 
     }
 }
 
-/// Rebuilds `match` with an OR-group per expanded token and records
-/// `expansion`. Returns 1 if widened, 0 if not (the caller must not re-run), or
-/// `-rc`. AND is explicit because FTS5 rejects `"a" ("b" OR "c")`. Only the
-/// best-ranked tier joins a group: bm25 would score `set` like `test`.
-/// Vocabulary terms are quoted too.
+/// Rebuilds `match` (and `phrase_match`) with an OR-group per expanded token
+/// and records `expansion`. Returns 1 if widened, 0 if not (the caller must
+/// not re-run), or `-rc`. Only the best-ranked tier joins a group: bm25 would
+/// score `set` like `test`. Vocabulary terms are quoted too.
 fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -112,36 +111,22 @@ fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
         return -rc;
     }
 
-    var tokens: std.ArrayList(FuzzyToken) = .empty;
-    var it = std.mem.tokenizeAny(u8, query, " \t\r\n\x0b\x0c");
+    var s: q.Scan = undefined;
+    rc = q.scan(h, arena, foldToken, query, &s);
+    if (rc != 0) return rc;
+    const tokens = arena.alloc(FuzzyToken, s.tokens.len) catch return -c.SQLITE_NOMEM;
     var expandable = false;
-    while (it.next()) |tok| {
-        var terms: std.ArrayList([]const u8) = .empty;
-        rc = foldToken(h, arena, tok, &terms);
-        if (rc != 0) return rc;
-        const len = termLen(tok);
+    for (s.tokens, tokens) |st, *t| {
+        const len = termLen(st.raw);
         const budget = if (len <= max_fuzzy_term_cp) maxEdits(len) else 0;
-        const term: ?[]const u8 = if (budget > 0 and terms.items.len == 1) terms.items[0] else null;
+        const term: ?[]const u8 = if (budget > 0 and st.terms.len == 1) st.terms[0] else null;
         if (term != null) expandable = true;
-        tokens.append(arena, .{
-            .raw = tok,
-            .terms = terms.items,
+        t.* = .{
             .term = term,
-            .prefix = false,
             .len = len,
             .term_len = if (term) |x| cpLen(x) else 0,
             .budget = budget,
-        }) catch return -c.SQLITE_NOMEM;
-    }
-    // Same `*` rule as `buildMatch`, on the last token that produced a term.
-    if (query.len != 0 and !std.ascii.isWhitespace(query[query.len - 1])) {
-        var i = tokens.items.len;
-        while (i > 0) : (i -= 1) {
-            if (tokens.items[i - 1].terms.len != 0) {
-                tokens.items[i - 1].prefix = true;
-                break;
-            }
-        }
+        };
     }
     if (!expandable) return 0;
 
@@ -166,23 +151,44 @@ fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
         }
         const raw_term = c.sqlite3_column_text(vocab, 0) orelse continue;
         const vterm = std.mem.span(raw_term);
-        for (tokens.items) |*t| {
+        for (tokens, s.tokens) |*t, st| {
             const term = t.term orelse continue;
-            // While typing, compare against the vocabulary term truncated to the
-            // typed length, or a typo mid-word is out of reach.
-            const cand = if (t.prefix) truncCodepoints(vterm, t.len) else vterm;
-            const d = editDistance(term, cand, t.budget) orelse continue;
-            if (d == 0) continue;
+            // While typing, also against the vocabulary term truncated to the
+            // typed length, or a typo in a half-typed word is out of reach;
+            // the whole term still answers a word typed in full but misspelt.
+            var cand: []const u8 = vterm;
+            var d = editDistance(term, vterm, t.budget);
+            if (st.prefix) {
+                const cut = truncCodepoints(vterm, t.len);
+                if (editDistance(term, cut, t.budget)) |dc| {
+                    // Its start as typed: a word the index holds.
+                    if (dc == 0) {
+                        t.present = true;
+                        continue;
+                    }
+                    if (d == null or dc < d.?) {
+                        d = dc;
+                        cand = cut;
+                    }
+                }
+            }
+            const dist = d orelse continue;
+            if (dist == 0) {
+                t.present = true;
+                continue;
+            }
             const cand_len = cpLen(cand);
             offer(arena, t, max_fuzzy_terms, .{
                 .term = vterm,
-                .dist = d,
+                .dist = dist,
                 .delta = if (cand_len > t.term_len) cand_len - t.term_len else t.term_len - cand_len,
             }) catch return -c.SQLITE_NOMEM;
         }
     }
 
-    for (tokens.items) |*t| {
+    for (tokens, s.tokens) |*t, st| {
+        const quoted = if (st.phrase) |pi| s.phrases[pi].terms >= 2 else false;
+        if (t.present and quoted) t.cands.clearRetainingCapacity();
         if (t.cands.items.len == 0) continue;
         const best = t.cands.items[0];
         var n: usize = 1;
@@ -198,7 +204,7 @@ fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
     var round: usize = 0;
     outer: while (true) : (round += 1) {
         var progressed = false;
-        for (tokens.items) |*t| {
+        for (tokens) |*t| {
             if (round >= t.cands.items.len) continue;
             if (added >= max_fuzzy_terms) break :outer;
             t.alts.append(arena, t.cands.items[round].term) catch return -c.SQLITE_NOMEM;
@@ -209,36 +215,21 @@ fn buildFuzzyMatch(h: *c.sqlite3, query: []const u8) i32 {
     }
     if (added == 0) return 0;
 
-    sqlite_core.match.clearRetainingCapacity();
     sqlite_core.expansion.clearRetainingCapacity();
-    for (tokens.items) |t| {
-        if (t.alts.items.len == 0) {
-            for (t.terms, 0..) |term, i| {
-                appendAnd() catch return -c.SQLITE_NOMEM;
-                appendQuoted(term) catch return -c.SQLITE_NOMEM;
-                if (t.prefix and i + 1 == t.terms.len) sqlite_core.match.append(gpa, '*') catch return -c.SQLITE_NOMEM;
-            }
-            continue;
-        }
-        appendAnd() catch return -c.SQLITE_NOMEM;
-        sqlite_core.match.append(gpa, '(') catch return -c.SQLITE_NOMEM;
-        appendQuoted(t.terms[0]) catch return -c.SQLITE_NOMEM;
-        if (t.prefix) sqlite_core.match.append(gpa, '*') catch return -c.SQLITE_NOMEM;
+    const alts = arena.alloc([]const []const u8, tokens.len) catch return -c.SQLITE_NOMEM;
+    for (tokens, s.tokens, alts) |t, st, *a| {
+        a.* = t.alts.items;
         for (t.alts.items) |alt| {
-            sqlite_core.match.appendSlice(gpa, " OR ") catch return -c.SQLITE_NOMEM;
-            appendQuoted(alt) catch return -c.SQLITE_NOMEM;
-            sqlite_core.expansion.appendSlice(gpa, t.raw) catch return -c.SQLITE_NOMEM;
+            sqlite_core.expansion.appendSlice(gpa, st.raw) catch return -c.SQLITE_NOMEM;
             sqlite_core.expansion.append(gpa, '\t') catch return -c.SQLITE_NOMEM;
             sqlite_core.expansion.appendSlice(gpa, alt) catch return -c.SQLITE_NOMEM;
             sqlite_core.expansion.append(gpa, '\n') catch return -c.SQLITE_NOMEM;
         }
-        sqlite_core.match.append(gpa, ')') catch return -c.SQLITE_NOMEM;
     }
+    q.emit(gpa, &sqlite_core.match, s, alts, false) catch return -c.SQLITE_NOMEM;
+    sqlite_core.phrase_match.clearRetainingCapacity();
+    if (s.hasPhrase()) q.emit(gpa, &sqlite_core.phrase_match, s, alts, true) catch return -c.SQLITE_NOMEM;
     return 1;
-}
-
-fn appendAnd() !void {
-    if (sqlite_core.match.items.len != 0) try sqlite_core.match.appendSlice(gpa, " AND ");
 }
 
 /// `idx_query` with the typo ladder, which runs only when the exact pass found

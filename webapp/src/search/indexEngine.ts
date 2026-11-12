@@ -4,6 +4,7 @@
 // dropping the index means dropping the instance.
 
 import type { Expansion } from "./localSearch";
+import { ItemTable, KIND_SIZE, type ItemKind, type ItemRow } from "./itemRows";
 
 /** The `idx_*` half of `sqlite-core.wasm` (`webapp/wasm/sqlite_core.zig`). */
 export interface SearchCoreExports {
@@ -12,29 +13,25 @@ export interface SearchCoreExports {
   _initialize?(): void;
   idx_alloc(len: number): number;
   idx_free(ptr: number, len: number): void;
-  idx_schema_version(): number;
   idx_open(): number;
   idx_close(): void;
   idx_begin(): number;
   idx_commit(): number;
   idx_add(rowid: number, ptr: number, len: number): number;
   idx_query(ptr: number, len: number, limit: number): number;
+  /** Buffered hits, up to `limit` of each kind; -1 past them. */
   idx_hit(i: number): number;
+  /** The last query's exact total for one kind of row (`itemRows.ts`). */
+  idx_kind_total(kind: number): number;
+  idx_delete(rowid: number): number;
   /** `idx_query` plus the typo ladder, which fires only on a total of 0. */
   idx_fuzzy(ptr: number, len: number, limit: number): number;
   /** `typed \t matched \n` pairs, rewritten by every query of either kind. */
   idx_expansion_ptr(): number;
   idx_expansion_len(): number;
-  idx_serialize(): number;
-  idx_image_ptr(): number;
-  idx_image_alloc(len: number): number;
-  idx_deserialize(ptr: number, len: number): number;
   idx_errmsg_ptr(): number;
   idx_errmsg_len(): number;
 }
-
-/** How this file spells a rowid table. Bump when `SnapshotDoc` changes shape. */
-export const MAPPING_FORMAT_VERSION = 1;
 
 export const DEFAULT_WASM_URL = "/sqlite-core.wasm";
 
@@ -58,30 +55,31 @@ export interface PageRef {
   page: number;
 }
 
-/** A query's answer. `total` is EXACT and independent of `limit` (§9.5). */
+/** An item row that matched: its kind and its key there. */
+export interface ItemRef {
+  kind: ItemKind;
+  key: string;
+}
+
+/** A query's answer. `total` is EXACT and independent of `limit` (§9.5); the caller asks for every item, so `items` is whole. */
 export interface QueryResult {
+  /** Matching pages. */
   total: number;
   /** bm25 rank order, capped at `limit`. Reordering is the caller's business. */
   hits: PageRef[];
+  /** Matching item rows, each kind capped at `limit`, in bm25 rank order within it. */
+  items: ItemRef[];
   /** Typo-ladder substitutions; non-empty only for a fuzzy query whose exact pass found nothing. */
   expansions: Expansion[];
 }
 
-/** One document in a snapshot's rowid table. */
-export interface SnapshotDoc {
+/** One document's pages in the rowid table. */
+interface DocRows {
   md5: string;
   /** The rowid of `pages[0]`; page `i` of this document is `firstRowid + i`. */
   firstRowid: number;
   /** Page ordinals, in insertion order. Not necessarily dense or sorted. */
   pages: Uint32Array;
-}
-
-/** The serialized database plus the rowid table that gives its integers meaning. Structured-clonable. */
-export interface IndexSnapshot {
-  schemaVersion: number;
-  mappingVersion: number;
-  image: Uint8Array;
-  docs: SnapshotDoc[];
 }
 
 /** An `idx_*` call refused. `rc` is the module's return, `-rc` of a SQLite code. */
@@ -91,14 +89,6 @@ export class SearchIndexError extends Error {
     super(detail ? `${call} failed (${rc}): ${detail}` : `${call} failed (${rc})`);
     this.name = "SearchIndexError";
     this.rc = rc;
-  }
-}
-
-/** A stored snapshot of a different index shape: discard it and rebuild from the rows. */
-export class StaleSnapshotError extends Error {
-  constructor(what: string, want: number, got: number) {
-    super(`stored index has ${what} ${got}, this build wants ${want}`);
-    this.name = "StaleSnapshotError";
   }
 }
 
@@ -140,7 +130,7 @@ function browserCoreLoader(url: string = DEFAULT_WASM_URL): CoreLoader {
 
 /** Documents in build order, so `firstRowid` ascends and lookup is a binary search. */
 class RowidTable {
-  private readonly docs: SnapshotDoc[] = [];
+  private readonly docs: DocRows[] = [];
   private readonly seen = new Set<string>();
   private next = 1;
 
@@ -159,6 +149,8 @@ class RowidTable {
 
   add(md5: string, pages: readonly number[]): number {
     if (this.seen.has(md5)) throw new Error(`document ${md5} is already in this index`);
+    // Pages are kind 0 (`itemRows.ts`): their rowids stay under the first item kind's.
+    if (this.next + pages.length > KIND_SIZE) throw new Error("no rowids left for pages");
     const firstRowid = this.next;
     this.seen.add(md5);
     this.docs.push({ md5, firstRowid, pages: Uint32Array.from(pages) });
@@ -182,23 +174,6 @@ class RowidTable {
   md5s(): string[] {
     return this.docs.map((d) => d.md5);
   }
-
-  snapshot(): SnapshotDoc[] {
-    return this.docs.map((d) => ({ md5: d.md5, firstRowid: d.firstRowid, pages: d.pages.slice() }));
-  }
-
-  static from(docs: readonly SnapshotDoc[]): RowidTable {
-    const t = new RowidTable();
-    for (const d of docs) {
-      if (d.firstRowid < t.next) {
-        throw new Error(`snapshot rowid table is out of order at ${d.md5}`);
-      }
-      t.seen.add(d.md5);
-      t.docs.push({ md5: d.md5, firstRowid: d.firstRowid, pages: Uint32Array.from(d.pages) });
-      t.next = d.firstRowid + d.pages.length;
-    }
-    return t;
-  }
 }
 
 /**
@@ -209,6 +184,9 @@ class RowidTable {
 export class SearchIndex {
   private readonly core: SearchCoreExports;
   private table: RowidTable;
+  private items = new ItemTable();
+  /** True once a build wrote the item rows `items` holds; until then, and after a reset, the next build writes them. */
+  private itemsIn = false;
   /** Reused UTF-8 staging buffer. */
   private scratchPtr = 0;
   private scratchCap = 0;
@@ -227,20 +205,6 @@ export class SearchIndex {
     return index;
   }
 
-  static async restore(
-    snapshot: IndexSnapshot,
-    load: CoreLoader = browserCoreLoader(),
-  ): Promise<SearchIndex> {
-    const core = await load();
-    const index = new SearchIndex(core, new RowidTable());
-    index.deserialize(snapshot);
-    return index;
-  }
-
-  get schemaVersion(): number {
-    return this.core.idx_schema_version();
-  }
-
   get documentCount(): number {
     return this.table.documentCount;
   }
@@ -257,6 +221,7 @@ export class SearchIndex {
   reset(): void {
     this.assertOpen();
     this.table = new RowidTable();
+    this.itemsIn = false;
     this.check("idx_open", this.core.idx_open());
   }
 
@@ -269,6 +234,7 @@ export class SearchIndex {
     this.check("idx_begin", this.core.idx_begin());
     try {
       for (const doc of docs) this.addDocument(doc);
+      if (!this.itemsIn) for (const row of this.items.all()) this.addRow(row.rowid, row.text);
     } catch (err) {
       // A failing reset must not replace the original error.
       try {
@@ -279,12 +245,38 @@ export class SearchIndex {
       throw err;
     }
     this.check("idx_commit", this.core.idx_commit());
+    this.itemsIn = true;
   }
 
+  /** Pages from `docs`, and the item rows already held. */
   rebuild(docs: Iterable<TermsDocument>): void {
     this.assertOpen();
-    if (this.table.documentCount > 0) this.reset();
+    this.reset();
     this.build(docs);
+  }
+
+  /**
+   * Replaces one kind's rows with `rows`: only what changed is written, so a
+   * saved to-do is found at once. Not yet built: kept for the build. A
+   * failure empties the index, which then needs a rebuild.
+   */
+  setItems(kind: ItemKind, rows: readonly ItemRow[]): void {
+    this.assertOpen();
+    const diff = this.items.diff(kind, rows);
+    if (!this.itemsIn || (diff.remove.length === 0 && diff.add.length === 0)) return;
+    try {
+      this.check("idx_begin", this.core.idx_begin());
+      for (const rowid of diff.remove) this.check("idx_delete", this.core.idx_delete(rowid));
+      for (const row of diff.add) this.addRow(row.rowid, row.text);
+      this.check("idx_commit", this.core.idx_commit());
+    } catch (err) {
+      try {
+        this.reset();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
   }
 
   /** Repeated md5s are refused here: rowids are fresh, so the wasm cannot catch a document added twice. */
@@ -295,12 +287,12 @@ export class SearchIndex {
       doc.pages.map((row) => row.p),
     );
     for (let i = 0; i < doc.pages.length; i++) {
-      this.addPage(base + i, doc.pages[i]!.t);
+      this.addRow(base + i, doc.pages[i]!.t);
     }
   }
 
-  /** One FTS5 row. Terms arrive server-folded; re-tokenizing them is a no-op. */
-  addPage(rowid: number, terms: string): void {
+  /** One FTS5 row: a page (its terms arrive server-folded; re-tokenizing them is a no-op) or an item. */
+  addRow(rowid: number, terms: string): void {
     this.assertOpen();
     const len = this.stage(terms);
     this.check("idx_add", this.core.idx_add(rowid, this.scratchPtr, len));
@@ -323,15 +315,20 @@ export class SearchIndex {
     this.check(call, total);
     const expansions = this.expansions();
     const hits: PageRef[] = [];
-    const n = Math.min(total, limit);
-    for (let i = 0; i < n; i++) {
+    const items: ItemRef[] = [];
+    for (let i = 0; ; i++) {
       const rowid = this.core.idx_hit(i);
       if (rowid < 0) break;
+      const item = this.items.lookup(rowid);
+      if (item) {
+        items.push(item);
+        continue;
+      }
       const ref = this.table.lookup(rowid);
-      if (!ref) throw new Error(`rowid ${rowid} is not in the index's rowid table`);
+      if (!ref) throw new Error(`rowid ${rowid} is not in the index's rowid tables`);
       hits.push(ref);
     }
-    return { total, hits, expansions };
+    return { total: this.core.idx_kind_total(0), hits, items, expansions };
   }
 
   /** Parses `typed \t matched \n`; a line without both halves is dropped. */
@@ -349,41 +346,6 @@ export class SearchIndex {
       }
     }
     return out;
-  }
-
-  serialize(): IndexSnapshot {
-    this.assertOpen();
-    const len = this.core.idx_serialize();
-    this.check("idx_serialize", len);
-    const image = new Uint8Array(len);
-    image.set(new Uint8Array(this.core.memory.buffer, this.core.idx_image_ptr(), len));
-    return {
-      schemaVersion: this.core.idx_schema_version(),
-      mappingVersion: MAPPING_FORMAT_VERSION,
-      image,
-      docs: this.table.snapshot(),
-    };
-  }
-
-  /**
-   * The buffer must come from `idx_image_alloc` (SQLite's heap): `FREEONCLOSE`
-   * hands it to `sqlite3_free`. `idx_deserialize` takes ownership; never free it.
-   */
-  deserialize(snapshot: IndexSnapshot): void {
-    this.assertOpen();
-    const want = this.core.idx_schema_version();
-    if (snapshot.schemaVersion !== want) {
-      throw new StaleSnapshotError("index-schema version", want, snapshot.schemaVersion);
-    }
-    if (snapshot.mappingVersion !== MAPPING_FORMAT_VERSION) {
-      throw new StaleSnapshotError("mapping version", MAPPING_FORMAT_VERSION, snapshot.mappingVersion);
-    }
-    const len = snapshot.image.length;
-    const dst = this.core.idx_image_alloc(len);
-    if (dst === 0) throw new Error(`idx_image_alloc(${len}) returned null`);
-    new Uint8Array(this.core.memory.buffer, dst, len).set(snapshot.image);
-    this.check("idx_deserialize", this.core.idx_deserialize(dst, len));
-    this.table = RowidTable.from(snapshot.docs);
   }
 
   /** The instance and its memory survive; drop every reference to free them. */

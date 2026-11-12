@@ -20,7 +20,7 @@ export function installAppInks(ctx: LibraryCtx): void {
 
 /** Both pages, each read once at start: the rail shows an app only when the server keeps its data. */
 export function installAppPages(ctx: LibraryCtx): void {
-  const { api, content, gallery, st } = ctx;
+  const { api, content, gallery } = ctx;
   ctx.todo = createTodoPage({
     api,
     content,
@@ -41,8 +41,8 @@ export function installAppPages(ctx: LibraryCtx): void {
     handled: ctx.handled,
     onChanged: () => {
       ctx.rail.build();
-      // New to-dos reach an open search too.
-      if (st.query.trim() !== "" && st.destination === null && ctx.viewers.active() === null) ctx.render.renderGallery();
+      // New to-dos reach search: their rows change, and an open search asks again and repaints.
+      ctx.searchItems.setTodo(ctx.todo.snapshot());
     },
     go: (view) => go(todoHref(view)),
   });
@@ -59,7 +59,10 @@ export function installAppPages(ctx: LibraryCtx): void {
     setMode: (open) => ctx.modes.setDestinationMode("digest", open),
     toast: ctx.toast,
     handled: ctx.handled,
-    onChanged: () => ctx.rail.build(),
+    onChanged: () => {
+      ctx.rail.build();
+      ctx.searchItems.setDigest(ctx.digest.snapshot());
+    },
     go: (path) => go(digestHref(path)),
     ink: ctx.digestInk,
     thumbs: createDigestThumbs({ api, thumbnails: ctx.thumbnails }),

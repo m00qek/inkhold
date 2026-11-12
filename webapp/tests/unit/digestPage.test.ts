@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 // The Digest page's states before there are digests to show: loading, off on
 // the server, a failed read that can be tried again; that an unchanged answer
-// repaints nothing; editing a comment, and moving a digest to a category.
+// repaints nothing; how often a search may ask again; editing a comment, and
+// moving a digest to a category.
 
 import { describe, it, expect, vi } from "vitest";
 import { createDigestPage, type DigestHost } from "../../src/pages/digest/digestPage";
@@ -48,6 +49,25 @@ const one: DigestSnapshot = {
 const title = (h: DigestHost) => h.content.querySelector(".digest-empty__title")?.textContent;
 
 describe("the Digest page", () => {
+  it("is asked again by a search only half a minute after it was last asked, answered or not", async () => {
+    let asked = 0;
+    let fail = true;
+    const h = host(async () => {
+      asked++;
+      if (fail) throw new Error("offline");
+      return one;
+    });
+    const page = createDigestPage(h);
+    const a = page.freshen();
+    const b = page.freshen();
+    expect(asked).toBe(1);
+    await Promise.all([a, b]);
+    fail = false;
+    await page.freshen();
+    expect(asked).toBe(1);
+    page.destroy();
+  });
+
   it("says it is loading, then shows what the server has", async () => {
     const h = host(async () => one);
     const page = createDigestPage(h);

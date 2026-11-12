@@ -36,7 +36,6 @@ function deferredSearch() {
   const pending: { query: string; resolve: (r: LocalResults) => void; reject: (e: unknown) => void }[] = [];
 
   const engine: LocalSearch = {
-    ready: true,
     search(query: string, signal?: AbortSignal): Promise<LocalResults> {
       calls.push(query);
       signals.push(signal);
@@ -86,6 +85,36 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("createNoteSearch", () => {
+  describe("an answer gone stale", () => {
+    it("is asked again only once marked stale, and without the debounce or a 'searching' state", async () => {
+      const h = harness();
+      h.controller.setQuery("roadmap");
+      await vi.advanceTimersByTimeAsync(DEBOUNCE);
+      await h.settle(0, [doc(1, [0])]);
+      const painted = h.states.length;
+
+      h.controller.askIfStale();
+      expect(h.calls).toEqual(["roadmap"]);
+
+      h.controller.stale();
+      h.controller.askIfStale();
+      expect(h.calls).toEqual(["roadmap", "roadmap"]);
+      expect(h.states.length).toBe(painted);
+      h.controller.askIfStale();
+      expect(h.calls).toHaveLength(2);
+    });
+
+    it("a new question clears it: that question reads what is there now", async () => {
+      const h = harness();
+      h.controller.stale();
+      h.controller.setQuery("roadmap");
+      h.controller.askIfStale();
+      expect(h.calls).toEqual([]);
+      await vi.advanceTimersByTimeAsync(DEBOUNCE);
+      expect(h.calls).toEqual(["roadmap"]);
+    });
+  });
+
   describe("debounce", () => {
     // The debounce buys main-thread frames now (worst short prefix 37.9 ms): smaller, not zero.
     it("defaults to a debounce well under the 220 ms a round trip once bought", () => {
@@ -317,7 +346,7 @@ describe("createNoteSearch", () => {
 
       const state = h.last();
       expect(state?.kind).toBe("results");
-      expect(Object.keys(state ?? {}).sort()).toEqual(["documents", "expansions", "kind", "query"]);
+      expect(Object.keys(state ?? {}).sort()).toEqual(["documents", "expansions", "items", "kind", "query"]);
     });
 
     it("substitutes nothing when the query as typed answered", async () => {
@@ -339,15 +368,15 @@ describe("createNoteSearch", () => {
     });
   });
 
-  // The default engine, so the controller has no "no engine" branch; never `ready`.
+  // The default engine, so the controller has no "no engine" branch.
   describe("noLocalSearch", () => {
-    it("is never ready and answers every query with nothing", async () => {
-      expect(noLocalSearch.ready).toBe(false);
+    it("answers every query with nothing", async () => {
       await expect(noLocalSearch.search("anything")).resolves.toEqual({
         query: "anything",
         totalPages: 0,
         documents: [],
         expansions: [],
+        items: { name: [], todo: [], digest: [] },
       });
     });
   });
