@@ -234,7 +234,7 @@ export class SearchIndex {
     this.check("idx_begin", this.core.idx_begin());
     try {
       for (const doc of docs) this.addDocument(doc);
-      if (!this.itemsIn) for (const row of this.items.all()) this.addPage(row.rowid, row.text);
+      if (!this.itemsIn) for (const row of this.items.all()) this.addRow(row.rowid, row.text);
     } catch (err) {
       // A failing reset must not replace the original error.
       try {
@@ -267,7 +267,7 @@ export class SearchIndex {
     try {
       this.check("idx_begin", this.core.idx_begin());
       for (const rowid of diff.remove) this.check("idx_delete", this.core.idx_delete(rowid));
-      for (const row of diff.add) this.addPage(row.rowid, row.text);
+      for (const row of diff.add) this.addRow(row.rowid, row.text);
       this.check("idx_commit", this.core.idx_commit());
     } catch (err) {
       try {
@@ -287,12 +287,12 @@ export class SearchIndex {
       doc.pages.map((row) => row.p),
     );
     for (let i = 0; i < doc.pages.length; i++) {
-      this.addPage(base + i, doc.pages[i]!.t);
+      this.addRow(base + i, doc.pages[i]!.t);
     }
   }
 
-  /** One FTS5 row. A page's terms arrive server-folded; re-tokenizing them is a no-op. */
-  addPage(rowid: number, terms: string): void {
+  /** One FTS5 row: a page (its terms arrive server-folded; re-tokenizing them is a no-op) or an item. */
+  addRow(rowid: number, terms: string): void {
     this.assertOpen();
     const len = this.stage(terms);
     this.check("idx_add", this.core.idx_add(rowid, this.scratchPtr, len));

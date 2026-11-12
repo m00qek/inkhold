@@ -19,6 +19,7 @@ export type EngineRequest =
 
 export type EngineResponse =
   | { kind: "built"; id: number }
+  | { kind: "written"; id: number }
   | {
       kind: "result";
       id: number;
@@ -51,7 +52,7 @@ async function handle(req: EngineRequest): Promise<EngineResponse> {
       const engine = index ?? (await SearchIndex.open());
       index = engine;
       engine.setItems(req.of, req.rows);
-      return { kind: "built", id: req.id };
+      return { kind: "written", id: req.id };
     }
     case "query": {
       // A query before a build is a client bug; zero results would hide it.

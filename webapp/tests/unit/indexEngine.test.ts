@@ -231,10 +231,10 @@ describe("SearchIndex lifecycle and refusals", () => {
   it("reports a wasm-side refusal as SearchIndexError with the module's message", async () => {
     const index = await SearchIndex.open(loadCore);
     try {
-      index.addPage(1, "reuniao");
+      index.addRow(1, "reuniao");
       let caught: unknown;
       try {
-        index.addPage(1, "outra coisa");
+        index.addRow(1, "outra coisa");
       } catch (err) {
         caught = err;
       }

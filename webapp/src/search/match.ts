@@ -24,16 +24,18 @@ const WORD = /[\p{L}\p{M}\p{N}]+/gu;
 /**
  * The words to mark in a result's name or title, as [start, end) ranges of
  * the original string: the typed ones, accents and order aside, the last
- * also as the start of a word (the index's rule), and where the typo ladder
- * answered, its spellings of them. Whole words are marked.
+ * also as the start of a word while it is being typed (no space after it, the
+ * index's rule), and where the typo ladder answered, its spellings of them.
+ * Whole words are marked.
  */
 export function typedMarks(text: string, q: string, expansions: readonly { readonly matched: string }[]): [number, number][] {
   const typed = words(q);
   if (typed.length === 0) return [];
-  const whole = new Set(typed.slice(0, -1));
-  const start = typed[typed.length - 1]!;
+  const open = !/\s$/.test(q);
+  const whole = new Set(open ? typed.slice(0, -1) : typed);
+  const start = open ? typed[typed.length - 1]! : null;
   const matched = new Set(expansions.map((e) => fold(e.matched)));
-  return wordMarks(text, (w) => whole.has(w) || w.startsWith(start) || matched.has(w));
+  return wordMarks(text, (w) => whole.has(w) || (start !== null && w.startsWith(start)) || matched.has(w));
 }
 
 /** Whole words of `text` (original positions) one of whose folded parts `accept` takes. */

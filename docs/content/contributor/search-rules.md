@@ -87,8 +87,8 @@ flowchart TD
   exact query has no hits of any kind: the corpus is misspelt handwriting
   recognition. Only a word the index does not hold as typed is corrected, so a
   phrase keeps its other words. A half-typed word is compared with both the
-  start and the whole of each vocabulary word. English-oriented stemmers and spellfix were
-  rejected; the corpus is Portuguese.
+  start and the whole of each vocabulary word. English-oriented stemmers and
+  spellfix were rejected; the corpus is Portuguese.
 - **The fallback inside a name.** When the index matched no name or to-do as
   typed, the typed text anywhere in one matches (`search/match.ts`: "style" in
   "MyStyle"), before the typo ladder's answer for them. FTS5 cannot do this.

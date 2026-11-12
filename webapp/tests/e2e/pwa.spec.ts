@@ -152,7 +152,7 @@ test("the device keeps the app and the listings, never a file", async ({ page })
     expect(u).toMatch(/ \/api\/(user\/me|controlplane\/(tree|bin|usage))(\?|$)/);
   }
   expect(urls.filter((u) => / \/(note|file|thumbnail)\//.test(u))).toEqual([]);
-  // Of the wasm, only search's: the readers' decoders come from the server.
+  // Of the wasm, only search's (and the `.spd` viewer's, in the same file): note-decode and pdf-decode come from the server.
   expect(urls.filter((u) => /\.wasm$/.test(u)).map((u) => u.slice(u.lastIndexOf("/") + 1))).toEqual(["sqlite-core.wasm"]);
 });
 

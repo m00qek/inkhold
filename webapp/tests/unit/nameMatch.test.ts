@@ -13,6 +13,11 @@ describe("marking a result's words", () => {
     expect(cut(text, typedMarks(text, "reuniao pa", []))).toEqual(["Reunião", "pais"]);
   });
 
+  it("after a space, the last word is whole, as the index then takes it", () => {
+    expect(typedMarks("Art and artist", "art ", []).length).toBe(1);
+    expect(typedMarks("Art and artist", "art", []).length).toBe(2);
+  });
+
   it("splits where the index splits: apostrophes, hyphens, dots", () => {
     expect(cut("l'école", typedMarks("l'école", "ecole", []))).toEqual(["école"]);
     expect(cut("page-range", typedMarks("page-range", "range ", []))).toEqual(["range"]);

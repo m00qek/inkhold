@@ -138,8 +138,8 @@ code. Production builds only; development never registers one.
   always come from the server, and the To-Do and Digest pages too. Search's
   `sqlite-core.wasm` is kept with the app's files, so a search answers offline
   from what search keeps in IndexedDB (the documents' words and text, the last
-  to-dos and digests); the readers' wasm decoders are not, as only reading
-  needs them.
+  to-dos and digests); it carries the `.spd` viewer too. `note-decode.wasm`
+  and `pdf-decode.wasm` are not kept, as only reading needs them.
 - **Forgetting.** Signing out, or the server refusing the session (a 401 or
   403 on any listing), deletes the stored listings and everything else of the
   person's in the browser: the IndexedDB databases built from their library

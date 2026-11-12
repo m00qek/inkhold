@@ -1,7 +1,7 @@
 // The library-wide search renderer: merges name matches and transcript hits,
-// both from the index, joined to the cached tree, into one list, painted
-// whole (no append path; a corpus change is a repaint). The names reach the
-// index as rows of their own (`nameRows`).
+// joined to the cached tree, into one list, painted whole (no append path; a
+// corpus change is a repaint). Both come from the index, the names as rows of
+// their own (`nameRows`), but for the match-inside fallback (`nameHits`).
 
 import { cardList } from "./galleryCards";
 import { el } from "../ui/dom";
@@ -244,7 +244,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       } else if (searchState.kind === "searching" || searchState.kind === "idle" || !ctx.treeLoaded()) {
         // No "No matches" until the walk lands (`rail.settle()` repaints); the empty
         // transcript answer usually arrives before the tree the name half needs.
-        gallery.append(ctx.emptyState("Searching…", "Looking through names, handwriting, typed text, to-dos and digests."));
+        gallery.append(ctx.emptyState("Searching…", "Looking through everything in your library search can read."));
       } else {
         const still = pendingLine(pending);
         // The coverage block says the rest, with numbers, once it has them.

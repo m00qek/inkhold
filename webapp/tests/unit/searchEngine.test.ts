@@ -21,7 +21,8 @@ class FakeWorker extends EventTarget {
   /** Answer the last request in kind, so a test need not track ids. */
   answer(): void {
     const last = this.sent[this.sent.length - 1]!;
-    if (last.kind === "build" || last.kind === "items") this.reply({ kind: "built", id: last.id });
+    if (last.kind === "build") this.reply({ kind: "built", id: last.id });
+    else if (last.kind === "items") this.reply({ kind: "written", id: last.id });
     else this.reply({ kind: "result", id: last.id, total: 0, hits: [], items: [], expansions: [] });
   }
   die(message = "boom"): void {

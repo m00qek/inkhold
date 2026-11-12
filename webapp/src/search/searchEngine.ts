@@ -193,7 +193,7 @@ function workerEngine(makeWorker: EngineWorkerFactory): SearchEngine {
       expect(await enqueue({ kind: "build", id: nextId++, docs }, false), "built");
     },
     async setItems(of, rows) {
-      expect(await enqueue({ kind: "items", id: nextId++, of, rows }, false), "built");
+      expect(await enqueue({ kind: "items", id: nextId++, of, rows }, false), "written");
     },
     async query(text, limit, fuzzy, signal) {
       const req: EngineRequest = { kind: "query", id: nextId++, text, limit, fuzzy };
