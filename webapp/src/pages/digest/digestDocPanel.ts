@@ -12,7 +12,8 @@ import { svg } from "../viewer/viewerIcons";
 import { ICONS } from "../../ui/icons";
 import type { Digest } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
-import { changedLine, digestPlace, placePath, shorten } from "./digestModel";
+import { changedLine, digestPlace, placePath } from "./digestModel";
+import { shorten } from "../../core/passage";
 
 export interface DigestDocPanel {
   /** The panel, also the scroll container. */

@@ -17,7 +17,8 @@ Inkhold a delete is a step towards removal, never the removal itself.
 
 - **The recycle bin.** Whatever is deleted, on the tablet or in the browser,
   waits there for 30 days (the household can [change it](@/manual/quotas-and-bin.md))
-  and goes back where it was when restored, on the tablet too.
+  and goes back where it was when restored, on the tablet too. Digests, with
+  [Digest sync](@/manual/digest-sync.md) on, wait there the same way.
 - **Version history.** Each time a notebook changes, the version before is
   kept: 5 per file unless the household changes it. Restoring an old version
   keeps the one it replaces, so a restore can be undone too.

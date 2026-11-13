@@ -82,6 +82,37 @@
   background: color-mix(in srgb, var(--desk) 55%, var(--sheet));
 }
 
+/* Up inside To-Do and Digest (`libraryApps.ts`): the viewers' ‹, named. A
+   phone has its own in ☰'s place (`23-phone.css`). */
+.topbar__app-back {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: var(--sp-1);
+  height: var(--control-h-sm);
+  padding-block: 0;
+  padding-inline: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: var(--fs-eyebrow);
+  letter-spacing: 0.04em;
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+.topbar__app-back[hidden] {
+  display: none;
+}
+.topbar__app-back:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}
+.topbar__app-back svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
 .crumbs {
   display: flex;
   align-items: center;
@@ -172,12 +203,14 @@
 /* ---- destinations ----
  * `.sn-root.is-destination` is set for full-content views that aren't a folder
  * listing (bin, admin console). The search box leaves: it searches the library,
- * and typing in it would navigate away. */
-.sn-root.is-destination:not(.is-todo-browse) .search {
+ * and typing in it would navigate away. A tablet app's overview (To-Do's
+ * lists, Digest's categories and sources) keeps it, as a folder does
+ * (`is-app-browse`). */
+.sn-root.is-destination:not(.is-app-browse) .search {
   display: none;
 }
 /* Restores the position the search box held, so the topbar doesn't shift. */
-.sn-root.is-destination:not(.is-todo-browse) .tools {
+.sn-root.is-destination:not(.is-app-browse) .tools {
   margin-inline-start: auto;
 }
 

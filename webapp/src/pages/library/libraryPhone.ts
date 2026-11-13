@@ -29,8 +29,8 @@ export interface PhoneShellDeps {
   main: HTMLElement;
   topbar: Topbar;
   searchInput: HTMLInputElement;
-  /** Which tab is the current place. */
-  section(): "library" | "todo" | "you";
+  /** Which tab is the current place; null for a place no tab holds (Digest, in the ☰ drawer). */
+  section(): "library" | "todo" | "you" | null;
   /** One level up from here (a folder's parent, To-Do's Lists, the folder a
    *  search started from); null on a top-level place, which keeps ☰. */
   up(): { href: string; label: string } | null;
@@ -75,12 +75,12 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
 
   // ---- search across the bar ----
   /**
-   * Whether this place shows the search box: a folder, results, To-Do's lists.
+   * Whether this place shows the search box: a folder, results, an app's overview.
    * A destination page (your account, the bin, the admin console) does not, so
    * search mode there would hide the title and show nothing in its place.
    */
   const boxHere = (): boolean =>
-    !(d.root.classList.contains("is-destination") && !d.root.classList.contains("is-todo-browse"));
+    !(d.root.classList.contains("is-destination") && !d.root.classList.contains("is-app-browse"));
   /** The Search tab, tapped where there is no box: open it once search is on screen. */
   let openOnArrival = false;
 
@@ -163,17 +163,25 @@ export function createPhoneShell(d: PhoneShellDeps): PhoneShell {
       backLink.title = `Back to ${up.label}`;
     }
   }
-  // The crumbs carry a folder's parent, and arrive with its listing.
-  const crumbWatch = new MutationObserver(syncUp);
-  crumbWatch.observe(d.topbar.crumbs, { childList: true, subtree: true, characterData: true });
-
-  function sync(): void {
-    syncUp();
+  /** The tab of the place you are in, marked; none for a place no tab holds. */
+  function markTab(): void {
     const here = d.section();
     for (const a of tabbar.querySelectorAll<HTMLElement>("a[data-tab]")) {
       if (a.dataset["tab"] === here) a.setAttribute("aria-current", "page");
       else a.removeAttribute("aria-current");
     }
+  }
+  // The crumbs carry a folder's parent, and arrive with its listing; a place
+  // opened by its link (no hash change) is named there first too.
+  const crumbWatch = new MutationObserver(() => {
+    syncUp();
+    markTab();
+  });
+  crumbWatch.observe(d.topbar.crumbs, { childList: true, subtree: true, characterData: true });
+
+  function sync(): void {
+    syncUp();
+    markTab();
     // A query kept for Back holds the box open, where there is one; a place
     // without it keeps its title.
     const open = boxHere() && (openOnArrival || d.searchInput.value.trim() !== "");

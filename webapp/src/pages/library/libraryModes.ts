@@ -37,7 +37,8 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
     ctx.destinationsOpen[which] = open;
     const anyOpen = MODES.some((m) => ctx.destinationsOpen[m]);
     ctx.root.classList.toggle("is-destination", anyOpen);
-    if (!ctx.destinationsOpen.todo) ctx.root.classList.remove("is-todo-browse");
+    // An app's overview shows the search box; leaving both apps takes it away.
+    if (!ctx.destinationsOpen.todo && !ctx.destinationsOpen.digest) ctx.root.classList.remove("is-app-browse");
 
     // Only takes controls away; each destination shows its own action and
     // `renderGallery` brings Upload back.
@@ -52,6 +53,10 @@ export function createLibraryModes(ctx: LibraryCtx): LibraryModes {
       ctx.topbar.todoListBtn.hidden = true;
       ctx.topbar.todoDownloadBtn.hidden = true;
       ctx.topbar.todoNewListBtn.hidden = true;
+    }
+    if (!ctx.destinationsOpen.digest) {
+      ctx.topbar.digestCategoryBtn.hidden = true;
+      ctx.topbar.digestNewCategoryBtn.hidden = true;
     }
   }
 

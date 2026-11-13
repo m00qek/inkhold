@@ -14,8 +14,9 @@ import { type Api } from "../../api/types";
 import { type LazyEngine, type LazySlotInput } from "../../render/lazy";
 import { type BinEntry } from "../../core/binTypes";
 import { type Hash, type Id, type PageRef, type PageText, type FileHistory, type NoteMeta } from "../../core/types";
-import { type BinActions, type BinView } from "./bin";
-import { preclampAspect, type BinRow, folderLabel, emptyStateBody } from "./binCopy";
+import { busyKey, type BinActions, type BinView } from "./bin";
+import { preclampAspect, type BinRow, type DigestBinRow, digestName, folderLabel, emptyStateBody } from "./binCopy";
+import { oneLine } from "../../core/passage";
 
 // ---- the bin-scoped read seam ----
 
@@ -256,6 +257,41 @@ export function createBinView(opts: BinViewOptions): BinView {
     );
   }
 
+  /**
+   * A digest's row: its passage for a name, Digest's bookmark for a picture, as a folder has its glyph. Not a
+   * button: a digest has no viewer here; Digest is where it is read. Restore
+   * says where it lands; one the tablet sent back already can only go for good.
+   */
+  function digestRowEl(row: DigestBinRow, retentionDays: number, actions: BinActions, busy: boolean): HTMLElement {
+    const d = row.digest;
+    const name = oneLine(d.text);
+    const items = [
+      d.back ? null : { label: `Restore to ${row.restoresTo}`, icon: "restore" as const, onSelect: () => actions.restoreDigest(row) },
+      { label: "Delete permanently", icon: "trashX" as const, danger: true, onSelect: () => actions.purgeDigest(row) },
+    ];
+    return el(
+      "div",
+      { class: `bin__row is-digest${busy ? " is-busy" : ""}`, ...(busy ? { "aria-busy": "true" } : {}) },
+      el(
+        "div",
+        { class: "bin__open is-static" },
+        el("div", { class: "bin__thumb is-digest", "aria-hidden": "true", html: svg(ICONS.digest, 1.7) }),
+        el(
+          "div",
+          { class: "bin__body" },
+          el("div", { class: "bin__name", text: name }),
+          el("div", { class: "bin__meta" }, el("span", { text: row.detail }), el("span", { class: "bin__dot" }), el("span", { text: row.time })),
+        ),
+      ),
+      lifeEl(row.daysLeft, row.soon, retentionDays),
+      el(
+        "div",
+        { class: "bin__actions" },
+        createMenu({ triggerLabel: busy ? "Working on the digest" : `Actions for the digest ${digestName(d.text)}`, disabled: busy, items }),
+      ),
+    );
+  }
+
   function emptyState(title: string, bodyText: string): HTMLElement {
     return el(
       "div",
@@ -276,7 +312,7 @@ export function createBinView(opts: BinViewOptions): BinView {
       // Library is a way out: the account page's `Open` sends people here directly.
       crumbs.replaceChildren(...libraryTrail("Recycle bin", () => onLeave(), folderHref(null)));
       // Told every render: the count decides whether `Empty bin` is live.
-      setMode(true, model.rows.length, model.emptying);
+      setMode(true, model.items.length, model.emptying);
 
       gallery.className = "gallery is-bin";
       // Drop slots for rows about to be replaced.
@@ -288,14 +324,14 @@ export function createBinView(opts: BinViewOptions): BinView {
         gallery.replaceChildren(section);
         return;
       }
-      if (model.state === "loading" && model.rows.length === 0) {
+      if (model.state === "loading" && model.items.length === 0) {
         section.append(emptyState("Loading…", "Fetching what you’ve deleted."));
         gallery.replaceChildren(section);
         return;
       }
-      if (model.rows.length === 0) {
+      if (model.items.length === 0) {
         // Retention quoted from the server.
-        section.append(emptyState("Nothing deleted", emptyStateBody(model.retentionDays)));
+        section.append(emptyState("Nothing deleted", emptyStateBody(model.retentionDays, model.digestsOn)));
         gallery.replaceChildren(section);
         return;
       }
@@ -307,7 +343,7 @@ export function createBinView(opts: BinViewOptions): BinView {
           el(
             "div",
             { class: "bin__aside" },
-            el("b", { text: "Deleted files are removed from your Supernote too." }),
+            el("b", { text: model.digestsOn ? "Deleted files and digests are removed from your Supernote too." : "Deleted files are removed from your Supernote too." }),
             document.createTextNode(
               ` Restoring one puts it back on your device at the next sync. Everything here is removed for good after ${model.retentionDays} days.`,
             ),
@@ -318,14 +354,15 @@ export function createBinView(opts: BinViewOptions): BinView {
       const busy = new Set(model.busy);
       let group: string | null = null;
       let rows: HTMLElement | null = null;
-      for (const row of model.rows) {
-        if (row.group !== group) {
-          group = row.group;
+      for (const item of model.items) {
+        if (item.row.group !== group) {
+          group = item.row.group;
           section.append(el("div", { class: "bin__group", text: group }));
           rows = el("div", { class: "bin__rows" });
           section.append(rows);
         }
-        rows?.append(rowEl(row, model.retentionDays, actions, busy.has(row.entry.id)));
+        const isBusy = busy.has(busyKey(item));
+        rows?.append(item.kind === "file" ? rowEl(item.row, model.retentionDays, actions, isBusy) : digestRowEl(item.row, model.retentionDays, actions, isBusy));
       }
       gallery.replaceChildren(section);
     },

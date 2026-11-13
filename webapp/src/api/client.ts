@@ -312,9 +312,10 @@ export function createHttpApi(): Api {
       await request("DELETE", `/api/controlplane/bin/${encodeURIComponent(id)}`);
     },
 
-    async emptyBin(): Promise<number> {
-      const r = await request<{ entries?: number }>("DELETE", "/api/controlplane/bin");
-      return typeof r.entries === "number" && r.entries > 0 ? Math.floor(r.entries) : 0;
+    async emptyBin(digests: boolean): Promise<number> {
+      const r = await request<{ entries?: number; digests?: number }>("DELETE", `/api/controlplane/bin${digests ? "?digests=1" : ""}`);
+      const n = (v: unknown) => (typeof v === "number" && v > 0 ? Math.floor(v) : 0);
+      return n(r.entries) + n(r.digests);
     },
 
     ...adminMethods,

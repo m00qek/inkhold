@@ -92,6 +92,10 @@ html {
   .topbar__phone[hidden] {
     display: none;
   }
+  /* The phone's ‹ is `.topbar__back`, icon-only in ☰'s place. */
+  .topbar__app-back {
+    display: none;
+  }
   .topbar__phone svg {
     inline-size: 22px;
     block-size: 22px;

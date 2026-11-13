@@ -14,7 +14,7 @@ import type { Entry, FileHistory, Hash, Id, Listing, NoteMeta, PageRef, PageText
 import type { Bin, Restored, Trashed } from "../core/binTypes";
 import type { AccountSecurity, MyDevice, StorageBreakdown, VersionPolicy, VersionPolicyChange } from "./accountTypes";
 import type { NewTodoTask, TodoSnapshot, TodoTaskPatch } from "./todoTypes";
-import type { DigestEdit, DigestSnapshot } from "./digestTypes";
+import type { DigestBin, DigestCategory, DigestEdit, DigestSnapshot } from "./digestTypes";
 import type { AdminDevice, AdminHealth, AdminQuota, AdminRetention, AdminUser, AdminBackups, BackupNotice } from "./adminTypes";
 import type { UploadConflictMode } from "./client";
 
@@ -97,8 +97,11 @@ export interface Api {
    */
   purgeEntry(id: Id): Promise<void>;
 
-  /** Destroy everything in the bin. Returns how many rows went. */
-  emptyBin(): Promise<number>;
+  /**
+   * Destroy everything in the bin; the digests too only with `digests`, when
+   * the page listed them, so none goes unseen. Returns how many rows went.
+   */
+  emptyBin(digests: boolean): Promise<number>;
 
   // --- ADMIN WRITES ---
   // All `require_admin` (is_admin and a live elevation) except elevate/lock, so
@@ -207,9 +210,11 @@ export interface Api {
 
   // --- DIGEST ---
   // The signed-in person's digests, as their tablet's Digest app synced them.
-  // Only a digest's typed comment and its category change here; the tablet
-  // takes them at its next sync. While the server keeps none, `digests()`
-  // answers `enabled: false` and an edit is a 409 `DIGEST_SYNC_OFF`.
+  // Here a digest's typed comment and its category change, a digest goes to
+  // the bin and back, and categories are made, renamed and deleted; the
+  // tablet takes each at its next sync. While the server keeps none,
+  // `digests()` and `digestBin()` answer `enabled: false` and a change is a
+  // 409 `DIGEST_SYNC_OFF`.
 
   digests(): Promise<DigestSnapshot>;
   /**
@@ -219,6 +224,22 @@ export interface Api {
   digestEdit(id: string, change: DigestEdit): Promise<void>;
   /** A digest's handwritten note as SNPG page bytes, for the renderer. `md5` is the digest's `note`; 404 for any other. */
   digestNoteBytes(id: string, md5: string): Promise<ArrayBuffer>;
+  /** To the bin. 404 `NO_SUCH_DIGEST`. */
+  digestDelete(id: string): Promise<void>;
+  /** 400 `BAD_NAME` (`categoryNameProblem`), 409 `NAME_TAKEN`. */
+  digestCreateCategory(name: string): Promise<DigestCategory>;
+  /** As `digestCreateCategory`, and 404 `NO_SUCH_CATEGORY`; its own name is no clash. */
+  digestRenameCategory(uid: string, name: string): Promise<void>;
+  /** The category and its digests, which go to the bin; how many digests it held. 404 `NO_SUCH_CATEGORY`. */
+  digestDeleteCategory(uid: string): Promise<number>;
+  digestBin(): Promise<DigestBin>;
+  /**
+   * Back where it was, its category too when that was deleted. 404
+   * `NOT_IN_BIN`; 409 `BACK_ALREADY` when the tablet sent it back.
+   */
+  digestRestore(id: string): Promise<void>;
+  /** Out of the bin for good. 404 `NOT_IN_BIN`. */
+  digestPurge(id: string): Promise<void>;
 
   // --- HISTORY ---
   // Note-scoped by `:id` (the `/note/:id` ownership gate); per-version routes

@@ -1,8 +1,9 @@
 // The person's digests, as the browser sees them: what the tablet's Digest app
-// synced (`/api/controlplane/digests`). The browser changes two things, a
-// digest's typed comment and its category, which the tablet takes at its next sync.
+// synced (`/api/controlplane/digests`). The browser changes a digest's typed
+// comment and its category, moves it to the bin and back, and makes, renames
+// and deletes categories; the tablet takes each at its next sync.
 
-/** A category the person made on the tablet. Uncategorized is not one: a digest with `categoryUid` "" is in it. */
+/** A category the person made, on the tablet or here. Uncategorized is not one: a digest with `categoryUid` "" is in it. */
 export interface DigestCategory {
   uid: string;
   name: string;
@@ -72,4 +73,48 @@ export interface DigestSnapshot {
   tabletSyncedAt: number | null;
   /** Something changed here that no tablet has fetched yet. */
   waiting: boolean;
+}
+
+/** The app's own limit on a category's name, in characters (`CreateKnowledgeBaseDialog`). */
+export const MAX_CATEGORY_NAME = 150;
+
+/** What a category's name may not hold: what a file's name may not (the app's own rule). */
+const BAD_NAME_CHARS = /[/<>*?|\\:"]/;
+
+/**
+ * Why the app would refuse `name` as a category's name, in a sentence; null
+ * when it takes it. The server's rule (`cleanName` in `handlers/digest.zig`),
+ * so the dialog says it before the server has to.
+ */
+export function categoryNameProblem(name: string): string | null {
+  const t = name.trim();
+  if (t === "") return "Give the category a name.";
+  if ([...t].length > MAX_CATEGORY_NAME) return `A name holds at most ${MAX_CATEGORY_NAME} characters.`;
+  if (t.startsWith(".")) return "A name can't start with a dot.";
+  if (/[\u0000-\u001f\u007f]/.test(t)) return "A name can't hold a tab or a line break.";
+  if (BAD_NAME_CHARS.test(t)) return 'A name can\'t hold / < > * ? | \\ : or ".';
+  return null;
+}
+
+/** A digest in the bin: deleted here or on the tablet, kept until the bin's retention ends. */
+export interface BinnedDigest {
+  id: string;
+  text: string;
+  /** The category it was in; "" Uncategorized. */
+  categoryUid: string;
+  /** That category's name, live or deleted; null: Uncategorized, or gone for good. A restore puts the digest there. */
+  categoryName: string | null;
+  /** Epoch ms. */
+  deletedAt: number;
+  /** The tablet sent it back already, as a new digest: nothing to restore. */
+  back: boolean;
+}
+
+export interface DigestBin {
+  /** False when the server keeps no digests (`digest_sync` off). */
+  enabled: boolean;
+  /** The latest deleted first. */
+  digests: BinnedDigest[];
+  /** How long the bin keeps a digest; the files' bin's own window. */
+  retentionDays: number;
 }

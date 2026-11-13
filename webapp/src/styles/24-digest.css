@@ -1,9 +1,10 @@
 /*
- * Digest (src/pages/digest/). An overlay on the content area like To-Do: the
- * Categories | Sources tabs, then three columns, as on the tablet: the
- * groups, the digests of the one picked, and the digest open in a side panel.
- * A tablet's width gives the open digest the list's column; a phone shows one
- * column at a time. The accent marks the open digest and focus only.
+ * Digest (src/pages/digest/). An overlay on the content area like To-Do, in
+ * its grammar: an overview of cards (styles/25-app-cards.css), or a
+ * category's or source's digests in one column, the open digest's panel
+ * beside it. The rail holds the fixed views. A tablet's width gives the open
+ * digest the list's column; a phone shows one column at a time. The accent
+ * marks the open digest and focus only.
  */
 
 .digest {
@@ -12,20 +13,13 @@
   z-index: var(--z-cover);
   overflow-y: auto;
   background: var(--desk);
-  padding: var(--sp-6) var(--sp-6) 6rem;
+  /* To-Do's page (`22-todo.css`): the apps' content starts at the same place. */
+  padding: 46px 28px 96px;
 }
+/* To-Do's centred column, the recycle bin's width; a list with its digest's panel is wider (below). */
 .digest > * {
-  max-width: 1180px;
+  max-width: 760px;
   margin-inline: auto;
-}
-
-.digest-icon {
-  display: inline-flex;
-  flex: none;
-}
-.digest-icon svg {
-  width: 16px;
-  height: 16px;
 }
 
 /* ---- in the shell's topbar: To-Do's title shape ---- */
@@ -46,125 +40,120 @@
   color: var(--ink-soft);
 }
 
-/* ---- the tabs: two links, the current one raised like a sheet ---- */
-/* At the columns' start edge, not centred like them. */
-.digest > .digest-tabs {
-  max-width: none;
-  margin-inline: max(0px, calc((100% - 1180px) / 2)) auto;
-}
-.digest-tabs {
-  display: flex;
-  gap: calc(var(--sp-1) / 2);
-  width: fit-content;
-  margin-bottom: var(--sp-4);
-  padding: var(--sp-1);
-  border-radius: var(--radius-card);
-  background: var(--hover);
-}
-.digest-tab {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--control-h);
-  padding: 0 var(--sp-4);
-  /* Inside the bar's corner, by its padding. */
-  border-radius: calc(var(--radius-card) - var(--sp-1));
-  color: var(--ink-soft);
-  text-decoration: none;
-}
-.digest-tab:hover {
-  color: var(--ink);
-}
-.digest-tab[aria-current="page"] {
-  background: var(--sheet);
-  color: var(--ink);
-  font-weight: 600;
-  box-shadow: var(--shadow-hairline);
-}
-
-/* ---- the three columns ---- */
-.digest-body {
+/* ---- the list in To-Do's column, the digest's panel beside it ----
+   On a desktop the panel's place is always kept, empty or not, so opening and
+   closing a digest moves nothing. */
+.digest > .digest-body {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) var(--panel-w-wide);
+  grid-template-columns: minmax(0, 760px) var(--panel-w-wide);
+  justify-content: center;
   gap: var(--sp-6);
   align-items: start;
-}
-.digest-body:not(.has-open) {
-  grid-template-columns: 220px minmax(0, 1fr);
+  max-width: none;
 }
 
-/* ---- the groups, the rail's row shape ---- */
-.digest-groups ul {
+/* ---- the sources: each a file tile, as the library draws one ---- */
+.digest-sources {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 190px));
+  gap: var(--sp-6) var(--sp-4);
   margin: 0;
   padding: 0;
   list-style: none;
 }
-/* A section of one, named by its row (what was typed on the tablet): no label, just room. */
-.digest-groups__alone {
-  margin-top: var(--sp-4);
-}
-.digest-groups__label {
-  margin-block: var(--sp-4) var(--sp-1);
-  padding-inline-start: var(--sp-3);
-  font: var(--fs-eyebrow) var(--font-mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
-}
-.digest-group {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
-  border-inline-start: 2px solid transparent;
-  border-radius: 3px;
-  color: var(--ink-soft);
-  text-decoration: none;
-}
-.digest-group:hover {
-  background: var(--hover-fill);
-  color: var(--ink);
-}
-.digest-group[aria-current="page"] {
-  border-inline-start-color: var(--accent);
-  background: var(--hover);
-  color: var(--ink);
-  font-weight: 500;
-}
-.digest-group__name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.digest-group__count {
-  font: var(--fs-caption) var(--font-mono);
-  color: var(--ink-soft);
-}
-
-/* ---- the list ---- */
-.digest-list__title {
-  margin-block: 0 var(--sp-3);
-  font: 500 var(--fs-heading) var(--font-display);
-  color: var(--ink);
-  overflow-wrap: anywhere;
-}
-.digest-cards {
+.digest-source {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-3);
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--ink);
+  text-decoration: none;
+  text-align: center;
+}
+.digest-source:focus-visible {
+  outline: none;
+}
+.digest-source:focus-visible .digest-source__sheet {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+/* The first marked page, a sheet like a file's; the count rides on its corner. */
+.digest-source__sheet {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 3 / 4;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
+  box-shadow: var(--shadow-hairline);
+  overflow: hidden;
+  transition: border-color 0.12s ease;
+}
+.digest-source:hover .digest-source__sheet {
+  border-color: var(--ink-soft);
+}
+.digest-source__page {
+  position: absolute;
+  inset: 0;
+}
+.digest-source__page img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--sheet);
+}
+.digest-source__glyph {
+  color: var(--ink-faint);
+}
+.digest-source__glyph svg {
+  width: 2rem;
+  height: 2rem;
+}
+.digest-source__badge {
+  position: absolute;
+  top: var(--sp-2);
+  inset-inline-end: var(--sp-2);
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--sheet);
+  font: 700 var(--fs-eyebrow) var(--font-mono);
+}
+/* The library's tile title and meta (`.card__title`, `.card__meta`). */
+.digest-source__name {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: 1.3;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+/* Inline, so a long line breaks between words, never before a dot. */
+.digest-source__meta {
+  font: var(--fs-eyebrow) / 1.5 var(--font-mono);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+.digest-source__meta > span {
+  white-space: nowrap;
+}
+.digest-source__meta > * + *::before {
+  content: " · ";
+}
+
+/* ---- the list: one sheet of rows, as To-Do's tasks and search's digests ---- */
+.digest-cards {
   margin: 0;
   padding: 0;
   list-style: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sheet);
 }
-.digest-list__source h3 {
-  margin-block: var(--sp-4) 0;
-  font: 600 var(--fs-body) var(--font-body);
-  color: var(--ink);
-  overflow-wrap: anywhere;
-}
-.digest-list__source:first-child h3 {
-  margin-top: 0;
+.digest-cards > li + li {
+  box-shadow: 0 -1px 0 var(--row-rule);
 }
 
 /*
@@ -179,27 +168,24 @@
   grid-auto-flow: dense;
   align-items: start;
   /* No column gap: the note's column is empty for a digest without one. */
-  gap: var(--sp-2) 0;
-  padding: var(--sp-4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-card);
-  background: var(--sheet);
+  gap: var(--sp-1) 0;
+  padding: var(--sp-3) var(--sp-4);
   color: var(--ink);
-  transition: border-color 0.12s ease;
 }
 .digest-card--paged {
   grid-template-columns: 3.5rem minmax(0, 1fr) auto;
 }
 .digest-card:hover {
-  border-color: var(--ink-soft);
+  background: var(--hover);
 }
+/* Open: the rail's mark for where you are, the accent stroke at the start. */
 .digest-card.is-open {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
+  background: var(--hover);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .digest-card:has(.digest-card__link:focus-visible) {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 .digest-card__page {
   grid-column: 1;
@@ -267,22 +253,29 @@
   -webkit-mask: var(--ink-src) center / contain no-repeat;
   mask: var(--ink-src) center / contain no-repeat;
 }
+/* The handwritten note, To-Do's chip: framed, the strokes inside. */
 .digest-card__ink {
   grid-column: -2;
   grid-row: 1 / span 3;
   margin-inline-start: var(--sp-4);
   display: flex;
   align-items: center;
-  width: 96px;
-  max-height: 72px;
+  width: 80px;
+  max-height: 64px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--sheet);
 }
 /* Empty until its picture is in: no room taken, but still there to come into view. */
 .digest-card__ink:not(.has-ink) {
   width: 0;
   margin-inline-start: 0;
+  padding: 0;
+  border: 0;
 }
 .digest-card__ink .digest-ink {
-  max-height: 72px;
+  max-height: 54px;
 }
 .digest-panel__ink {
   display: flex;
@@ -453,12 +446,6 @@
 .digest-panel__caption {
   font-weight: 500;
 }
-.digest-panel__category {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--sp-1) var(--sp-2);
-}
 .digest-panel__actions {
   display: flex;
   flex-wrap: wrap;
@@ -604,13 +591,28 @@
   color: var(--ink-soft);
 }
 
+/* The panel's place with no digest open: its outline, dashed, and a word on what goes there. */
+.digest-idle {
+  position: sticky;
+  top: 0;
+  display: grid;
+  place-items: center;
+  min-height: 12rem;
+  padding: var(--sp-4);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-card);
+  color: var(--ink-soft);
+  text-align: center;
+}
+
 /* ---- a tablet's width: the open digest takes the list's place ---- */
 @media (max-width: 1099px) {
-  .digest-body,
-  .digest-body:not(.has-open) {
-    grid-template-columns: 200px minmax(0, 1fr);
+  .digest > .digest-body {
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 760px;
   }
-  .digest-body.has-open .digest-list {
+  .digest-body.has-open .digest-list,
+  .digest-idle {
     display: none;
   }
   .digest-panel {
@@ -618,38 +620,10 @@
   }
 }
 
-/* ---- a phone: one column; the groups scroll sideways above the list ---- */
+/* ---- a phone: one column; the drawer holds the rail's rows ---- */
 @media (max-width: 699px) {
-  .digest {
-    padding: var(--sp-4) var(--sp-4) 6rem;
-  }
-  .digest-body,
-  .digest-body:not(.has-open) {
-    grid-template-columns: minmax(0, 1fr);
+  .digest-body {
     gap: var(--sp-4);
-  }
-  .digest-body.has-open .digest-groups {
-    display: none;
-  }
-  .digest-groups {
-    display: flex;
-    gap: var(--sp-2);
-    overflow-x: auto;
-  }
-  .digest-groups ul {
-    display: flex;
-    gap: var(--sp-2);
-  }
-  .digest-groups__label {
-    display: none;
-  }
-  .digest-group {
-    white-space: nowrap;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-card);
-  }
-  .digest-group[aria-current="page"] {
-    border-color: var(--accent);
   }
   .digest-card__ink {
     width: 64px;
@@ -699,8 +673,15 @@
   color: var(--ink-soft);
 }
 
+/* To-Do's phone page (`22-todo.css`), the same breakpoint and gutters. */
+@media (max-width: 620px) {
+  .digest {
+    padding: 16px 12px 96px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .digest-card {
+  .digest-source__sheet {
     transition: none;
   }
 }

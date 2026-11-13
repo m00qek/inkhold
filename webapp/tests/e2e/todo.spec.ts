@@ -54,9 +54,9 @@ test.describe("To-Do", () => {
   test("the overview: a card per list, Inbox first, each opening its list", async ({ page }) => {
     await openTodo(page);
     const cards = page.locator(".todo-card");
-    await expect(cards.locator(".todo-card__name")).toHaveText(["Inbox", "Français", "Casa"]);
+    await expect(cards.locator(".app-card__name")).toHaveText(["Inbox", "Français", "Casa"]);
     await expect(cards.nth(2)).toContainText("1 overdue");
-    await expect(cards.nth(1).locator(".todo-card__peek li").first()).toHaveText("Estudar");
+    await expect(cards.nth(1).locator(".app-card__peek li").first()).toHaveText("Estudar");
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/overview.png` });
     await cards.nth(1).click();
     await expect(page).toHaveURL(/#\/todo\/list\//);

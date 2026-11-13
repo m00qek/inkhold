@@ -1,8 +1,8 @@
 // The page a digest was taken from, small: the open digest's way to its page.
 // Drawn by the library's thumbnail facade (`render/thumbnails.ts`), which keeps
 // it in the persistent store: a notebook page by its page hash, a PDF page by
-// the file's md5 and the page. Only the open digest's is drawn, one at a time,
-// never a list's worth: a PDF page costs a MuPDF render.
+// the file's md5 and the page. Only the open digest's is drawn, and one per
+// source on the sources' page, never a list's worth: a PDF page costs a MuPDF render.
 
 import { el } from "../../ui/dom";
 import { currentTheme } from "../../ui/theme";

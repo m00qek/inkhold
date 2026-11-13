@@ -112,8 +112,20 @@ const SHOTS: Shot[] = [
     },
   },
   { name: "pdf", open: async (p) => { await servePdf(p); await p.goto("/#/note/178"); await settle(p); } },
-  { name: "bin",
-    crop: 720, open: async (p) => { await p.goto("/#/bin"); await settle(p); } },
+  {
+    // The bin with a digest among the files: one binned the way a person would.
+    name: "bin",
+    crop: 720,
+    open: async (p) => {
+      await p.goto("/#/digest/uncategorized/d/18");
+      await settle(p);
+      await p.locator(".digest-panel").getByRole("button", { name: "Actions for this digest" }).click();
+      await p.locator(".menu__pop--float.is-open").getByRole("menuitem", { name: "Move to bin" }).click();
+      await p.goto("/#/bin");
+      await p.locator(".bin__row.is-digest").waitFor();
+      await settle(p);
+    },
+  },
   { name: "todo",
     crop: 700, open: async (p) => { await p.goto("/#/todo/all"); await settle(p); } },
   {

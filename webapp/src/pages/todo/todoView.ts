@@ -2,9 +2,9 @@
 // Knows nothing about the API; every click is a call on `TodoActions`. The
 // page-level tools (status, list options, New list) live in the shell's topbar.
 
-import { onPlainClick } from "../../ui/link";
 import { el } from "../../ui/dom";
-import { createMenu } from "../../ui/menu";
+import { createMenu, type MenuItemSpec } from "../../ui/menu";
+import { appCard, appCards } from "../../ui/appCard";
 import { ICONS, svg, type IconName } from "../../ui/icons";
 import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
 import { addTarget, cards, dateLine, dueLabel, listName, siblings, summary, viewPath, viewTitle, type TodoSection, type TodoView } from "./todoModel";
@@ -90,18 +90,17 @@ export function placeTitle(snap: TodoSnapshot | null, view: TodoView, now: numbe
   );
 }
 
-/**
- * The landing page: a card per list, like a folder's contents in the library.
- * Each says how much is open and late, and shows the first few tasks.
- */
+/** A list's actions, the same on its card's ⋯ and the top bar's on its page. */
+export function listActions(id: string, a: Pick<TodoActions, "renameList" | "deleteList">): MenuItemSpec[] {
+  return [
+    { label: "Rename list", icon: "edit", onSelect: () => a.renameList(id) },
+    { label: "Delete list", icon: "trash", danger: true, onSelect: () => a.deleteList(id) },
+  ];
+}
+
+/** The landing page: a card per list, saying how much is open and late, with the first few tasks. */
 export function overview(p: TodoPaint, a: TodoActions): HTMLElement {
   const items = cards(p.snap, p.now).map((c) => {
-    const counts = [c.open === 0 ? "Nothing to do" : `${c.open} to do`];
-    const late = c.overdue > 0 ? el("span", { class: "is-overdue", text: `${c.overdue} overdue` }) : null;
-    const more = c.open - c.peek.length;
-    // The name is the link, stretched over the card; the ⋯ sits above it, like
-    // a note card's, so a button never nests inside a link.
-    const link = el("a", { class: "todo-card__link", href: `#/todo/${viewPath(c.view)}`, text: c.name });
     const id = c.view.kind === "list" ? c.view.id : null;
     // Every card has its ⋯, like a note card; the Inbox's is there but disabled,
     // since the tablet's Inbox can't be renamed or deleted.
@@ -109,30 +108,24 @@ export function overview(p: TodoPaint, a: TodoActions): HTMLElement {
       triggerLabel: id === null ? `${c.name} can't be renamed or deleted` : `Actions for ${c.name}`,
       wrapClass: "card__menu",
       disabled: id === null,
-      items: id === null ? [] : [
-        { label: "Rename list", icon: "edit", onSelect: () => a.renameList(id) },
-        { label: "Delete list", icon: "trash", danger: true, onSelect: () => a.deleteList(id) },
-      ],
+      items: id === null ? [] : listActions(id, a),
     });
-    const card = el(
-      "div",
-      { class: "todo-card" },
-      el("span", { class: "todo-card__head" }, icon(c.view.kind === "inbox" ? "inbox" : "list"), el("span", { class: "todo-card__name" }, link)),
-      el("span", { class: "todo-card__counts" }, el("span", { text: counts[0]! }), late),
-      c.peek.length
-        ? el(
-            "ul",
-            { class: "todo-card__peek" },
-            ...c.peek.map((t) => el("li", {}, el("span", { class: "todo-card__task", text: t.title }), p.chip(t))),
-            more > 0 ? el("li", { class: "todo-card__more", text: `and ${more} more` }) : null,
-          )
-        : null,
+    return appCard({
+      kind: "todo-card",
+      name: c.name,
+      icon: c.view.kind === "inbox" ? "inbox" : "list",
+      href: `#/todo/${viewPath(c.view)}`,
+      onOpen: () => a.show(c.view),
+      counts: [
+        el("span", { text: c.open === 0 ? "Nothing to do" : `${c.open} to do` }),
+        c.overdue > 0 ? el("span", { class: "is-overdue", text: `${c.overdue} overdue` }) : null,
+      ],
+      peek: c.peek.map((t) => [el("span", { class: "todo-card__task", text: t.title }), p.chip(t)]),
+      more: c.open - c.peek.length,
       menu,
-    );
-    onPlainClick(link, () => a.show(c.view));
-    return el("li", {}, card);
+    });
   });
-  return el("ul", { class: "todo-cards", "aria-label": "Lists" }, ...items);
+  return appCards("Lists", items);
 }
 
 export function addForm(p: TodoPaint, a: TodoActions): HTMLElement | null {

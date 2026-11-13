@@ -2,29 +2,46 @@
 // The Digest page's states before there are digests to show: loading, off on
 // the server, a failed read that can be tried again; that an unchanged answer
 // repaints nothing; how often a search may ask again; editing a comment, and
-// moving a digest to a category.
+// moving a digest to a category; the overviews, and the top bar's tools for
+// each place.
 
 import { describe, it, expect, vi } from "vitest";
 import { createDigestPage, type DigestHost } from "../../src/pages/digest/digestPage";
 import type { DigestInk } from "../../src/pages/digest/digestInk";
 import type { DigestEdit, DigestSnapshot } from "../../src/api/digestTypes";
+import { ApiError } from "../../src/api/errors";
 
 const ink: DigestInk = { picture: async () => null, holder: () => null };
 
 function host(digests: () => Promise<DigestSnapshot>, digestEdit: (id: string, c: DigestEdit) => Promise<void> = async () => {}): DigestHost & { changed: number; toasts: string[]; refreshed: number } {
   const h = {
-    api: { digests, digestEdit },
+    api: {
+      digests,
+      digestEdit,
+      digestCreateCategory: async (name: string) => ({ uid: "new", name }),
+      digestRenameCategory: async () => {},
+      digestDeleteCategory: async () => 0,
+    },
     content: document.createElement("div"),
     gallery: document.createElement("div"),
     crumbs: document.createElement("div"),
     sortWrap: document.createElement("div"),
     segmented: document.createElement("div"),
+    categoryBtn: document.createElement("button"),
+    newCategoryBtn: document.createElement("button"),
     setPlace: () => {},
     setMode: () => {},
+    setSearchShown: () => {},
+    trash: async () => true,
     toast: (m: string) => void h.toasts.push(m),
     handled: () => false,
     onChanged: () => void h.changed++,
+    onBinChanged: () => {},
     go: () => {},
+    replace: () => {},
+    wide: () => false,
+    rememberClosed: () => {},
+    closedHere: () => false,
     ink,
     thumbs: { holder: () => null, refresh: () => void h.refreshed++ },
     openFile: () => {},
@@ -47,6 +64,12 @@ const one: DigestSnapshot = {
   waiting: false,
 };
 const title = (h: DigestHost) => h.content.querySelector(".digest-empty__title")?.textContent;
+
+/** The open digest's ⋯, then one of its rows (or a row's own menu, as Move to…). */
+function pick(h: DigestHost, label: string): void {
+  h.content.querySelector<HTMLButtonElement>("#digest-actions")!.click();
+  [...document.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find((b) => b.textContent?.includes(label))!.click();
+}
 
 describe("the Digest page", () => {
   it("is asked again by a search only half a minute after it was last asked, answered or not", async () => {
@@ -188,13 +211,13 @@ describe("the Digest page", () => {
     });
     const page = createDigestPage(h);
     page.open({ ...ALL, digest: "1" });
-    await vi.waitFor(() => expect(h.content.querySelector("#digest-move")).not.toBeNull());
-    h.content.querySelector<HTMLButtonElement>("#digest-move")!.click();
-    const to = [...document.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]")].find((b) => b.textContent?.includes("Grammar"));
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-actions")).not.toBeNull());
+    pick(h, "Move to…");
+    const to = [...document.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find((b) => b.textContent?.includes("Grammar"));
     expect(to).toBeDefined();
     to!.click();
     await vi.waitFor(() => expect(h.toasts.at(-1)).toMatch(/Couldn't move the digest/));
-    expect(h.content.querySelector(".digest-panel__category")!.textContent).toContain("Uncategorized");
+    expect(h.content.querySelector(".digest-panel__facts")!.textContent).toContain("Uncategorized");
     page.destroy();
   });
 
@@ -270,9 +293,9 @@ describe("the Digest page", () => {
     );
     const page = createDigestPage(h);
     page.open({ ...ALL, digest: "1" });
-    await vi.waitFor(() => expect(h.content.querySelector("#digest-move")).not.toBeNull());
-    h.content.querySelector<HTMLButtonElement>("#digest-move")!.click();
-    [...document.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]")].find((b) => b.textContent?.includes("Grammar"))!.click();
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-actions")).not.toBeNull());
+    pick(h, "Move to…");
+    [...document.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find((b) => b.textContent?.includes("Grammar"))!.click();
     // While the move is out, the comment is opened and typed into.
     h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.click();
     const box = h.content.querySelector<HTMLTextAreaElement>("#digest-comment")!;
@@ -291,9 +314,9 @@ describe("the Digest page", () => {
     const h = host(async () => structuredClone(one), () => new Promise<void>((_ok, no) => (refuse = no)));
     const page = createDigestPage(h);
     page.open({ ...ALL, digest: "1" });
-    await vi.waitFor(() => expect(h.content.querySelector("#digest-move")).not.toBeNull());
-    h.content.querySelector<HTMLButtonElement>("#digest-move")!.click();
-    [...document.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]")].find((b) => b.textContent?.includes("Grammar"))!.click();
+    await vi.waitFor(() => expect(h.content.querySelector("#digest-actions")).not.toBeNull());
+    pick(h, "Move to…");
+    [...document.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find((b) => b.textContent?.includes("Grammar"))!.click();
     h.content.querySelector<HTMLButtonElement>("#digest-comment-edit")!.click();
     const box = h.content.querySelector<HTMLTextAreaElement>("#digest-comment")!;
     refuse(new Error("offline"));
@@ -322,6 +345,306 @@ describe("the Digest page", () => {
     box.dispatchEvent(new Event("input"));
     expect(h.content.querySelector("#digest-comment-count")!.textContent).toBe("3 characters too many");
     expect(h.content.querySelector<HTMLButtonElement>("form button[type=submit]")!.disabled).toBe(true);
+    page.destroy();
+  });
+});
+
+describe("the Digest page's places", () => {
+  const two: DigestSnapshot = {
+    ...one,
+    digests: [...one.digests, { ...one.digests[0]!, id: "2", text: "a grammar rule", categoryUid: "kb-1" }],
+  };
+
+  it("lands on the categories' overview: Uncategorized, then each category with its passages; New category in the top bar", async () => {
+    const h = host(async () => structuredClone(two));
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "categories" }, digest: null });
+    await page.load();
+    const names = [...h.content.querySelectorAll(".app-card__name")].map((n) => n.textContent);
+    expect(names).toEqual(["Uncategorized", "Grammar"]);
+    expect(h.content.querySelector(".app-card__name a")?.getAttribute("href")).toBe("#/digest/uncategorized");
+    // Uncategorized's ⋯ is there, disabled; a category's offers Rename and Delete.
+    const menus = [...h.content.querySelectorAll<HTMLButtonElement>(".card__more")];
+    expect(menus.map((m) => m.disabled)).toEqual([true, false]);
+    expect(h.newCategoryBtn.hidden).toBe(false);
+    expect(h.categoryBtn.hidden).toBe(true);
+    expect(h.crumbs.textContent).toContain("Categories");
+    expect(h.crumbs.textContent).toContain("1 category · 2 digests");
+  });
+
+  it("inside a category: its name in the top bar, its menu there, its digests listed", async () => {
+    const places: string[] = [];
+    const h = host(async () => structuredClone(two));
+    h.setPlace = (n) => void (n !== null && places.push(n));
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "category", uid: "kb-1" }, digest: null });
+    await page.load();
+    expect(places.at(-1)).toBe("Grammar");
+    expect(h.crumbs.textContent).toContain("1 digest");
+    expect(h.newCategoryBtn.hidden).toBe(true);
+    expect(h.categoryBtn.hidden).toBe(false);
+    expect(h.categoryBtn.getAttribute("aria-label")).toBe("Category options for Grammar");
+    expect([...h.content.querySelectorAll(".digest-card__text")].map((n) => n.textContent)).toEqual(["a grammar rule"]);
+    // Uncategorized and All have no menu of their own.
+    page.open({ view: { kind: "category", uid: "" }, digest: null });
+    expect(h.categoryBtn.hidden).toBe(true);
+  });
+
+  it("the sources' overview: a tile per source, as the library draws a file", async () => {
+    const h = host(async () => structuredClone(two));
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "sources" }, digest: null });
+    await page.load();
+    expect([...h.content.querySelectorAll(".digest-source__name")].map((n) => n.textContent)).toEqual(["Typed on the tablet"]);
+    expect([...h.content.querySelectorAll(".digest-source__meta span")].map((n) => n.textContent)).toEqual(["2 digests"]);
+    expect(h.content.querySelector(".digest-source")?.getAttribute("href")).toBe("#/digest/sources/manual");
+  });
+
+  it("a category's card: its newest passage whole, where it came from, and how many more", async () => {
+    const h = host(async () => structuredClone(two));
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "categories" }, digest: null });
+    await page.load();
+    const grammar = [...h.content.querySelectorAll(".app-card")][1]!;
+    expect(grammar.querySelector(".app-card__quote p")?.textContent).toBe("“a grammar rule”");
+    expect(grammar.querySelector(".app-card__from")?.textContent).toMatch(/^Typed on the tablet · added /);
+    expect(grammar.querySelector(".app-card__more")).toBeNull();
+  });
+
+  it("Move to bin: gone at once, its place closes in place of its entry, focus on its neighbour", async () => {
+    const d = (id: string, at: number) => ({ ...one.digests[0]!, id, text: `passage ${id}`, createdAt: at });
+    let server: DigestSnapshot = { ...one, digests: [d("a", 3), d("b", 2), d("c", 1)] };
+    const replaced: string[] = [];
+    let closed = 0;
+    const h = host(async () => structuredClone(server));
+    // The real router: a replace re-enters the page at once, before any fresh read.
+    const list = { view: { kind: "category", uid: "" }, digest: null } as const;
+    h.replace = (path) => {
+      replaced.push(path);
+      page.open(list);
+    };
+    // The real bin: the digest leaves the server's answer.
+    h.trash = async (x) => {
+      server = { ...server, digests: server.digests.filter((y) => y.id !== x.id) };
+      return true;
+    };
+    h.rememberClosed = () => void closed++;
+    const page = createDigestPage(h);
+    document.body.append(h.content);
+    page.open({ view: { kind: "category", uid: "" }, digest: "b" });
+    await page.load();
+    pick(h, "Move to bin");
+    await vi.waitFor(() => expect(replaced).toEqual(["uncategorized"]));
+    expect(closed).toBe(1);
+    // No paint showed it again; focus is on the next card, the one after it.
+    expect([...h.content.querySelectorAll(".digest-card__text")].map((n) => n.textContent)).toEqual(["passage a", "passage c"]);
+    await page.load();
+    expect(document.activeElement?.getAttribute("data-digest")).toBe("c");
+    h.content.remove();
+  });
+
+  it("Move to bin leaves the person where they are when they moved on before it answered", async () => {
+    const replaced: string[] = [];
+    let answer: (went: boolean) => void = () => {};
+    const h = host(async () => structuredClone(two));
+    h.trash = () => new Promise<boolean>((r) => (answer = r));
+    h.replace = (path) => void replaced.push(path);
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "category", uid: "kb-1" }, digest: "2" });
+    await page.load();
+    pick(h, "Move to bin");
+    // Meanwhile: another place.
+    page.open({ view: { kind: "categories" }, digest: null });
+    answer(true);
+    await page.load();
+    expect(replaced).toEqual([]);
+  });
+
+  it("the search box shows on the overviews, as on To-Do's lists, and not inside a list", async () => {
+    const shown: boolean[] = [];
+    const h = host(async () => structuredClone(two));
+    h.setSearchShown = (s) => void shown.push(s);
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "categories" }, digest: null });
+    expect(shown.at(-1)).toBe(true);
+    page.open({ view: { kind: "category", uid: "kb-1" }, digest: null });
+    expect(shown.at(-1)).toBe(false);
+    page.open({ view: { kind: "sources" }, digest: null });
+    expect(shown.at(-1)).toBe(true);
+  });
+
+  it("on a desktop, a list with no digest open keeps the panel's place, saying what goes there", async () => {
+    const h = host(async () => structuredClone(two));
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "category", uid: "kb-1" }, digest: null });
+    await page.load();
+    expect(h.content.querySelector(".digest-idle")?.textContent).toContain("Choose a digest");
+    expect(h.content.querySelector(".digest-body")?.classList.contains("has-open")).toBe(false);
+  });
+});
+
+describe("a list on a wide screen", () => {
+  const three: DigestSnapshot = {
+    ...one,
+    digests: [
+      { ...one.digests[0]!, id: "1", createdAt: 1 },
+      { ...one.digests[0]!, id: "2", createdAt: 2 },
+    ],
+  };
+
+  it("entering a list opens its first digest, in place of the list's history entry; closing it stays closed", async () => {
+    const replaced: string[] = [];
+    const h = host(async () => structuredClone(three));
+    h.wide = () => true;
+    h.replace = (path) => void replaced.push(path);
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "category", uid: "" }, digest: null });
+    await page.load();
+    // Newest first: the first is the newest.
+    expect(replaced).toEqual(["uncategorized/d/2"]);
+
+    page.open({ view: { kind: "category", uid: "" }, digest: "2" });
+    page.open({ view: { kind: "category", uid: "" }, digest: null });
+    await page.load();
+    expect(replaced).toEqual(["uncategorized/d/2"]);
+  });
+
+  it("an entry the person closed a digest on stays closed when they come back to it (Back)", async () => {
+    const replaced: string[] = [];
+    let closedHere = false;
+    const h = host(async () => structuredClone(three));
+    h.wide = () => true;
+    h.replace = (path) => void replaced.push(path);
+    h.rememberClosed = () => void (closedHere = true);
+    h.closedHere = () => closedHere;
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "category", uid: "" }, digest: "2" });
+    await page.load();
+    // Escape: the digest's place closes, marked on the entry.
+    h.content.querySelector(".digest-card__link")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect(closedHere).toBe(true);
+    // Away and Back to that entry: a fresh open, nothing opens by itself.
+    page.close();
+    page.open({ view: { kind: "category", uid: "" }, digest: null });
+    await page.load();
+    expect(replaced).toEqual([]);
+  });
+
+  it("not on a narrower screen, where the open digest takes the list's place; not on an overview", async () => {
+    const replaced: string[] = [];
+    const h = host(async () => structuredClone(three));
+    h.replace = (path) => void replaced.push(path);
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "category", uid: "" }, digest: null });
+    await page.load();
+    h.wide = () => true;
+    page.open({ view: { kind: "categories" }, digest: null });
+    await page.load();
+    expect(replaced).toEqual([]);
+  });
+});
+
+describe("the open digest's panel", () => {
+  it("has no ×, and its actions in one ⋯: Move to…, Copy text, then Move to bin", async () => {
+    const h = host(async () => structuredClone(one));
+    const page = createDigestPage(h);
+    page.open({ ...ALL, digest: "1" });
+    await page.load();
+    expect(h.content.querySelector(".digest-panel a[aria-label='Close the digest']")).toBeNull();
+    h.content.querySelector<HTMLButtonElement>("#digest-actions")!.click();
+    const labels = [...document.querySelectorAll("[role=menu] [role^=menuitem]")].map((b) => b.textContent?.trim());
+    expect(labels).toEqual(["Move to…", "Copy text", "Move to bin"]);
+    // The category is a fact like the others, no button in it.
+    expect(h.content.querySelector(".digest-panel__facts button")).toBeNull();
+    page.destroy();
+  });
+});
+
+describe("a refused change says why", () => {
+  it("a name the server refuses is not called a connection problem", async () => {
+    const h = host(async () => structuredClone(one));
+    h.api.digestRenameCategory = async () => Promise.reject(new ApiError("BAD_NAME", "x", 400));
+    const page = createDigestPage(h);
+    page.open({ view: { kind: "category", uid: "kb-1" }, digest: null });
+    await page.load();
+    h.categoryBtn.click();
+    [...document.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find((b) => b.textContent?.includes("Rename category"))!.click();
+    const field = document.querySelector<HTMLInputElement>("#name-dialog-field")!;
+    field.value = "Grammaire";
+    field.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLButtonElement>("dialog button[value=go]")!.click();
+    await vi.waitFor(() => expect(h.toasts.at(-1)).toMatch(/^The tablet can't take that name/));
+    page.destroy();
+  });
+});
+
+describe("a category made or deleted here, before the next answer", () => {
+  /** Types a name into the open name dialog and confirms it. */
+  function name(value: string): void {
+    const field = document.querySelector<HTMLInputElement>("#name-dialog-field")!;
+    field.value = value;
+    field.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLButtonElement>("dialog button[value=go]")!.click();
+  }
+
+  it("New category opens it only once the page has it: never as a category that is gone", async () => {
+    let server: DigestSnapshot = structuredClone(one);
+    const h = host(async () => structuredClone(server));
+    h.api.digestCreateCategory = async (n: string) => {
+      server = { ...server, categories: [...server.categories, { uid: "new", name: n }] };
+      return { uid: "new", name: n };
+    };
+    const page = createDigestPage(h);
+    // The real router: a new place is opened at once.
+    const seen: (string | null | undefined)[] = [];
+    h.go = () => {
+      page.open({ view: { kind: "category", uid: "new" }, digest: null });
+      seen.push(title(h) ?? null);
+    };
+    page.open({ view: { kind: "categories" }, digest: null });
+    await page.load();
+    h.newCategoryBtn.click();
+    name("Phrases");
+    await vi.waitFor(() => expect(seen).toHaveLength(1));
+    expect(seen[0]).not.toBe("This category is gone");
+    page.destroy();
+  });
+
+  it("a deleted category's card leaves the overview at once, before the server's next answer", async () => {
+    let answer: (s: DigestSnapshot) => void = () => {};
+    let hold = false;
+    const h = host(() => (hold ? new Promise((r) => (answer = r)) : Promise.resolve(structuredClone(one))));
+    const page = createDigestPage(h);
+    document.body.append(h.content);
+    page.open({ view: { kind: "categories" }, digest: null });
+    await page.load();
+    const names = () => [...h.content.querySelectorAll(".app-card__name")].map((n) => n.textContent);
+    expect(names()).toContain("Grammar");
+    hold = true;
+    h.content.querySelector<HTMLButtonElement>('[aria-label="Actions for Grammar"]')!.click();
+    [...document.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find((b) => b.textContent?.includes("Delete category"))!.click();
+    document.querySelector<HTMLButtonElement>("dialog button[value=go]")!.click();
+    await vi.waitFor(() => expect(h.toasts.at(-1)).toBe('Deleted "Grammar".'));
+    expect(names()).not.toContain("Grammar");
+    answer({ ...structuredClone(one), categories: [] });
+    page.destroy();
+    h.content.remove();
+  });
+
+  it("the open digest's card closes it, as Escape does, and it stays closed", async () => {
+    const h = host(async () => structuredClone(one));
+    const went: string[] = [];
+    let closed = 0;
+    h.go = (path) => void went.push(path);
+    h.rememberClosed = () => void closed++;
+    const page = createDigestPage(h);
+    page.open({ ...ALL, digest: "1" });
+    await page.load();
+    const link = h.content.querySelector<HTMLAnchorElement>('.digest-card__link[data-digest="1"]')!;
+    expect(link.getAttribute("aria-current")).toBe("true");
+    link.click();
+    expect(went).toEqual(["all"]);
+    expect(closed).toBe(1);
     page.destroy();
   });
 });

@@ -1,36 +1,37 @@
 // The Digest page's markup, painted whole from a snapshot and a place by
-// `digestPage.ts`. Three parts side by side, like the tablet's app: the
-// groups (categories, or sources), the digests of the one picked, and the
-// digest open in a side panel. Everything that goes somewhere is a link to
+// `digestPage.ts`, in To-Do's grammar: an overview of cards (the categories,
+// or the sources), or one category's or source's digests in a column with the
+// open digest's panel beside it. Everything that goes somewhere is a link to
 // its place, so a digest can be opened in a new tab or sent to someone. The
 // open digest's typed comment and its category are what can be changed here.
 
 import { el } from "../../ui/dom";
-import { ICONS, svg } from "../../ui/icons";
+import { ICONS, svg, type IconName } from "../../ui/icons";
 import { onPlainClick } from "../../ui/link";
+import { createMenu, type MenuItemSpec } from "../../ui/menu";
+import { appCard, appCards } from "../../ui/appCard";
 import { digestHref, noteHref, notePageHref } from "../../router";
-import { absoluteDate } from "../../ui/relativeTime";
-import { MAX_COMMENT, trimComment, type Digest, type DigestSnapshot } from "../../api/digestTypes";
+import { absoluteDate, relativeTime } from "../../ui/relativeTime";
+import { MAX_COMMENT, trimComment, type Digest, type DigestSnapshot, type DigestSourceKind } from "../../api/digestTypes";
 import type { DigestInk } from "./digestInk";
 import type { DigestThumbs } from "./digestThumbs";
-import {
-  categoryName, categoryRows, changedLine, digestsIn, opensAtPage, placePath, sameView, shorten, sourceGroups, sourceLine, SOURCE_SECTIONS, tabOf, viewTitle,
-  type DigestPlace, type DigestView,
-} from "./digestModel";
+import { ALL, categoryName, categoryRows, changedLine, digestsIn, opensAtPage, placePath, sourceGroups, sourceLine, viewSummary, viewTitle, type DigestPlace, type DigestView } from "./digestModel";
+import { oneLine, shorten } from "../../core/passage";
 
 export interface DigestActions {
   /** Go to a place (its URL). */
   go(p: DigestPlace): void;
   /** Open the digest's source at its page. */
   openSource(d: Digest): void;
-  copy(d: Digest): void;
   editComment(d: Digest): void;
   /** What is typed so far, kept across repaints. */
   draftComment(text: string): void;
   saveComment(d: Digest): void;
   cancelComment(): void;
-  /** Offer the categories to move the digest to, from `trigger`. */
-  moveTo(d: Digest, trigger: HTMLElement): void;
+  /** The digest's ⋯, from `trigger`: Move to…, Copy text, Move to bin. */
+  digestMenu(d: Digest, trigger: HTMLElement): void;
+  renameCategory(uid: string): void;
+  deleteCategory(uid: string): void;
 }
 
 export interface DigestPaint {
@@ -51,99 +52,125 @@ function placeLink(p: DigestPlace, a: DigestActions, attrs: Record<string, unkno
   return link;
 }
 
-const icon = (name: keyof typeof ICONS) => el("span", { class: "digest-icon", html: svg(ICONS[name]) });
-
-/** Where the person is, as the topbar names it. */
-export function placeTitle(snap: DigestSnapshot | null): HTMLElement {
-  const n = snap?.enabled ? snap.digests.length : null;
+/** Where the person is, as the top bar names it: the view, and how many digests. */
+export function placeTitle(snap: DigestSnapshot | null, view: DigestView): HTMLElement {
+  const on = snap?.enabled === true;
   return el(
     "div",
     { class: "digest-place" },
-    el("b", { class: "digest-place__name", text: "Digest" }),
-    el("span", { class: "digest-place__sum", text: n === null ? "Digest" : n === 1 ? "1 digest" : `${n} digests` }),
+    el("b", { class: "digest-place__name", text: on ? (viewTitle(snap, view) ?? "Digest") : "Digest" }),
+    el("span", { class: "digest-place__sum", text: on ? viewSummary(snap, view) : "Digest" }),
   );
 }
 
-/** Categories | Sources: the tablet's two ways in. */
-export function tabs(place: DigestPlace, a: DigestActions): HTMLElement {
-  const tab = (name: string, view: DigestView) => {
-    const on = tabOf(place.view) === tabOf(view);
-    return placeLink({ view, digest: null }, a, { class: "digest-tab", "aria-current": on ? "page" : null }, name);
-  };
-  return el(
-    "nav",
-    { class: "digest-tabs", "aria-label": "Browse digests by" },
-    tab("Categories", { kind: "category", uid: null }),
-    tab("Sources", { kind: "source", key: null }),
-  );
+/** A category's actions, the same on its card's ⋯ and the top bar's inside it. */
+export function categoryActions(uid: string, a: Pick<DigestActions, "renameCategory" | "deleteCategory">): MenuItemSpec[] {
+  return [
+    { label: "Rename category", icon: "edit", onSelect: () => a.renameCategory(uid) },
+    { label: "Delete category", icon: "trash", danger: true, onSelect: () => a.deleteCategory(uid) },
+  ];
 }
 
-/** The groups of the tab on screen, each with its count. */
-export function groups(p: DigestPaint, a: DigestActions): HTMLElement {
-  const v = p.place.view;
-  const row = (view: DigestView, name: string, count: number, glyph: keyof typeof ICONS) =>
-    el(
-      "li",
-      {},
-      placeLink(
-        { view, digest: null },
-        a,
-        { class: "digest-group", "aria-current": sameView(view, v) ? "page" : null },
-        icon(glyph),
-        el("span", { class: "digest-group__name", text: name }),
-        el("span", { class: "digest-group__count", text: String(count) }),
+const digestCount = (n: number) => (n === 0 ? "No digests" : n === 1 ? "1 digest" : `${n} digests`);
+
+/** The landing page: Uncategorized, then a card per category the person made, its newest passage whole. */
+export function categoryCards(p: DigestPaint, a: DigestActions): HTMLElement {
+  const now = Date.now();
+  const cards = categoryRows(p.snap)
+    .filter((r): r is typeof r & { uid: string } => r.uid !== null)
+    .map((r) => {
+      const view: DigestView = { kind: "category", uid: r.uid };
+      // Newest first: the first is the newest.
+      const inside = digestsIn(p.snap, view);
+      const newest = inside[0];
+      const inked = inside.filter((d) => d.note !== null).length;
+      const own = r.uid !== "";
+      // Every card has its ⋯; Uncategorized's is there but disabled, as To-Do's Inbox.
+      const menu = createMenu({
+        triggerLabel: own ? `Actions for ${r.name}` : `${r.name} can't be renamed or deleted`,
+        wrapClass: "card__menu",
+        disabled: !own,
+        items: own ? categoryActions(r.uid, a) : [],
+      });
+      return appCard({
+        kind: "digest-card-overview",
+        name: r.name,
+        icon: own ? "category" : "inbox",
+        href: digestHref(placePath({ view, digest: null })),
+        onOpen: () => a.go({ view, digest: null }),
+        counts: [
+          el("span", { text: digestCount(r.count) }),
+          inked > 0 ? el("span", { text: `${inked} handwritten` }) : null,
+        ],
+        peek: [],
+        quote: newest ? { text: oneLine(newest.text), from: `${sourceLine(newest)} · added ${relativeTime(newest.createdAt, now)}` } : null,
+        more: Math.max(0, inside.length - 1),
+        menu,
+      });
+    });
+  return el("div", { class: "digest-overview" }, appCards("Categories", cards));
+}
+
+const SOURCE_ICONS: Record<DigestSourceKind, IconName> = { document: "doc", note: "note", manual: "edit", other: "doc" };
+
+/** "page 2", "pages 1–3"; null when the tablet named no page. */
+function pagesOf(digests: readonly Digest[]): string | null {
+  const pages = digests.map((d) => d.source.page).filter((n): n is number => n !== null);
+  if (pages.length === 0) return null;
+  const lo = Math.min(...pages);
+  const hi = Math.max(...pages);
+  return lo === hi ? `page ${lo}` : `pages ${lo}–${hi}`;
+}
+
+/**
+ * The sources' page: each document or notebook as the library draws a file,
+ * its first marked page as a sheet, its name under it; what was typed on the
+ * tablet has a pencil for a page. The passages are inside.
+ */
+export function sourceCards(p: DigestPaint, a: DigestActions): HTMLElement {
+  const tiles = sourceGroups(p.snap).map((g) => {
+    const view: DigestView = { kind: "source", key: g.key };
+    const first = g.digests[0]!;
+    const page = opensAtPage(first) ? p.thumbs.holder(first, "digest-source__page") : null;
+    const ext = first.source.path?.match(/\.([^./]+)$/)?.[1]?.toLowerCase();
+    const n = g.digests.length;
+    const meta = [ext ? `.${ext}` : null, digestCount(n), pagesOf(g.digests)].filter((x): x is string => x !== null);
+    const link = placeLink(
+      { view, digest: null },
+      a,
+      { class: "digest-source" },
+      el(
+        "span",
+        { class: "digest-source__sheet" },
+        page ?? el("span", { class: "digest-source__glyph", "aria-hidden": "true", html: svg(ICONS[SOURCE_ICONS[g.kind]]) }),
+        el("span", { class: "digest-source__badge", "aria-hidden": "true", text: String(n) }),
       ),
+      el("span", { class: "digest-source__name", text: g.name }),
+      el("span", { class: "digest-source__meta" }, ...meta.map((m) => el("span", { text: m }))),
     );
-  if (v.kind === "category") {
-    return el(
-      "nav",
-      { class: "digest-groups", "aria-label": "Categories" },
-      el("ul", {}, ...categoryRows(p.snap).map((r) => row({ kind: "category", uid: r.uid }, r.name, r.count, r.uid === null ? "stack" : r.uid === "" ? "inbox" : "folder"))),
-    );
-  }
-  const all = sourceGroups(p.snap);
-  const glyph = { document: "doc", note: "note", manual: "edit", other: "doc" } as const;
-  return el(
-    "nav",
-    { class: "digest-groups", "aria-label": "Sources" },
-    el("ul", {}, row({ kind: "source", key: null }, "All sources", p.snap.digests.length, "stack")),
-    ...SOURCE_SECTIONS.flatMap((sec) => {
-      const mine = all.filter((g) => sec.kinds.includes(g.kind));
-      if (mine.length === 0) return [];
-      if (sec.alone) return [el("ul", { class: "digest-groups__alone" }, ...mine.map((g) => row({ kind: "source", key: g.key }, g.name, g.digests.length, glyph[g.kind])))];
-      return [
-        el("p", { class: "digest-groups__label", text: sec.name }),
-        el("ul", {}, ...mine.map((g) => row({ kind: "source", key: g.key }, g.name, g.digests.length, glyph[g.kind]))),
-      ];
-    }),
-  );
+    return el("li", {}, link);
+  });
+  return el("div", { class: "digest-overview" }, el("ul", { class: "digest-sources", "aria-label": "Sources" }, ...tiles));
 }
 
 /** The view's digests as cards; a source's in page order, with the page beside each. */
 export function list(p: DigestPaint, a: DigestActions): HTMLElement {
   const v = p.place.view;
-  const title = viewTitle(p.snap, v);
-  const head = el("h2", { class: "digest-list__title", id: "digest-list-title", text: title ?? "Digest" });
-  if (title === null) {
+  if (viewTitle(p.snap, v) === null) {
     const gone = v.kind === "category" ? "This category is gone" : "No digest comes from this file any more";
     return el(
       "section",
-      { class: "digest-list", "aria-labelledby": "digest-list-title" },
-      head,
-      notice(gone, "It may have been deleted or moved on the tablet.", null, placeLink({ view: { kind: "category", uid: null }, digest: null }, a, { class: "btn" }, "See all digests")),
+      { class: "digest-list", "aria-label": "Digests" },
+      notice(gone, v.kind === "category" ? "It was deleted, here or on the tablet." : "Its digests were deleted or moved, here or on the tablet.", null, placeLink({ view: ALL, digest: null }, a, { class: "btn" }, "See all digests")),
     );
   }
-  const byPage = v.kind === "source";
-  const item = (d: Digest) => el("li", {}, card(d, p, a, byPage));
-  // Every source at once: each under its name.
-  const items =
-    v.kind === "source" && v.key === null
-      ? sourceGroups(p.snap).flatMap((g) => [el("li", { class: "digest-list__source" }, el("h3", { text: g.name })), ...g.digests.map(item)])
-      : digestsIn(p.snap, v).map(item);
+  const digests = digestsIn(p.snap, v);
+  // A source's digests by page, the page beside each; what has no page (typed on the tablet) needs no page column.
+  const byPage = v.kind === "source" && digests.some((d) => d.source.page !== null);
+  const items = digests.map((d) => el("li", {}, card(d, p, a, byPage)));
   return el(
     "section",
-    { class: "digest-list", "aria-labelledby": "digest-list-title" },
-    head,
+    { class: "digest-list", "aria-label": "Digests" },
     items.length === 0 ? emptyList(p.snap, v) : el("ul", { class: "digest-cards" }, ...items),
   );
 }
@@ -156,21 +183,28 @@ function emptyList(s: DigestSnapshot, v: DigestView): HTMLElement {
       null,
     );
   }
-  return notice(v.kind === "category" && v.uid !== null ? "Nothing in this category" : "Nothing here", "Digests put here on the tablet show up after it syncs.", null);
+  return notice(
+    v.kind === "category" && v.uid !== null ? "Nothing in this category" : "Nothing here",
+    "Move a digest here with its ⋯, or put one here on the tablet: it shows up after the tablet syncs.",
+    null,
+  );
 }
 
 function card(d: Digest, p: DigestPaint, a: DigestActions, byPage: boolean): HTMLElement {
   const open = p.place.digest === d.id;
   const meta = [byPage ? null : sourceLine(d), absoluteDate(d.createdAt)].filter((x): x is string => x !== null);
+  // The note itself, framed as To-Do's handwriting chip; said for screen readers once, here.
   const ink = p.ink.holder(d, "digest-card__ink");
-  ink?.setAttribute("aria-hidden", "true");
+  ink?.setAttribute("role", "img");
+  ink?.setAttribute("aria-label", "Handwritten note");
   return el(
     "article",
     { class: `digest-card${byPage ? " digest-card--paged" : ""}${open ? " is-open" : ""}` },
     byPage ? el("span", { class: "digest-card__page", text: d.source.page === null ? "" : `p. ${d.source.page}` }) : null,
     // The text is the link, stretched over the card; the card draws its focus.
+    // The open digest's card closes it, as Escape does.
     placeLink(
-      { view: p.place.view, digest: d.id },
+      { view: p.place.view, digest: open ? null : d.id },
       a,
       { class: "digest-card__link", "data-digest": d.id, "aria-current": open ? "true" : null },
       el("q", { class: "digest-card__text", text: shorten(d.text) }),
@@ -180,7 +214,6 @@ function card(d: Digest, p: DigestPaint, a: DigestActions, byPage: boolean): HTM
       "p",
       { class: "digest-card__meta" },
       ...meta.map((m) => el("span", { text: m })),
-      d.note ? el("span", { class: "digest-card__tag", text: "Handwritten note" }) : null,
       d.waiting ? el("span", { class: "digest-card__tag", text: "Waiting for the tablet" }) : null,
     ),
     ink,
@@ -191,34 +224,42 @@ function card(d: Digest, p: DigestPaint, a: DigestActions, byPage: boolean): HTM
 export function panel(p: DigestPaint, a: DigestActions): HTMLElement | null {
   const d = p.place.digest === null ? null : p.snap.digests.find((x) => x.id === p.place.digest);
   if (!d) return null;
-  const close = placeLink({ view: p.place.view, digest: null }, a, { class: "icon-btn digest-panel__close", "aria-label": "Close the digest", title: "Close" }, el("span", { html: svg(ICONS.close) }));
   const note = p.ink.holder(d, "digest-panel__ink");
   note?.setAttribute("role", "img");
   note?.setAttribute("aria-label", "Handwritten note");
-  const move = el("button", { class: "btn digest-panel__move", type: "button", id: "digest-move", "aria-haspopup": "menu", "aria-expanded": "false", text: "Move to…" });
-  move.addEventListener("click", (e) => {
-    e.stopPropagation();
-    a.moveTo(d, move);
+  // Its actions in one ⋯, a card's: no close, since the list beside it, or the
+  // top bar's ‹ where it takes the list's place, is the way on.
+  const more = el("button", {
+    class: "card__more digest-panel__more",
+    type: "button",
+    id: "digest-actions",
+    "aria-haspopup": "menu",
+    "aria-expanded": "false",
+    "aria-label": "Actions for this digest",
+    title: "Actions for this digest",
+    disabled: p.busy,
+    html: svg(ICONS.more, 2),
   });
-  const facts: [string, string | HTMLElement][] = [
+  more.addEventListener("click", (e) => {
+    e.stopPropagation();
+    a.digestMenu(d, more);
+  });
+  const facts: [string, string][] = [
     ["From", sourceLine(d)],
-    ["Category", el("span", { class: "digest-panel__category" }, el("span", { text: categoryName(p.snap, d) }), move)],
+    ["Category", categoryName(p.snap, d)],
     ...(d.author ? [["Author", d.author] as [string, string]] : []),
     ["Made", absoluteDate(d.createdAt)],
   ];
-  const copy = el("button", { class: "btn", type: "button", text: "Copy text" });
-  copy.addEventListener("click", () => a.copy(d));
   return el(
     "section",
     { class: "digest-panel", "aria-labelledby": "digest-panel-title" },
-    el("div", { class: "digest-panel__head" }, el("h2", { class: "digest-panel__title", id: "digest-panel-title", text: "Selected digest" }), close),
+    el("div", { class: "digest-panel__head" }, el("h2", { class: "digest-panel__title", id: "digest-panel-title", tabindex: "-1", text: "Selected digest" }), more),
     el("blockquote", { class: "digest-panel__text" }, el("p", { text: d.text })),
     // The passage, then where it is.
     sourceLink(d, p, a),
     comment(d, p, a),
     note ? el("div", { class: "digest-panel__part" }, el("h3", { text: "Handwritten note" }), note) : null,
-    el("dl", { class: "digest-panel__facts" }, ...facts.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", {}, v)])),
-    el("div", { class: "digest-panel__actions" }, copy),
+    el("dl", { class: "digest-panel__facts" }, ...facts.flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { text: v })])),
     d.source.kind !== "manual" && d.source.fileId === null
       ? el("p", { class: "digest-panel__aside", text: "That file is not in the library, so it can't be opened here." })
       : null,
@@ -307,6 +348,11 @@ function sourceLink(d: Digest, p: DigestPaint, a: DigestActions): HTMLElement | 
   if (!s.changed) return link;
   const note = el("p", { class: "digest-panel__aside", text: changedLine(d) });
   return el("div", { class: "digest-panel__sourcebox" }, link, note);
+}
+
+/** The panel's place with no digest open, on a desktop: what opening one shows. */
+export function idlePanel(): HTMLElement {
+  return el("div", { class: "digest-idle" }, el("p", { text: "Choose a digest to read it whole, with its comment, its handwritten note and where it came from." }));
 }
 
 export function notice(title: string, text: string, retry: (() => void) | null, action: HTMLElement | null = null): HTMLElement {

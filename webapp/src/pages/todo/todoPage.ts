@@ -10,6 +10,8 @@
 // seconds behind an Undo first, because once the tablet syncs it is gone there.
 
 import { setMenuRows } from "../../ui/barMenu";
+import { attempt } from "../../ui/attempt";
+import { moveChoices, type MovePlace } from "../../ui/moveTo";
 import { el } from "../../ui/dom";
 import type { Api } from "../../api/types";
 import type { TodoSnapshot, TodoTask } from "../../api/todoTypes";
@@ -126,11 +128,7 @@ export function createTodoPage(host: TodoHost): TodoPage {
     st.busy = true;
     paint();
     try {
-      await op();
-      return true;
-    } catch (e) {
-      if (!host.handled(e)) say(`Couldn't ${what}. Check your connection and try again.`);
-      return false;
+      return await attempt(what, op, { handled: host.handled, say });
     } finally {
       st.busy = false;
       await load();
@@ -321,15 +319,14 @@ export function createTodoPage(host: TodoHost): TodoPage {
     },
     move(t, trigger) {
       if (!st.snap) return;
-      const targets: [string | null, string][] = [[null, "Inbox"], ...st.snap.lists.map((l): [string, string] => [l.id, l.title])];
-      menus.pop(trigger, [
-        menus.section("MOVE TO"),
-        ...targets
-          .filter(([id]) => id !== t.listId)
-          .map(([id, name]) => menus.item(name, id === null ? "inbox" : "list", () => void run("move the task", () => host.api.todoUpdateTask(t.id, { listId: id })))),
-        menus.sep(),
-        menus.item("New list…", "plus", () => void lists.newList((id) => host.api.todoUpdateTask(t.id, { listId: id }))),
-      ]);
+      const choices = moveChoices({
+        places: [{ id: null, name: "Inbox", icon: "inbox" }, ...st.snap.lists.map((l): MovePlace => ({ id: l.id, name: l.title, icon: "list" }))],
+        current: t.listId,
+        move: (p) => void run("move the task", () => host.api.todoUpdateTask(t.id, { listId: p.id })),
+        newLabel: "New list…",
+        makeNew: () => void lists.newList((id) => host.api.todoUpdateTask(t.id, { listId: id })),
+      });
+      menus.pop(trigger, [menus.section("MOVE TO"), ...choices.map((c) => (c.kind === "sep" ? menus.sep() : menus.item(c.label, c.icon, c.onSelect)))]);
     },
     date(t, trigger) {
       menus.dateMenu(trigger, t.due, (due) => void run(due === null ? "remove the date" : "set the date", () => host.api.todoUpdateTask(t.id, { due })));
