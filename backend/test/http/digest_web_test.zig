@@ -6,6 +6,7 @@ const testing = std.testing;
 const gpa = testing.allocator;
 const harness = @import("harness.zig");
 const helpers = @import("digest_helpers.zig");
+const wire = @import("../wire.zig");
 const Fixture = harness.Fixture;
 const onboardWeb = harness.onboardWeb;
 const requestWithCookie = harness.requestWithCookie;
@@ -366,4 +367,336 @@ test "a source changed since its passage was taken is said so; a category with n
 
     try testing.expectEqual(@as(u16, 404), (try get(f, &b, "/api/controlplane/digests/abc/note/245354713d4c121a2368d9295f6379ca", &ana.web)).status);
     try expectFailure((try put(f, &b, "/api/controlplane/digests/abc", &ana.web, "{\"comment\":\"x\"}")).body, "NO_SUCH_DIGEST");
+}
+
+fn send(f: *Fixture, b: *Bufs, method: []const u8, path: []const u8, tok: []const u8, body: []const u8) !harness.Response {
+    return requestWithCookie(&f.ctx, &b.obuf, &b.reqbuf, method, path, tok, body);
+}
+
+const TabletGroups = struct {
+    summaryDOList: []const struct { uniqueIdentifier: ?[]const u8 = null, name: ?[]const u8 = null, md5Hash: ?[]const u8 = null, lastModifiedTime: i64 = 0 } = &.{},
+};
+
+/// The categories as the tablet's app reads them.
+fn tabletGroups(f: *Fixture, b: *Bufs, tok: *const [32]u8) !std.json.Parsed(TabletGroups) {
+    const resp = try helpers.call(f, &b.obuf, &b.reqbuf, tok, "POST", "/api/file/query/summary/group", "{\"page\":0,\"size\":50}");
+    return std.json.parseFromSlice(TabletGroups, gpa, resp.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+}
+
+/// `{"name":"é…"}` with `n` of them, owned by the caller.
+fn nameOf(n: usize) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, "{\"name\":\"");
+    for (0..n) |_| try out.appendSlice(gpa, "é");
+    try out.appendSlice(gpa, "\"}");
+    return out.toOwnedSlice(gpa);
+}
+
+test "categories made, renamed and deleted in the browser: what the tablet's sync reads; the app's name rules" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var b: Bufs = .{};
+    const ana = try person(f, &b, "ana");
+    const rui = try person(f, &b, "rui");
+
+    const made = try send(f, &b, "POST", "/api/controlplane/digests/categories", &ana.web, "{\"name\":\"  Verbes \"}");
+    try testing.expectEqual(@as(u16, 200), made.status);
+    var created = try std.json.parseFromSlice(struct { uid: []const u8, name: []const u8 }, gpa, made.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+    defer created.deinit();
+    try testing.expectEqualStrings("Verbes", created.value.name);
+    try testing.expectEqual(@as(usize, 32), created.value.uid.len);
+    {
+        var g = try tabletGroups(f, &b, &ana.tablet);
+        defer g.deinit();
+        try testing.expectEqual(@as(usize, 1), g.value.summaryDOList.len);
+        try testing.expectEqualStrings(created.value.uid, g.value.summaryDOList[0].uniqueIdentifier.?);
+        try testing.expectEqualStrings("Verbes", g.value.summaryDOList[0].name.?);
+    }
+    {
+        var l = try listing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expectEqual(@as(usize, 1), l.value.categories.len);
+        try testing.expect(l.value.waiting);
+    }
+
+    // The app's rules: none empty, none past 150 characters, none starting with a dot,
+    // none with a character a file name may not hold, no second of a name.
+    const bad = [_][]const u8{ "{\"name\":\"   \"}", "{\"name\":\".hidden\"}", "{\"name\":\"a/b\"}", "{\"name\":\"a:b\"}", "{\"name\":\"say \\\"hi\\\"\"}", "{\"name\":\"two\\nlines\"}", "{\"name\":\"a\\tb\"}" };
+    for (bad) |body| try expectFailure((try send(f, &b, "POST", "/api/controlplane/digests/categories", &ana.web, body)).body, "BAD_NAME");
+    const long = try nameOf(151);
+    defer gpa.free(long);
+    try expectFailure((try send(f, &b, "POST", "/api/controlplane/digests/categories", &ana.web, long)).body, "BAD_NAME");
+    const longest = try nameOf(150);
+    defer gpa.free(longest);
+    try harness.expectSuccess((try send(f, &b, "POST", "/api/controlplane/digests/categories", &ana.web, longest)).body);
+    try expectFailure((try send(f, &b, "POST", "/api/controlplane/digests/categories", &ana.web, "{\"name\":\"Verbes\"}")).body, "NAME_TAKEN");
+    // Another person's names are their own.
+    try harness.expectSuccess((try send(f, &b, "POST", "/api/controlplane/digests/categories", &rui.web, "{\"name\":\"Verbes\"}")).body);
+
+    var pbuf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/categories/{s}", .{created.value.uid});
+    const before = blk: {
+        var g = try tabletGroups(f, &b, &ana.tablet);
+        defer g.deinit();
+        for (g.value.summaryDOList) |c| if (std.mem.eql(u8, c.uniqueIdentifier.?, created.value.uid)) break :blk c.lastModifiedTime;
+        unreachable;
+    };
+    // Renaming to its own name is no clash; a new md5 and a later time make the tablet take it.
+    try harness.expectSuccess((try send(f, &b, "PUT", path, &ana.web, "{\"name\":\"Verbes\"}")).body);
+    try harness.expectSuccess((try send(f, &b, "PUT", path, &ana.web, "{\"name\":\"Verbes irréguliers\"}")).body);
+    {
+        var g = try tabletGroups(f, &b, &ana.tablet);
+        defer g.deinit();
+        for (g.value.summaryDOList) |c| if (std.mem.eql(u8, c.uniqueIdentifier.?, created.value.uid)) {
+            try testing.expectEqualStrings("Verbes irréguliers", c.name.?);
+            try testing.expect(c.lastModifiedTime > before);
+        };
+    }
+    try expectFailure((try send(f, &b, "PUT", path, &ana.web, longest)).body, "NAME_TAKEN");
+    try expectFailure((try send(f, &b, "PUT", path, &rui.web, "{\"name\":\"Mine\"}")).body, "NO_SUCH_CATEGORY");
+
+    // Deleting it takes its digests to the bin; the tablet's manifest no longer has them.
+    const add = try std.fmt.allocPrint(gpa,
+        \\{{"content":"aller","md5Hash":"m1","metadata":"{{\"unique_identifier\":\"u-aller\"}}","parentUniqueIdentifier":"{s}","sourcePath":"","sourceType":4}}
+    , .{created.value.uid});
+    defer gpa.free(add);
+    const id = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", add);
+    try expectFailure((try send(f, &b, "DELETE", path, &rui.web, "")).body, "NO_SUCH_CATEGORY");
+    const del = try send(f, &b, "DELETE", path, &ana.web, "");
+    try testing.expect(std.mem.indexOf(u8, del.body, "\"digests\":1") != null);
+    try testing.expectError(error.NotInManifest, manifestRow(f, &b, &ana.tablet, id));
+    {
+        var g = try tabletGroups(f, &b, &ana.tablet);
+        defer g.deinit();
+        try testing.expectEqual(@as(usize, 1), g.value.summaryDOList.len);
+    }
+    try expectFailure((try send(f, &b, "DELETE", path, &ana.web, "")).body, "NO_SUCH_CATEGORY");
+}
+
+const BinListing = struct {
+    enabled: bool,
+    retentionDays: i64 = 0,
+    digests: []const struct {
+        id: u64,
+        text: []const u8,
+        categoryUid: []const u8,
+        categoryName: ?[]const u8 = null,
+        deletedAt: i64,
+        back: bool,
+    } = &.{},
+};
+
+fn binListing(f: *Fixture, b: *Bufs, tok: []const u8) !std.json.Parsed(BinListing) {
+    const resp = try get(f, b, "/api/controlplane/digests/bin", tok);
+    try testing.expectEqual(@as(u16, 200), resp.status);
+    return std.json.parseFromSlice(BinListing, gpa, resp.body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+}
+
+test "the bin: a digest deleted in the browser leaves the manifest; restored, it is back under its id and md5, its category with it" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var b: Bufs = .{};
+    const ana = try person(f, &b, "ana");
+    const rui = try person(f, &b, "rui");
+    _ = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary/group",
+        \\{"uniqueIdentifier":"kb-phon","name":"Phonétique","md5Hash":"g1","creationTime":1,"lastModifiedTime":1}
+    );
+    const id = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", note_add);
+    const before = try manifestRow(f, &b, &ana.tablet, id);
+
+    var pbuf: [96]u8 = undefined;
+    const path = try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/{d}", .{id});
+    try expectFailure((try send(f, &b, "DELETE", path, &rui.web, "")).body, "NO_SUCH_DIGEST");
+    try harness.expectSuccess((try send(f, &b, "DELETE", path, &ana.web, "")).body);
+    try testing.expectError(error.NotInManifest, manifestRow(f, &b, &ana.tablet, id));
+    // The tablet deletes its category too: the browser does it while the digest is in the bin.
+    try harness.expectSuccess((try send(f, &b, "DELETE", "/api/controlplane/digests/categories/kb-phon", &ana.web, "")).body);
+    {
+        var l = try binListing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expect(l.value.enabled);
+        try testing.expect(l.value.retentionDays > 0);
+        try testing.expectEqual(@as(usize, 1), l.value.digests.len);
+        const d = l.value.digests[0];
+        try testing.expectEqual(id, d.id);
+        try testing.expectEqualStrings("This is a test note.", d.text);
+        try testing.expectEqualStrings("Phonétique", d.categoryName.?);
+        try testing.expect(!d.back);
+    }
+    {
+        var l = try binListing(f, &b, &rui.web);
+        defer l.deinit();
+        try testing.expectEqual(@as(usize, 0), l.value.digests.len);
+    }
+
+    var rbuf: [96]u8 = undefined;
+    const restore = try std.fmt.bufPrint(&rbuf, "/api/controlplane/digests/bin/{d}/restore", .{id});
+    try expectFailure((try send(f, &b, "POST", restore, &rui.web, "")).body, "NOT_IN_BIN");
+    try harness.expectSuccess((try send(f, &b, "POST", restore, &ana.web, "")).body);
+    {
+        var l = try listing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expectEqualStrings("kb-phon", l.value.digests[0].categoryUid);
+    }
+    const after = try manifestRow(f, &b, &ana.tablet, id);
+    try testing.expectEqualSlices(u8, &before.md5, &after.md5);
+    {
+        var g = try tabletGroups(f, &b, &ana.tablet);
+        defer g.deinit();
+        try testing.expectEqual(@as(usize, 1), g.value.summaryDOList.len);
+        try testing.expectEqualStrings("kb-phon", g.value.summaryDOList[0].uniqueIdentifier.?);
+    }
+    try expectFailure((try send(f, &b, "POST", restore, &ana.web, "")).body, "NOT_IN_BIN");
+
+    // The tablet edited it before syncing the delete: it sends it back as new, and the bin's copy stays there.
+    try harness.expectSuccess((try send(f, &b, "DELETE", path, &ana.web, "")).body);
+    const again = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", note_add);
+    try testing.expect(again != id);
+    {
+        var l = try binListing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expect(l.value.digests[0].back);
+    }
+    const back = try send(f, &b, "POST", restore, &ana.web, "");
+    try testing.expectEqual(@as(u16, 409), back.status);
+    try expectFailure(back.body, "BACK_ALREADY");
+
+    // Deleted for good: out of the bin, and no restore.
+    var gbuf: [96]u8 = undefined;
+    const purge = try std.fmt.bufPrint(&gbuf, "/api/controlplane/digests/bin/{d}", .{id});
+    try expectFailure((try send(f, &b, "DELETE", purge, &rui.web, "")).body, "NOT_IN_BIN");
+    try harness.expectSuccess((try send(f, &b, "DELETE", purge, &ana.web, "")).body);
+    {
+        var l = try binListing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expectEqual(@as(usize, 0), l.value.digests.len);
+    }
+    try expectFailure((try send(f, &b, "DELETE", purge, &ana.web, "")).body, "NOT_IN_BIN");
+}
+
+test "off: the bin says so; category and bin changes are refused" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    var b: Bufs = .{};
+    _ = try f.svc.bootstrapAdmin("ana", "temp0000");
+    const tok = try onboardWeb(&f.ctx, "ana", "temp0000", "anapass1");
+    var l = try binListing(f, &b, &tok);
+    defer l.deinit();
+    try testing.expect(!l.value.enabled);
+    const refused = [_][3][]const u8{
+        .{ "POST", "/api/controlplane/digests/categories", "{\"name\":\"x\"}" },
+        .{ "PUT", "/api/controlplane/digests/categories/kb", "{\"name\":\"x\"}" },
+        .{ "DELETE", "/api/controlplane/digests/categories/kb", "" },
+        .{ "DELETE", "/api/controlplane/digests/1", "" },
+        .{ "POST", "/api/controlplane/digests/bin/1/restore", "" },
+        .{ "DELETE", "/api/controlplane/digests/bin/1", "" },
+    };
+    for (refused) |c| try expectFailure((try send(f, &b, c[0], c[1], &tok, c[2])).body, "DIGEST_SYNC_OFF");
+}
+
+test "Empty bin takes the digests the page listed with the files, their notes' blobs released; live digests stay; unlisted or off, it leaves them" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var b: Bufs = .{};
+    const ana = try person(f, &b, "ana");
+
+    const nb = @import("note_builder");
+    const bmp = [_]u8{ 0x61, 0x00, 0x62, 0x03 };
+    const mark = try nb.serialize(gpa, .{
+        .filetype = "mark",
+        .header = &.{.{ .key = "APPLY_EQUIPMENT", .value = "N6" }},
+        .pages = &.{.{ .layers = &.{.{ .slot = .main, .bitmap = &bmp }} }},
+    });
+    defer gpa.free(mark);
+    const md5 = helpers.md5Hex(mark);
+    const inner = try helpers.uploadNote(f, &b.obuf, &b.reqbuf, &ana.tablet, mark);
+    const add = try helpers.noteAdd(gpa, &inner, &md5, "u-note");
+    defer gpa.free(add);
+    const noted = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", add);
+    const live = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", manual_add);
+
+    var pbuf: [64]u8 = undefined;
+    try harness.expectSuccess((try send(f, &b, "DELETE", try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/{d}", .{noted}), &ana.web, "")).body);
+
+    // Off, the bin's digests are not the files' bin's to empty; nor, on, when
+    // the page could not list them: nothing goes that the person was not shown.
+    f.ctx.config.digest_sync = false;
+    _ = try send(f, &b, "DELETE", "/api/controlplane/bin?digests=1", &ana.web, "");
+    f.ctx.config.digest_sync = true;
+    _ = try send(f, &b, "DELETE", "/api/controlplane/bin", &ana.web, "");
+    try testing.expect(f.files.blobs.has(&md5));
+    {
+        var l = try binListing(f, &b, &ana.web);
+        defer l.deinit();
+        try testing.expectEqual(@as(usize, 1), l.value.digests.len);
+    }
+
+    const resp = try send(f, &b, "DELETE", "/api/controlplane/bin?digests=1", &ana.web, "");
+    try testing.expectEqual(@as(u16, 200), resp.status);
+    try testing.expect(std.mem.indexOf(u8, resp.body, "\"digests\":1") != null);
+    try testing.expect(!f.files.blobs.has(&md5));
+    var l = try binListing(f, &b, &ana.web);
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 0), l.value.digests.len);
+    var kept = try listing(f, &b, &ana.web);
+    defer kept.deinit();
+    try testing.expectEqual(@as(usize, 1), kept.value.digests.len);
+    try testing.expectEqual(live, kept.value.digests[0].id);
+}
+
+/// `body` with its clock fields pinned, so the fixture is stable.
+fn pinTimes(a: std.mem.Allocator, body: []const u8) ![]u8 {
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, body, .{});
+    pin(parsed);
+    return std.json.Stringify.valueAlloc(a, parsed, .{});
+}
+
+fn pin(v: std.json.Value) void {
+    switch (v) {
+        .array => |arr| for (arr.items) |x| pin(x),
+        .object => |obj| {
+            var it = obj.iterator();
+            while (it.next()) |e| {
+                const clock = for ([_][]const u8{ "createdAt", "modifiedAt", "deletedAt", "tabletSyncedAt" }) |k| {
+                    if (std.mem.eql(u8, k, e.key_ptr.*)) break true;
+                } else false;
+                if (clock) e.value_ptr.* = .{ .integer = wire.time_ms } else pin(e.value_ptr.*);
+            }
+        },
+        else => {},
+    }
+}
+
+test "wire contract: the listing and the bin, as the web app's client reads them" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    f.ctx.config.digest_sync = true;
+    var b: Bufs = .{};
+    const ana = try person(f, &b, "ana");
+    const folder = try f.files.ensureFolderPath(ana.id, "NOTE/MyStyle/Français");
+    _ = try putSeed(f, ana.id, folder, "La_phonetique_du_francais_Prof_Flavio_Adler.pdf", "%PDF-1.4 stand-in");
+    _ = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary/group",
+        \\{"uniqueIdentifier":"kb-phon","name":"Phonétique","md5Hash":"g1","creationTime":1,"lastModifiedTime":1}
+    );
+    _ = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", helpers.nomad_add);
+    const binned = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", note_add);
+    const manual = try helpers.addId(f, &b.obuf, &b.reqbuf, &ana.tablet, "/api/file/add/summary", manual_add);
+
+    var pbuf: [96]u8 = undefined;
+    try harness.expectSuccess((try put(f, &b, try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/{d}", .{manual}), &ana.web, "{\"comment\":\"Edited here\"}")).body);
+    try harness.expectSuccess((try send(f, &b, "DELETE", try std.fmt.bufPrint(&pbuf, "/api/controlplane/digests/{d}", .{binned}), &ana.web, "")).body);
+
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const list = try get(f, &b, "/api/controlplane/digests", &ana.web);
+    try testing.expectEqual(@as(u16, 200), list.status);
+    try wire.expect("digests.json", try pinTimes(a, list.body));
+    const bin = try get(f, &b, "/api/controlplane/digests/bin", &ana.web);
+    try testing.expectEqual(@as(u16, 200), bin.status);
+    try wire.expect("digest-bin.json", try pinTimes(a, bin.body));
 }

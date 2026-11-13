@@ -1,10 +1,12 @@
 //! The browser's Digest: `/api/controlplane/digests…`, the signed-in person's
 //! own digests and categories, as their tablet's app synced them
-//! (`services/digest_web.zig`). The browser changes two things, a digest's
-//! typed comment and its category, which the tablet takes at its next sync
-//! (`digest.applyWebEdit` says why); everything else, the handwritten note
-//! included, is the tablet's alone. Off with `config.digest_sync`, like the
-//! tablet's side: the listing then says `enabled: false` and an edit is refused.
+//! (`services/digest_web.zig`). The browser changes a digest's typed comment
+//! and its category, deletes it to the bin and restores it, and makes,
+//! renames and deletes categories; the tablet takes each at its next sync
+//! (`digest.applyWebEdit`, `digest/web_categories.zig` and `digest/bin.zig`
+//! say why). Everything else, the handwritten note included, is the tablet's
+//! alone. Off with `config.digest_sync`, like the tablet's side: the listings
+//! then say `enabled: false` and a change is refused.
 
 const std = @import("std");
 const router = @import("../http/router.zig");
@@ -13,6 +15,7 @@ const json = @import("../http/json.zig");
 const reply = @import("../http/reply.zig");
 const digest = @import("../services/digest.zig");
 const digestweb = @import("../services/digest_web.zig");
+const digest_purge = @import("../services/digest_purge.zig");
 const tablet_path = @import("../services/tablet_path.zig");
 const controlplane = @import("../services/controlplane.zig");
 const read = @import("controlplane/read.zig");
@@ -26,6 +29,8 @@ const serverError = reply.serverError;
 
 /// The app's own limit on a comment (`KnowledgeFieldNameConstants`), in characters.
 const max_comment_chars = 2_000;
+/// The app's own limit on a category name (`CreateKnowledgeBaseDialog`), in characters.
+const max_name_chars = 150;
 
 // ---- bodies ----
 
@@ -68,9 +73,36 @@ const DigestsVO = struct {
     digests: []const DigestVO = &.{},
     /// Epoch ms; absent until a tablet has asked for these digests.
     tabletSyncedAt: ?i64 = null,
-    /// Something changed here that no tablet has fetched yet.
+    /// Something changed here that no tablet has fetched yet: a digest or a
+    /// category, made, edited, deleted or restored.
     waiting: bool = false,
 };
+
+const BinDigestVO = struct {
+    id: u64,
+    text: []const u8,
+    /// The category it was in; '' Uncategorized.
+    categoryUid: []const u8,
+    /// That category's name, live or deleted; absent: Uncategorized, or gone
+    /// for good. A restore puts the digest back there, bringing a deleted one back.
+    categoryName: ?[]const u8,
+    /// Epoch ms.
+    deletedAt: i64,
+    /// The tablet brought it back already, as a new digest: no restore.
+    back: bool,
+};
+
+const BinVO = struct {
+    success: bool = true,
+    enabled: bool,
+    digests: []const BinDigestVO = &.{},
+    /// How long the bin keeps a digest, set for the files' bin too.
+    retentionDays: i64 = 0,
+};
+
+const NameReq = struct { name: []const u8 };
+const CategoryCreatedVO = struct { success: bool = true, uid: []const u8, name: []const u8 };
+const CategoryDeletedVO = struct { success: bool = true, digests: u64 };
 
 /// Absent fields stay; at least one is given. `comment` "" removes the
 /// comment; `categoryUid` "" is Uncategorized.
@@ -96,6 +128,7 @@ pub fn list(ctx: *Context, req: *Request, params: Params) anyerror!void {
     const rows = digest.digestsPage(ctx.db, a, user_id, null, 1, std.math.maxInt(u32)) catch return serverError(ctx, req);
     const listed = digest.tabletListedAt(ctx.db, user_id) catch return serverError(ctx, req);
     const changed = digest.changedSince(ctx.db, a, user_id, listed) catch return serverError(ctx, req);
+    const pending = digest.webChangedSince(ctx.db, user_id, listed) catch return serverError(ctx, req);
     const digests = try a.alloc(DigestVO, rows.len);
     var files: LibraryFiles = .{ .ctx = ctx, .a = a, .user_id = user_id };
     for (rows, digests) |d, *o| {
@@ -118,7 +151,7 @@ pub fn list(ctx: *Context, req: *Request, params: Params) anyerror!void {
         .categories = categories.items,
         .digests = digests,
         .tabletSyncedAt = listed,
-        .waiting = changed.len > 0,
+        .waiting = pending,
     }, null);
 }
 
@@ -138,11 +171,109 @@ pub fn edit(ctx: *Context, req: *Request, params: Params) anyerror!void {
         if (!(digest.categoryExists(ctx.db, ctx.caller.?.user_id, uid) catch return serverError(ctx, req))) return noCategory(ctx, req);
         change.parent_uid = uid;
     }
-    var raw: [16]u8 = undefined;
-    ctx.io.random(&raw);
-    const md5 = std.fmt.bytesToHex(raw, .lower);
+    const md5 = randomHex(ctx);
     const found = digest.applyWebEdit(ctx.db, ctx.caller.?.user_id, id, change, &md5, nowMs(ctx)) catch return serverError(ctx, req);
     if (!found) return noDigest(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
+}
+
+/// DELETE /api/controlplane/digests/:id: to the bin. The tablet deletes its
+/// copy at its next sync.
+pub fn delete(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    if (!ctx.config.digest_sync) return off(ctx, req);
+    const id = reply.pathId(params) orelse return noDigest(ctx, req);
+    const found = digest.deleteFromWeb(ctx.db, ctx.caller.?.user_id, id, nowMs(ctx)) catch return serverError(ctx, req);
+    if (!found) return noDigest(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
+}
+
+/// POST /api/controlplane/digests/categories {name}: a new category, which
+/// the tablet adds at its next sync.
+pub fn createCategory(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    if (!ctx.config.digest_sync) return off(ctx, req);
+    var parsed = json.readBody(NameReq, ctx.gpa, req) catch return badRequest(ctx, req);
+    defer parsed.deinit();
+    const user_id = ctx.caller.?.user_id;
+    const name = cleanName(parsed.value.name) orelse return badName(ctx, req);
+    const uid = randomHex(ctx);
+    const md5 = randomHex(ctx);
+    switch (digest.createCategory(ctx.db, user_id, &uid, name, &md5, nowMs(ctx)) catch return serverError(ctx, req)) {
+        .done => {},
+        .name_taken => return nameTaken(ctx, req),
+    }
+    try json.respond(ctx.gpa, req, .ok, CategoryCreatedVO{ .uid = &uid, .name = name }, null);
+}
+
+/// PUT /api/controlplane/digests/categories/:uid {name}
+pub fn renameCategory(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    if (!ctx.config.digest_sync) return off(ctx, req);
+    const uid = params.get("uid") orelse return noCategory(ctx, req);
+    var parsed = json.readBody(NameReq, ctx.gpa, req) catch return badRequest(ctx, req);
+    defer parsed.deinit();
+    const user_id = ctx.caller.?.user_id;
+    const name = cleanName(parsed.value.name) orelse return badName(ctx, req);
+    const md5 = randomHex(ctx);
+    switch (digest.renameCategory(ctx.db, user_id, uid, name, &md5, nowMs(ctx)) catch return serverError(ctx, req)) {
+        .done => {},
+        .name_taken => return nameTaken(ctx, req),
+        .not_found => return noCategory(ctx, req),
+    }
+    try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
+}
+
+/// DELETE /api/controlplane/digests/categories/:uid: the category and its
+/// digests, which go to the bin, as the tablet's own Delete does.
+pub fn deleteCategory(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    if (!ctx.config.digest_sync) return off(ctx, req);
+    const uid = params.get("uid") orelse return noCategory(ctx, req);
+    const n = (digest.deleteGroup(ctx.db, ctx.caller.?.user_id, .{ .uid = uid }, .web, nowMs(ctx)) catch return serverError(ctx, req)) orelse return noCategory(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, CategoryDeletedVO{ .digests = n }, null);
+}
+
+/// GET /api/controlplane/digests/bin: the deleted digests, the latest first.
+pub fn bin(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    _ = params;
+    if (!ctx.config.digest_sync) return json.respond(ctx.gpa, req, .ok, BinVO{ .enabled = false }, null);
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const user_id = ctx.caller.?.user_id;
+    const rows = digest.binned(ctx.db, a, user_id) catch return serverError(ctx, req);
+    const retention_days = controlplane.ControlPlaneService.init(ctx.files).binRetentionDays() catch return serverError(ctx, req);
+    const out = try a.alloc(BinDigestVO, rows.len);
+    for (rows, out) |r, *o| o.* = .{
+        .id = r.digest.id,
+        .text = r.digest.content orelse "",
+        .categoryUid = r.digest.parent_uid,
+        .categoryName = r.category_name,
+        .deletedAt = r.deleted_at,
+        .back = r.back,
+    };
+    try json.respond(ctx.gpa, req, .ok, BinVO{ .enabled = true, .digests = out, .retentionDays = retention_days }, null);
+}
+
+/// POST /api/controlplane/digests/bin/:id/restore: back where it was, its
+/// category too when that was deleted; the tablet fetches it at its next sync.
+pub fn restore(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    if (!ctx.config.digest_sync) return off(ctx, req);
+    const id = reply.pathId(params) orelse return notInBin(ctx, req);
+    var arena = std.heap.ArenaAllocator.init(ctx.gpa);
+    defer arena.deinit();
+    const md5 = randomHex(ctx);
+    switch (digest.restoreDigest(ctx.db, arena.allocator(), ctx.caller.?.user_id, id, &md5, nowMs(ctx)) catch return serverError(ctx, req)) {
+        .restored => try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null),
+        .not_in_bin => return notInBin(ctx, req),
+        .back_already => return backAlready(ctx, req),
+    }
+}
+
+/// DELETE /api/controlplane/digests/bin/:id: gone for good, its handwritten
+/// note's blob released with it.
+pub fn purge(ctx: *Context, req: *Request, params: Params) anyerror!void {
+    if (!ctx.config.digest_sync) return off(ctx, req);
+    const id = reply.pathId(params) orelse return notInBin(ctx, req);
+    if (!(digest_purge.purgeOne(ctx.db, ctx.files.*, ctx.caller.?.user_id, id) catch return serverError(ctx, req))) return notInBin(ctx, req);
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
 
@@ -194,6 +325,18 @@ fn noDigest(ctx: *Context, req: *Request) anyerror!void {
 fn noCategory(ctx: *Context, req: *Request) anyerror!void {
     return fail(ctx, req, .not_found, "NO_SUCH_CATEGORY", "there is no such category");
 }
+fn notInBin(ctx: *Context, req: *Request) anyerror!void {
+    return fail(ctx, req, .not_found, "NOT_IN_BIN", "there is no such digest in the bin");
+}
+fn backAlready(ctx: *Context, req: *Request) anyerror!void {
+    return fail(ctx, req, .conflict, "BACK_ALREADY", "the tablet brought this digest back already");
+}
+fn badName(ctx: *Context, req: *Request) anyerror!void {
+    return fail(ctx, req, .bad_request, "BAD_NAME", "a category name holds 1 to 150 characters, does not start with a dot, and has no control character and none of / < > * ? | \\ : \"");
+}
+fn nameTaken(ctx: *Context, req: *Request) anyerror!void {
+    return fail(ctx, req, .conflict, "NAME_TAKEN", "a category with that name exists");
+}
 fn badComment(ctx: *Context, req: *Request) anyerror!void {
     return fail(ctx, req, .bad_request, "BAD_COMMENT", "a comment holds at most 2000 characters of text");
 }
@@ -217,6 +360,27 @@ fn cleanComment(v: []const u8) ?[]const u8 {
     const t = trimmed(v);
     const n = std.unicode.utf8CountCodepoints(t) catch return null;
     return if (n > max_comment_chars) null else t;
+}
+
+/// A category name as the app takes one (`CreateKnowledgeBaseDialog`):
+/// trimmed, 1 to 150 characters, not starting with a dot, and none of the
+/// characters a file name may not hold. Nor a control character, which the
+/// tablet's keyboard cannot type and a one-line name cannot show. Null when
+/// it is not one.
+fn cleanName(v: []const u8) ?[]const u8 {
+    const t = trimmed(v);
+    const n = std.unicode.utf8CountCodepoints(t) catch return null;
+    if (n == 0 or n > max_name_chars or t[0] == '.') return null;
+    if (std.mem.indexOfAny(u8, t, "/<>*?|\\:\"") != null) return null;
+    for (t) |c| if (c < 0x20 or c == 0x7f) return null;
+    return t;
+}
+
+/// 32 random hex digits: a new uid, or an md5 the tablet has not seen.
+fn randomHex(ctx: *Context) [32]u8 {
+    var raw: [16]u8 = undefined;
+    ctx.io.random(&raw);
+    return std.fmt.bytesToHex(raw, .lower);
 }
 
 fn nowMs(ctx: *Context) i64 {

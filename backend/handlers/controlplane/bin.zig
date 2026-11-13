@@ -93,14 +93,16 @@ pub fn purge(ctx: *Context, req: *Request, params: Params) anyerror!void {
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
 
-/// DELETE /api/controlplane/bin -> destroy everything in the caller's bin.
+/// DELETE /api/controlplane/bin[?digests=1] -> destroy everything in the
+/// caller's bin; the digests too only with `digests=1`, sent by a page that
+/// listed them, and only while Digest sync is on (`ControlPlaneService.emptyBin`).
+/// A page that could not list the digests never removes them unseen.
 pub fn emptyBin(ctx: *Context, req: *Request, params: Params) anyerror!void {
     _ = params;
-    const caller = ctx.caller.?; // controlplane scope
-    const files = ctx.files;
-
-    const n = files.emptyBin(caller.user_id) catch return serverError(ctx, req);
-    try json.respond(ctx.gpa, req, .ok, controlplane.EmptiedVO{ .entries = @intCast(n) }, null);
+    const listed = if (reply.queryParam(req.head.target, "digests")) |v| std.mem.eql(u8, v, "1") else false;
+    const svc = controlplane.ControlPlaneService.init(ctx.files);
+    const emptied = svc.emptyBin(ctx.caller.?.user_id, ctx.config.digest_sync and listed) catch return serverError(ctx, req);
+    try json.respond(ctx.gpa, req, .ok, emptied, null);
 }
 
 /// GET /api/controlplane/bin/file/metadata/{id} -> the page list of a trashed item.

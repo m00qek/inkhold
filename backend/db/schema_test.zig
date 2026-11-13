@@ -153,3 +153,13 @@ test "v25: digests keep what the browser changed, unset until it changes somethi
     try db.exec("DELETE FROM users WHERE id = 1;");
     try std.testing.expectEqual(@as(i64, 0), try count(db, "SELECT COUNT(*) FROM digest_sync_state;"));
 }
+
+test "v26: an account's tablet has a time the browser last purged a digest it had not seen go, unset until then" {
+    var db = try sqlite.Db.openMemory();
+    defer db.close();
+    try schema.migrateTo(db, 25);
+    try db.exec("INSERT INTO users(id, email, password_md5, created_at) VALUES(1, 'a@home', '', 0);");
+    try db.exec("INSERT INTO digest_sync_state(user_id, tablet_listed_at) VALUES (1, 5);");
+    try schema.migrateTo(db, 26);
+    try std.testing.expectEqual(@as(i64, 1), try count(db, "SELECT COUNT(*) FROM digest_sync_state WHERE user_id = 1 AND tablet_listed_at = 5 AND web_purged_at IS NULL;"));
+}

@@ -1,4 +1,4 @@
-//! The browser's edit of a digest (its comment, its category) and what a tablet has fetched since.
+//! The browser's edit of a digest (its comment, its category), its delete, and what a tablet has fetched since.
 
 const std = @import("std");
 const sqlite = @import("../../db/sqlite.zig");
@@ -29,6 +29,18 @@ pub fn applyWebEdit(db: sqlite.Db, user_id: u64, id: u64, e: WebEdit, md5_hash: 
     return db.changes() > 0;
 }
 
+/// The browser's delete of a live digest: to the bin, where it can be
+/// restored (`bin.zig`). The tablet deletes its copy at its next sync, unless
+/// it edited it since, and then sends it back as a new digest. False when
+/// there is no such live digest.
+pub fn deleteFromWeb(db: sqlite.Db, user_id: u64, id: u64, now_ms: i64) sqlite.Error!bool {
+    try db.runCached(
+        \\UPDATE digests SET deleted = 1, deleted_at = ?3, updated_at = ?3, web_changed_at = ?3
+        \\WHERE user_id = ?1 AND id = ?2 AND is_group = 0 AND deleted = 0;
+    , &.{ .{ .int = @intCast(user_id) }, .{ .int = @intCast(id) }, .{ .int = now_ms } });
+    return db.changes() > 0;
+}
+
 /// A tablet asked for this account's manifest at `now_ms`: its sync takes
 /// everything the browser changed before that ("Waiting for the tablet" clears).
 pub fn markTabletListed(db: sqlite.Db, user_id: u64, now_ms: i64) sqlite.Error!void {
@@ -43,6 +55,36 @@ pub fn tabletListedAt(db: sqlite.Db, user_id: u64) sqlite.Error!?i64 {
     var r = (try db.rowCached("SELECT tablet_listed_at FROM digest_sync_state WHERE user_id = ?1;", &.{.{ .int = @intCast(user_id) }})) orelse return null;
     defer r.finalize();
     return r.intOpt(0);
+}
+
+/// Whether the browser changed anything at or after `after` (null: ever) that
+/// a tablet has not fetched: a digest or a category, made, edited, deleted or
+/// restored; or a digest deleted here and then removed for good, whose row is
+/// gone but which the tablet still has to drop (`markPurgedUnseen`).
+pub fn webChangedSince(db: sqlite.Db, user_id: u64, after: ?i64) sqlite.Error!bool {
+    var r = (try db.rowCached(
+        \\SELECT 1 FROM digests WHERE user_id = ?1 AND web_changed_at IS NOT NULL AND web_changed_at >= ?2
+        \\UNION ALL
+        \\SELECT 1 FROM digest_sync_state WHERE user_id = ?1 AND web_purged_at IS NOT NULL AND web_purged_at >= ?2
+        \\LIMIT 1;
+    , &.{ .{ .int = @intCast(user_id) }, .{ .int = after orelse std.math.minInt(i64) } })) orelse return false;
+    r.finalize();
+    return true;
+}
+
+/// Before binned digests are removed for good (`id`, or the whole bin when
+/// null, deleted categories with it): if one carries a browser change no
+/// tablet has fetched yet, the account keeps when, so it still waits for the
+/// tablet once the row is gone.
+pub fn markPurgedUnseen(db: sqlite.Db, user_id: u64, id: ?u64, now_ms: i64) sqlite.Error!void {
+    try db.runCached(
+        \\INSERT INTO digest_sync_state (user_id, web_purged_at)
+        \\SELECT ?1, ?3 WHERE EXISTS (
+        \\  SELECT 1 FROM digests d WHERE d.user_id = ?1 AND (d.is_group = 0 OR ?2 IS NULL) AND d.deleted = 1
+        \\    AND (?2 IS NULL OR d.id = ?2) AND d.web_changed_at IS NOT NULL
+        \\    AND d.web_changed_at >= COALESCE((SELECT tablet_listed_at FROM digest_sync_state WHERE user_id = ?1), d.web_changed_at))
+        \\ON CONFLICT (user_id) DO UPDATE SET web_purged_at = excluded.web_purged_at;
+    , &.{ .{ .int = @intCast(user_id) }, .{ .int_opt = if (id) |i| @as(i64, @intCast(i)) else null }, .{ .int = now_ms } });
 }
 
 /// The live digests the browser changed at or after `after` (null: ever), in

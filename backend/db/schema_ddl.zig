@@ -540,6 +540,16 @@ pub const ddl_v25 =
     \\);
 ;
 
+// v26: when the browser last removed a digest for good that a tablet had not
+// yet seen go (deleted here, then purged from the bin before a sync). Its row
+// is gone, so `web_changed_at` can no longer say the tablet still has to drop
+// it; this keeps "Waiting for the tablet" honest until the next listing.
+// The bin's retention does not set it: a tablet away for the whole window
+// is the one case where the flag clears before the tablet has seen the change.
+pub const ddl_v26 =
+    \\ALTER TABLE digest_sync_state ADD COLUMN web_purged_at INTEGER;
+;
+
 // v14: drops the server-side search index. Order matters: the FTS5 table before
 // its content view, `segment_search` (FK to pages) before the page rows.
 pub const ddl_v14 =

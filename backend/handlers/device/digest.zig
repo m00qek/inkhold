@@ -495,7 +495,7 @@ pub fn groupDelete(ctx: *Context, req: *Request, params: Params) anyerror!void {
     var parsed = json.readBody(IdReq, ctx.gpa, req) catch return badBody(ctx, req);
     defer parsed.deinit();
     const id = idOf(parsed.value.id) orelse return badBody(ctx, req);
-    digest.deleteGroup(ctx.db, ctx.caller.?.user_id, id, nowMs(ctx)) catch return serverError(ctx, req);
+    _ = digest.deleteGroup(ctx.db, ctx.caller.?.user_id, .{ .id = id }, .tablet, nowMs(ctx)) catch return serverError(ctx, req);
     try json.respond(ctx.gpa, req, .ok, reply.BaseVO{ .success = true }, null);
 }
 

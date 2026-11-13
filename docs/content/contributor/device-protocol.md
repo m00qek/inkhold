@@ -206,6 +206,23 @@ trusting it.
   the server only moves a digest to one of the account's live categories. The
   tablet asking for the manifest is what clears "Waiting for the tablet", which
   puts that route on the writer.
+- **Categories and the bin, from the browser** (`digest/web_categories.zig`,
+  `digest/bin.zig`; decompiled 1.00.153 `KnowledgeBaseSyncWorker` and
+  `processKnowledgeHash`). A category the tablet lacks it adds with the
+  server's uid and md5; a rename reaches it as an edit does, a new md5 and
+  `max(now, lastModifiedTime + 1)`; a category missing from the list it
+  deletes with its digests, unless it edited one of them since: then it makes
+  the category again under a new uid and sends those digests back. A deleted
+  digest stays in the server's bin. A tablet that edited it before syncing the
+  delete sends it back as a new digest with the same metadata uid, which is
+  what the bin calls "back". A restore keeps the digest's id and md5, so a
+  tablet that synced the delete fetches the id it lacks, handwritten note and
+  all, and one that did not finds nothing changed; a category deleted with it
+  comes back under its own uid, or the digest joins the live category of that
+  name (the app allows no second). Seen on a Nomad (Digest 1.00.153,
+  2026-11-12): a restored digest came back with its handwritten note, and a
+  category made, renamed and deleted in the browser did the same on the
+  tablet. Not yet seen: the tablet re-making a category it edited a digest of.
 - **Retain locally** for digests is the provider URI
   `knowledge/update_all_to_add_state`: every digest and every category but the
   default one goes back to server id 0 and state new, so the next sync uploads

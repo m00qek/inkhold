@@ -253,12 +253,20 @@ pub const routes = [_]router.Route{
     .{ .method = .PUT, .path = "/api/controlplane/todo/tasks/:id", .scopes = &.{.controlplane}, .handler = todoweb.updateTask },
     .{ .method = .DELETE, .path = "/api/controlplane/todo/tasks/:id", .scopes = &.{.controlplane}, .handler = todoweb.deleteTask },
     .{ .method = .PUT, .path = "/api/controlplane/todo/order", .scopes = &.{.controlplane}, .handler = todoweb.reorder },
-    // The signed-in person's digests (`handlers/digest.zig`): read, their comments and categories changed.
+    // The signed-in person's digests (`handlers/digest.zig`): read, changed, deleted to the bin and
+    // restored; their categories made, renamed and deleted. The tablet takes each at its next sync.
     .{ .method = .GET, .path = "/api/controlplane/digests", .scopes = &.{.controlplane}, .handler = digestweb.list, .read_only = true },
     // A note's page: it reads and may backfill `note_index`, so it stays on the writer.
     .{ .method = .GET, .path = "/api/controlplane/digests/:id/note/:md5", .scopes = &.{.controlplane}, .handler = digestweb.note, .manual_db_lock = true },
     // Its typed comment and its category, all the browser changes; the tablet takes them at its next sync.
     .{ .method = .PUT, .path = "/api/controlplane/digests/:id", .scopes = &.{.controlplane}, .handler = digestweb.edit },
+    .{ .method = .DELETE, .path = "/api/controlplane/digests/:id", .scopes = &.{.controlplane}, .handler = digestweb.delete },
+    .{ .method = .POST, .path = "/api/controlplane/digests/categories", .scopes = &.{.controlplane}, .handler = digestweb.createCategory },
+    .{ .method = .PUT, .path = "/api/controlplane/digests/categories/:uid", .scopes = &.{.controlplane}, .handler = digestweb.renameCategory },
+    .{ .method = .DELETE, .path = "/api/controlplane/digests/categories/:uid", .scopes = &.{.controlplane}, .handler = digestweb.deleteCategory },
+    .{ .method = .GET, .path = "/api/controlplane/digests/bin", .scopes = &.{.controlplane}, .handler = digestweb.bin, .read_only = true },
+    .{ .method = .POST, .path = "/api/controlplane/digests/bin/:id/restore", .scopes = &.{.controlplane}, .handler = digestweb.restore },
+    .{ .method = .DELETE, .path = "/api/controlplane/digests/bin/:id", .scopes = &.{.controlplane}, .handler = digestweb.purge },
     .{ .method = .GET, .path = "/api/backup-notice", .scopes = &.{.controlplane}, .handler = backups.notice, .read_only = true },
     .{ .method = .GET, .path = "/api/admin/backups", .scopes = &.{.controlplane}, .require_admin = true, .handler = backups.list },
     // "I back up another way": silences `never`, never `failed`.

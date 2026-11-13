@@ -13,7 +13,8 @@
 //! A category is a row with `is_group`; a digest names its category by the
 //! category's `uid` in `parent_uid`, and '' is the app's built-in
 //! Uncategorized, which is never a row. Deleting a category deletes its
-//! digests, as the official server and the app's guide both do.
+//! digests, as the official server and the app's guide both do. A deleted
+//! digest stays in the bin until the bin's retention purges it.
 
 const std = @import("std");
 const sqlite = @import("../db/sqlite.zig");
@@ -23,6 +24,8 @@ const listings_part = @import("digest/listings.zig");
 const tags_part = @import("digest/tags.zig");
 const web_edit_part = @import("digest/web_edit.zig");
 const retention_part = @import("digest/retention.zig");
+const web_categories_part = @import("digest/web_categories.zig");
+const bin_part = @import("digest/bin.zig");
 
 pub const Error = sqlite.Error || std.mem.Allocator.Error;
 
@@ -107,6 +110,8 @@ pub const liveDigestId = digests_part.liveDigestId;
 pub const addGroup = categories_part.addGroup;
 pub const putGroup = categories_part.putGroup;
 pub const deleteGroup = categories_part.deleteGroup;
+pub const Origin = categories_part.Origin;
+pub const GroupRef = categories_part.GroupRef;
 pub const categoryExists = categories_part.categoryExists;
 
 // ---- listings (`digest/listings.zig`) ----
@@ -127,9 +132,30 @@ pub const tags = tags_part.tags;
 // ---- the browser's edit, and what a tablet has fetched (`digest/web_edit.zig`) ----
 
 pub const applyWebEdit = web_edit_part.applyWebEdit;
+pub const deleteFromWeb = web_edit_part.deleteFromWeb;
+pub const webChangedSince = web_edit_part.webChangedSince;
+pub const markPurgedUnseen = web_edit_part.markPurgedUnseen;
 pub const markTabletListed = web_edit_part.markTabletListed;
 pub const tabletListedAt = web_edit_part.tabletListedAt;
 pub const changedSince = web_edit_part.changedSince;
+
+// ---- the browser's categories (`digest/web_categories.zig`) ----
+
+pub const Created = web_categories_part.Created;
+pub const Renamed = web_categories_part.Renamed;
+pub const createCategory = web_categories_part.createCategory;
+pub const renameCategory = web_categories_part.renameCategory;
+
+// ---- the bin (`digest/bin.zig`) ----
+
+pub const BinRow = bin_part.BinRow;
+pub const Purged = bin_part.Purged;
+pub const Restored = bin_part.Restored;
+pub const binned = bin_part.binned;
+pub const restoreDigest = bin_part.restoreDigest;
+pub const purgeDigest = bin_part.purgeDigest;
+pub const Emptied = bin_part.Emptied;
+pub const emptyDigestBin = bin_part.emptyDigestBin;
 
 // ---- retention (`digest/retention.zig`) ----
 
@@ -141,4 +167,6 @@ test {
     _ = @import("digest/categories_test.zig");
     _ = @import("digest/tags_test.zig");
     _ = @import("digest/web_edit_test.zig");
+    _ = @import("digest/web_categories_test.zig");
+    _ = @import("digest/bin_test.zig");
 }

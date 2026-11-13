@@ -39,7 +39,7 @@ flowchart TD
 | entry | `backend/main.zig`, `cli.zig`, `cli/`, `app.zig`, `routes.zig`, `config.zig` | Process start, the command-line grammar, the composition root, the route table. |
 | transport | `http/` | The accept loop and TLS, the router, the request context, replies, multipart, static files, rate limits, live-channel admission, lock histograms. |
 | handlers | `handlers/` | One function per route, in `auth`, `device/`, `controlplane/` and `admin`: thin HTTP shells that parse, call a service and reply. |
-| services | `services/` | The domain: `files` (the tree, the bin, allotments, history), `auth/`, `controlplane` (the browser's JSON shapes), `sync`, `settings`, `backup`, the indexers (`note_index`, `spd_index`, `txt_index`, `pdf_index`, `pdf_text`, `ink_scan`, `derive_search`), `deferred` (the worker), `pending`, `search/`. |
+| services | `services/` | The domain: `files` (the tree, the bin, allotments, history), `auth/`, `controlplane` (the browser's JSON shapes), `sync`, `settings`, `backup`, the indexers (`note_index`, `spd_index`, `txt_index`, `pdf_index`, `pdf_text`, `ink_scan`, `derive_search`), `deferred` (the worker), `pending`, `search/`, `digest` (the Digest app's digests and categories), `digest_web` (them read for the browser), `digest_purge` (their bin emptied for good). |
 | stores | `store/` | Content-addressed bytes on disk: blobs, thumbnails, derived files. |
 | db | `db/` | The SQLite wrapper, the schema and its migrations, the reader pool. |
 | leaf | `compress/`, `pdf/`, `util/` | Code that depends on nothing else here: the gzip stitcher, the MuPDF shims, small helpers. |
@@ -55,7 +55,9 @@ Each SQL table has one owner, and only the owner writes it. `files` owns
 `user_devices`. `settings` owns `settings`. `note_index` owns `note_index` and
 `note_page_index`, where the other indexers record their per-blob verdict
 through it ([Indexing and derived data](@/contributor/indexing-rules.md)).
-`spd_index` owns `spd_index`. Any module may read a table it does not own,
+`spd_index` owns `spd_index`. `digest` owns `digests`, `digest_tags` and
+`digest_sync_state`; `digest_purge` removes its rows through it and releases
+the handwritten notes' blobs through `files`. Any module may read a table it does not own,
 joining through `files` for ownership ([Storage layout](@/contributor/storage.md)).
 
 ## A module in parts

@@ -76,3 +76,43 @@ test "the browser's move: to a live category or Uncategorized; the comment stays
     d = (try digestsByIds(db, a, 1, &.{id}))[0];
     try testing.expectEqualStrings("", d.parent_uid);
 }
+
+test "a digest deleted here and removed for good before a tablet saw it go still waits for the tablet" {
+    var db = try testDb();
+    defer db.close();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const id = try addDigest(db, 1, nomadDigest(a), 1_000);
+    try markTabletListed(db, 1, 1_500);
+    try testing.expect(try digest.deleteFromWeb(db, 1, id, 2_000));
+    try digest.markPurgedUnseen(db, 1, id, 3_000);
+    _ = try digest.purgeDigest(db, a, 1, id);
+    try testing.expect(try digest.webChangedSince(db, 1, 1_500));
+    // The tablet's next listing takes it: nothing waits.
+    try markTabletListed(db, 1, 4_000);
+    try testing.expect(!try digest.webChangedSince(db, 1, 4_000));
+
+    // One the tablet already saw go (its delete came from the tablet, or a listing came after) sets nothing.
+    const seen = try addDigest(db, 2, nomadDigest(a), 1_000);
+    try testing.expect(try digest.deleteFromWeb(db, 2, seen, 2_000));
+    try markTabletListed(db, 2, 2_500);
+    try digest.markPurgedUnseen(db, 2, seen, 3_000);
+    try testing.expect(!try digest.webChangedSince(db, 2, 2_500));
+}
+
+test "an empty category deleted here and emptied from the bin before a tablet saw it go still waits for the tablet" {
+    var db = try testDb();
+    defer db.close();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    try markTabletListed(db, 1, 1_000);
+    try testing.expectEqual(digest.Created.done, try digest.createCategory(db, 1, "kb-empty", "Empty", "g1", 1_000));
+    try markTabletListed(db, 1, 1_500);
+    try testing.expect((try digest.deleteGroup(db, 1, .{ .uid = "kb-empty" }, .web, 2_000)) != null);
+    try digest.markPurgedUnseen(db, 1, null, 3_000);
+    _ = try digest.emptyDigestBin(db, arena.allocator(), 1);
+    try testing.expect(try digest.webChangedSince(db, 1, 1_500));
+}

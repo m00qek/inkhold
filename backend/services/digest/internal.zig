@@ -13,6 +13,9 @@ pub const columns =
     \\  created_at, updated_at
 ;
 
+/// How many `columns` there are: what a query selects after them starts here.
+pub const column_count = std.mem.count(u8, columns, ",") + 1;
+
 pub fn readAll(arena: std.mem.Allocator, st: sqlite.Stmt) Error![]Digest {
     var out: std.ArrayList(Digest) = .empty;
     while (try st.step()) try out.append(arena, try readRow(arena, st));
@@ -58,4 +61,10 @@ pub fn liveId(db: sqlite.Db, user_id: u64, is_group: bool, uid: []const u8) sqli
 pub fn optText(arena: std.mem.Allocator, st: sqlite.Stmt, col: c_int) Error!?[]const u8 {
     if (st.columnIsNull(col)) return null;
     return try arena.dupe(u8, st.columnText(col));
+}
+
+/// The id of the live category `uid`; '' (Uncategorized) is never a row.
+pub fn categoryId(db: sqlite.Db, user_id: u64, uid: []const u8) sqlite.Error!?u64 {
+    if (uid.len == 0) return null;
+    return liveId(db, user_id, true, uid);
 }
