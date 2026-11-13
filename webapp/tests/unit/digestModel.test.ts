@@ -2,10 +2,8 @@
 
 import { describe, it, expect } from "vitest";
 import type { Digest, DigestSnapshot } from "../../src/api/digestTypes";
-import {
-  categoryName, categoryRows, changedLine, digestPlace, digestsIn, fileDigests, fileName, opensAtPage, parsePlace, placePath, shorten, sourceGroups, sourceLine, viewTitle,
-  type DigestPlace,
-} from "../../src/pages/digest/digestModel";
+import { categoryName, categoryRows, changedLine, digestPlace, digestsIn, fileDigests, fileName, opensAtPage, parsePlace, placePath, sourceGroups, sourceLine, viewTitle, type DigestPlace } from "../../src/pages/digest/digestModel";
+import { shorten } from "../../src/core/passage";
 
 const d = (id: string, p: Partial<Digest> & { path?: string | null; page?: number | null; kind?: Digest["source"]["kind"] } = {}): Digest => ({
   id, text: `text ${id}`, comment: null, categoryUid: "", author: null, createdAt: Number(id), modifiedAt: Number(id), note: null, waiting: false,
@@ -23,13 +21,14 @@ const snap = (digests: Digest[]): DigestSnapshot => ({
 
 describe("a place in the URL", () => {
   const places: [string, DigestPlace][] = [
-    ["", { view: { kind: "category", uid: null }, digest: null }],
+    ["", { view: { kind: "categories" }, digest: null }],
+    ["all", { view: { kind: "category", uid: null }, digest: null }],
     ["uncategorized", { view: { kind: "category", uid: "" }, digest: null }],
     ["category/kb-phon", { view: { kind: "category", uid: "kb-phon" }, digest: null }],
-    ["sources", { view: { kind: "source", key: null }, digest: null }],
+    ["sources", { view: { kind: "sources" }, digest: null }],
     ["sources/MyStyle%2FFran%C3%A7ais%2Fa%20b.pdf", { view: { kind: "source", key: "MyStyle/Français/a b.pdf" }, digest: null }],
     ["sources/manual", { view: { kind: "source", key: "manual" }, digest: null }],
-    ["d/12", { view: { kind: "category", uid: null }, digest: "12" }],
+    ["all/d/12", { view: { kind: "category", uid: null }, digest: "12" }],
     ["category/kb-phon/d/12", { view: { kind: "category", uid: "kb-phon" }, digest: "12" }],
     ["sources/MyStyle%2Fa.pdf/d/3", { view: { kind: "source", key: "MyStyle/a.pdf" }, digest: "3" }],
   ];
@@ -41,11 +40,18 @@ describe("a place in the URL", () => {
     }
   });
 
-  it("reads anything else as All, keeping a digest it names", () => {
-    expect(parsePlace("nonsense")).toEqual({ view: { kind: "category", uid: null }, digest: null });
-    expect(parsePlace("category")).toEqual({ view: { kind: "category", uid: null }, digest: null });
-    expect(parsePlace("category/a/b/d/4")).toEqual({ view: { kind: "category", uid: null }, digest: "4" });
+  it("reads anything else as the categories' overview, where no digest opens", () => {
+    const overview = { view: { kind: "categories" }, digest: null };
+    expect(parsePlace("nonsense")).toEqual(overview);
+    expect(parsePlace("category")).toEqual(overview);
+    expect(parsePlace("category/a/b/d/4")).toEqual(overview);
+    expect(parsePlace("sources/d/4")).toEqual({ view: { kind: "sources" }, digest: null });
     expect(parsePlace("sources/%E0%A4%A")).toEqual({ view: { kind: "source", key: "%E0%A4%A" }, digest: null });
+  });
+
+  it("reads a bare d/<id>, the page's links before the overviews, as the digest open in All", () => {
+    expect(parsePlace("d/12")).toEqual({ view: { kind: "category", uid: null }, digest: "12" });
+    expect(placePath({ view: { kind: "categories" }, digest: "12" })).toBe("");
   });
 });
 
@@ -93,12 +99,15 @@ describe("sources", () => {
 
   it("a document's digests in page order, unknown pages last, ties in the order made", () => {
     expect(digestsIn(s, { kind: "source", key: "Document/b.pdf" }).map((x) => x.id)).toEqual(["4", "7", "1", "6"]);
-    expect(digestsIn(s, { kind: "source", key: null }).map((x) => x.id)).toEqual(["5", "4", "7", "1", "6", "2", "3"]);
+    // An overview lists cards, not digests.
+    expect(digestsIn(s, { kind: "sources" })).toEqual([]);
+    expect(sourceGroups(s).flatMap((g) => g.digests).map((x) => x.id)).toEqual(["5", "4", "7", "1", "6", "2", "3"]);
   });
 
   it("names a view, or nothing for one that is gone", () => {
     expect(viewTitle(s, { kind: "source", key: "Note/n.note" })).toBe("n");
-    expect(viewTitle(s, { kind: "source", key: null })).toBe("Sources");
+    expect(viewTitle(s, { kind: "sources" })).toBe("Sources");
+    expect(viewTitle(s, { kind: "categories" })).toBe("Categories");
     expect(viewTitle(s, { kind: "category", uid: "kb-phon" })).toBe("Phonétique");
     expect(viewTitle(s, { kind: "source", key: "Document/gone.pdf" })).toBeNull();
     expect(viewTitle(s, { kind: "category", uid: "kb-gone" })).toBeNull();

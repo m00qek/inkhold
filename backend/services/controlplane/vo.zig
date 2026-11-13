@@ -177,7 +177,12 @@ pub const TrashedVO = struct {
 };
 
 /// What `emptyBin` destroyed.
-pub const EmptiedVO = struct { success: bool = true, entries: i64 };
+pub const EmptiedVO = struct {
+    success: bool = true,
+    entries: i64,
+    /// Digests, emptied with the files while Digest sync is on.
+    digests: i64 = 0,
+};
 
 /// One version in a file's history. `md5` keys the thumbnail and per-version
 /// routes; `createdAt` is epoch ms; `current` marks the live content.

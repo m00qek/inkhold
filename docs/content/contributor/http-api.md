@@ -9,7 +9,7 @@ extra:
 
 # HTTP API
 
-Every route Inkhold serves, 127 of them, in the order of the route table.
+Every route Inkhold serves, 134 of them, in the order of the route table.
 **Who** is the caller's scope: `public` needs no session, `device` is a
 tablet, `controlplane` the browser app, `pending` a first sign-in that
 must still change its password. A caller outside a route's scopes gets 403.
@@ -206,6 +206,13 @@ The device routes' behaviour is in [Device protocol](@/contributor/device-protoc
 | GET | `/api/controlplane/digests` | controlplane | `digestweb.list` | read-only |
 | GET | `/api/controlplane/digests/:id/note/:md5` | controlplane | `digestweb.note` | streams |
 | PUT | `/api/controlplane/digests/:id` | controlplane | `digestweb.edit` |  |
+| DELETE | `/api/controlplane/digests/:id` | controlplane | `digestweb.delete` |  |
+| POST | `/api/controlplane/digests/categories` | controlplane | `digestweb.createCategory` |  |
+| PUT | `/api/controlplane/digests/categories/:uid` | controlplane | `digestweb.renameCategory` |  |
+| DELETE | `/api/controlplane/digests/categories/:uid` | controlplane | `digestweb.deleteCategory` |  |
+| GET | `/api/controlplane/digests/bin` | controlplane | `digestweb.bin` | read-only |
+| POST | `/api/controlplane/digests/bin/:id/restore` | controlplane | `digestweb.restore` |  |
+| DELETE | `/api/controlplane/digests/bin/:id` | controlplane | `digestweb.purge` |  |
 | GET | `/api/backup-notice` | controlplane | `backups.notice` | read-only |
 | GET | `/api/admin/backups` | controlplane | `backups.list` | elevated admin |
 | PUT | `/api/admin/backups/dismissed` | controlplane | `backups.setDismissed` | elevated admin |

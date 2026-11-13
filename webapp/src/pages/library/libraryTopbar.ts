@@ -39,10 +39,15 @@ export interface Topbar {
   todoListBtn: HTMLButtonElement;
   todoDownloadBtn: HTMLButtonElement;
   todoNewListBtn: HTMLButtonElement;
+  /** Digest's: the category on screen's menu, and New category. */
+  digestCategoryBtn: HTMLButtonElement;
+  digestNewCategoryBtn: HTMLButtonElement;
   /** Phone only (`libraryPhone.ts`): opens the places drawer. */
   menuBtn: HTMLButtonElement;
   /** Phone only: one level up, in ☰'s place, on a place below another. */
   backLink: HTMLAnchorElement;
+  /** Wider: one level up inside a tablet app (`libraryApps.ts`), named; the phone has `backLink`. */
+  appBack: HTMLAnchorElement;
   /** Phone only: opens the bar's tools (sort, view, upload, To-Do's); shown
    *  only while there is one (`libraryPhone.ts`). */
   moreBtn: HTMLButtonElement;
@@ -177,6 +182,11 @@ export function createTopbar(deps: TopbarDeps): Topbar {
   todoDownloadBtn.setAttribute("aria-haspopup", "menu");
   const todoNewListBtn = topbarAction({ id: "todo-new-list", label: "New list", icon: "plus", ariaLabel: "New list", iconOnly: true });
 
+  // Digest's, To-Do's twins (`pages/digest/digestPage.ts`).
+  const digestCategoryBtn = topbarAction({ id: "digest-category-options", label: "Category options", icon: "more", ariaLabel: "Category options", iconOnly: true });
+  digestCategoryBtn.setAttribute("aria-haspopup", "menu");
+  const digestNewCategoryBtn = topbarAction({ id: "digest-new-category", label: "New category", icon: "plus", ariaLabel: "New category", iconOnly: true });
+
   // The discoverable, keyboard- and touch-reachable twin of drag and drop; both
   // hand files to the same `uploadZone.add`. Shown only over a folder listing.
   const uploadBtn = topbarAction({
@@ -214,16 +224,19 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     class: "topbar__phone topbar__back",
     href: "#/",
     hidden: true,
-    html: '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>',
+    html: svg(ICONS.chevronLeft, 1.8),
   }) as HTMLAnchorElement;
   const moreBtn = phoneButton("topbar__more", "More", "more", "tools");
+  // The viewers' ‹, before the place's name: To-Do's and Digest's way up.
+  const appBack = el("a", { class: "topbar__app-back", href: "#/", hidden: true }) as HTMLAnchorElement;
 
-  const tools = el("div", { class: "tools", id: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, todoStatus, todoListBtn, todoDownloadBtn, todoNewListBtn, lockAdminBtn);
+  const tools = el("div", { class: "tools", id: "tools" }, sortWrap, segmented, toolsSep, uploadBtn, emptyBinBtn, todoStatus, todoListBtn, todoDownloadBtn, todoNewListBtn, digestCategoryBtn, digestNewCategoryBtn, lockAdminBtn);
   const topbar = el(
     "div",
     { class: "topbar" },
     menuBtn,
     backLink,
+    appBack,
     crumbs,
     el(
       "div",
@@ -252,8 +265,11 @@ export function createTopbar(deps: TopbarDeps): Topbar {
     todoListBtn,
     todoDownloadBtn,
     todoNewListBtn,
+    digestCategoryBtn,
+    digestNewCategoryBtn,
     menuBtn,
     backLink,
+    appBack,
     moreBtn,
     tools,
     setView(view) {

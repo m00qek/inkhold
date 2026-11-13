@@ -19,6 +19,7 @@
 import { el } from "./dom";
 import { ICONS, svg } from "./icons";
 import { clearPopover, getPortalRoot, openPopover, placePop, type OpenPopover } from "./popover";
+import type { MenuItemSpec } from "./menu";
 
 export type BarRow =
   | { kind: "section"; title: string }
@@ -329,4 +330,21 @@ export function openBarMenu(trigger: HTMLElement, rows: BarRow[]): void {
 /** Whether the menu from `trigger` is open (a second press closes it). */
 export function barMenuOpenFrom(trigger: HTMLElement): boolean {
   return trigger.getAttribute("aria-expanded") === "true";
+}
+
+/**
+ * A card's ⋯ items as a bar's rows, under `title`: one list of a place's
+ * actions serves its card (`createMenu`) and the top bar's ⋯ alike.
+ */
+export function rowsFromItems(title: string, items: readonly MenuItemSpec[]): BarRow[] {
+  return [
+    { kind: "section", title },
+    ...items.map((i): BarRow => ({ kind: "item", label: i.label, icon: i.icon ? ICONS[i.icon] : undefined, danger: i.danger, onSelect: i.onSelect })),
+  ];
+}
+
+/** A bar's ⋯: opens `rows` from `trigger`, and closes them on a second press. */
+export function toggleBarMenu(trigger: HTMLElement, rows: BarRow[]): void {
+  if (barMenuOpenFrom(trigger)) closeOpen();
+  else openBarMenu(trigger, rows);
 }

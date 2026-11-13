@@ -80,111 +80,10 @@
   display: none;
 }
 
-/* ---- the overview: a card per list ---- */
-.todo-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: var(--sp-4);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.todo-cards > li {
-  display: flex;
-}
-/* A card is a box whose name's link is stretched over it (below); the ⋯ sits
-   above that link, so a button never nests inside a link. */
-.todo-card {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  width: 100%;
-  min-height: 150px;
-  padding: var(--sp-4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-card);
-  background: var(--sheet);
-  color: var(--ink);
-  cursor: pointer;
-  transition: border-color 0.12s ease;
-}
-.todo-card:hover {
-  border-color: var(--ink-soft);
-}
-/* The name's link covers the card, so the whole card opens the list. */
-.todo-card__link {
-  color: inherit;
-  text-decoration: none;
-}
-.todo-card__link::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-}
-.todo-card:has(.todo-card__link:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.todo-card__link:focus-visible {
-  outline: none;
-}
-/* Above the stretched link, top-right like a note card's. */
-.todo-card .card__menu {
-  position: absolute;
-  top: 10px;
-  inset-inline-end: 10px;
-  z-index: var(--z-raised);
-}
-/* Clear of the ⋯ in the corner. */
-.todo-card__head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding-inline-end: calc(var(--control-h-sm) + 8px);
-  color: var(--ink-soft);
-}
-.todo-card__name {
-  font: 500 var(--fs-title) / 1.3 var(--font-display);
-  color: var(--ink);
-  overflow-wrap: anywhere;
-}
-.todo-card__counts {
-  display: flex;
-  gap: var(--sp-3);
-  font: var(--fs-caption) var(--font-mono);
-  color: var(--ink-soft);
-}
-.todo-card__counts .is-overdue {
-  color: var(--margin-ink);
-}
-.todo-card__peek {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: var(--sp-2) 0 0;
-  padding: var(--sp-3) 0 0;
-  border-top: 1px solid var(--row-rule);
-  list-style: none;
-  font-size: var(--fs-body);
-  color: var(--ink-soft);
-}
-.todo-card__peek li {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-.todo-card__task {
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* ---- the overview's cards (styles/25-app-cards.css), To-Do's own touches ---- */
 /* Each task with the empty mark it has on its list: a small ring, the row's
    check in miniature. Not on "and N more". */
-.todo-card__peek li:not(.todo-card__more)::before {
+.todo-card .app-card__peek li:not(.app-card__more)::before {
   content: "";
   display: inline-block;
   width: 9px;
@@ -195,18 +94,14 @@
   vertical-align: 0;
 }
 /* "and N more": no ring, but in line with the tasks' text. */
-.todo-card__peek .todo-card__more {
+.todo-card .app-card__more {
   padding-inline-start: 17px;
-  font: var(--fs-caption) var(--font-mono);
 }
-/* The Inbox's ⋯: there like every card's, but nothing to offer. */
-.todo-card .card__more:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-.todo-card .card__more:disabled:hover {
-  color: var(--ink-soft);
-  border-color: var(--line);
+.todo-card__task {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---- to-dos in the library's search results ---- */
@@ -600,13 +495,13 @@
   padding: 0;
   border: 0;
 }
-.todo-card__peek .todo-chip {
+.todo-card .app-card__peek .todo-chip {
   height: 22px;
   min-width: 0;
   padding: 0 6px;
   margin-inline-start: auto;
 }
-.todo-card__peek .todo-ink {
+.todo-card .app-card__peek .todo-ink {
   --ink-h: 14px;
   --ink-max: 82px;
 }
@@ -706,11 +601,6 @@
   margin: 4px 10px 8px;
 }
 
-/* The rename-style name field inside the shared confirm dialog. */
-.todo-dialog .rename__field {
-  width: 100%;
-  margin-top: var(--sp-3);
-}
 
 @media (max-width: 620px) {
   .todo {
@@ -723,8 +613,7 @@
 @media (prefers-reduced-motion: reduce) {
   .todo-row.is-striking .todo-strike,
   .todo-group__chev svg,
-  .todo-grip,
-  .todo-card {
+  .todo-grip {
     transition: none;
   }
 }

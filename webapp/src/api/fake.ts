@@ -89,6 +89,29 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
     return v;
   };
 
+  // Separate modules: a fixture cannot be declared inside the object literal.
+  const binFake = createBinFake(
+    delay,
+    latency,
+    (id) => {
+      const n = ALL_NOTES[id];
+      return n
+        ? {
+            name: n.name,
+            fileType: n.fileType,
+            size: fakeSize(id, n.pageCount),
+            pageCount: n.pageCount,
+            // Recognition and shape survive trashing (blob-keyed index).
+            recognized: n.hasRecognizedText,
+            thumbAspect: n.thumbAspect,
+          }
+        : null;
+    },
+    // Trashing does not rewrite a blob, so the same md5 as the live listing.
+    fakeFileHash,
+  );
+  const { emptyDigestBin, ...digestApi } = fakeDigestMethods(latency);
+
   return {
     async listFolder(parentId: Id | null): Promise<Listing> {
       await delay(latency);
@@ -373,34 +396,16 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     // --- WRITES (append-only, at your own marker — see `types.ts`) ---
     // --- BIN WRITES ---
-    // Separate module: a fixture cannot be declared inside this object literal.
-    ...createBinFake(
-      delay,
-      latency,
-      (id) => {
-        const n = ALL_NOTES[id];
-        return n
-          ? {
-              name: n.name,
-              fileType: n.fileType,
-              size: fakeSize(id, n.pageCount),
-              pageCount: n.pageCount,
-              // Recognition and shape survive trashing (blob-keyed index).
-              recognized: n.hasRecognizedText,
-              thumbAspect: n.thumbAspect,
-            }
-          : null;
-      },
-      // Trashing does not rewrite a blob, so the same md5 as the live listing.
-      fakeFileHash,
-    ),
+    ...binFake,
+    // The bin holds digests too: emptying it takes both.
+    emptyBin: async (digests) => (await binFake.emptyBin()) + (digests ? emptyDigestBin() : 0),
     // --- ADMIN WRITES ---
     ...fakeAdminMethods(latency),
 
     // --- account (self-service) ---
     ...fakeAccountMethods(latency),
     ...fakeTodoMethods(latency),
-    ...fakeDigestMethods(latency),
+    ...digestApi,
 
     // Every `.note` is written on every page; a recognized one has text from
     // its first recognized page on, an unrecognized one has recognition off.

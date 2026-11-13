@@ -2,7 +2,7 @@
 // optionals omitted, ids as numbers.
 
 import { describe, it, expect } from "vitest";
-import { digestsOf } from "../../src/api/httpDigest";
+import { digestBinOf, digestsOf } from "../../src/api/httpDigest";
 
 /** The Nomad's two digests on the hub (2026-11-10), as `handlers/digest.zig` lists them. */
 const body = {
@@ -78,5 +78,37 @@ describe("the digests' wire", () => {
       { kind: "other", path: "Document/a.epub", fileId: null, page: null, changed: false },
       { kind: "manual", path: null, fileId: null, page: null, changed: false },
     ]);
+  });
+});
+
+describe("the digests' bin on the wire", () => {
+  it("reads every field, absent optionals as null, rows without an id dropped", () => {
+    const bin = digestBinOf({
+      enabled: true,
+      retentionDays: 30,
+      digests: [
+        {
+          id: 15, text: "Digest one for Inkhold, edited", categoryUid: "", deletedAt: 1794341446443, back: false,
+        },
+        {
+          id: 16, text: "Digest two, to delete", categoryUid: "b321", categoryName: "Inkhold test renamed", deletedAt: 1794340583706, back: true,
+        },
+        { text: "no id" },
+      ],
+    });
+    expect(bin.enabled).toBe(true);
+    expect(bin.retentionDays).toBe(30);
+    expect(bin.digests).toEqual([
+      {
+        id: "15", text: "Digest one for Inkhold, edited", categoryUid: "", categoryName: null, deletedAt: 1794341446443, back: false,
+      },
+      {
+        id: "16", text: "Digest two, to delete", categoryUid: "b321", categoryName: "Inkhold test renamed", deletedAt: 1794340583706, back: true,
+      },
+    ]);
+  });
+
+  it("off: enabled false and nothing in it", () => {
+    expect(digestBinOf({ success: true, enabled: false } as never)).toEqual({ enabled: false, retentionDays: 0, digests: [] });
   });
 });

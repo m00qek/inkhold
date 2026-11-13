@@ -196,6 +196,15 @@
   display: block;
   stroke-width: 1.7;
 }
+/* A digest: no page to show, Digest's bookmark on plain stock, as a folder has its glyph. */
+.bin__thumb.is-digest {
+  background-image: none;
+}
+.bin__thumb.is-digest svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
 
 .bin__body {
   flex: 1;

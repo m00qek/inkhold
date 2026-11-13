@@ -1,16 +1,13 @@
-// To-Do's popovers and dialogs: the Move to… and date menus a task's ⋯ leads
-// to, the list menu, and the name and delete-list dialogs. Built on the app's
-// shared pieces (`.menu__*` popovers, the `confirm` dialog, the rename field);
-// what each choice does is the caller's.
+// To-Do's popovers: the Move to… and date menus a task's ⋯ leads to. Built on
+// the app's shared `.menu__*` popovers; what each choice does is the caller's.
+// The list's name and delete dialogs are the apps' shared ones (`ui/nameDialog.ts`).
 
 import { el } from "../../ui/dom";
 import { ICONS, svg, type IconName } from "../../ui/icons";
-import { openDialog } from "../../ui/confirm";
 import { clearPopover, getPortalRoot, openPopover, placePop, type OpenPopover } from "../../ui/popover";
 import { dueFromInput, inputFromDue } from "./todoModel";
 
 const DAY_MS = 86_400_000;
-const DIALOG = { dialog: "confirm todo-dialog", body: "confirm__body", actions: "confirm__actions", cancel: "btn", go: "btn" };
 
 export interface TodoMenus {
   /** A popover under `trigger`; a menu reached from a task's ⋯ leads with Back to it. */
@@ -24,10 +21,6 @@ export interface TodoMenus {
   sep(): HTMLElement;
   /** Today, Tomorrow, a picked day, and "No date" when there is one. */
   dateMenu(trigger: HTMLElement, current: number | null, set: (due: number | null) => void): void;
-  /** A name, or null when cancelled (or unchanged from `initial`). */
-  askName(title: string, goLabel: string, initial: string): Promise<string | null>;
-  /** True when the person confirmed deleting the list and its `tasks` tasks. */
-  confirmDeleteList(name: string, tasks: number): Promise<boolean>;
 }
 
 export function createTodoMenus(): TodoMenus {
@@ -116,46 +109,5 @@ export function createTodoMenus(): TodoMenus {
     ]);
   }
 
-  function askName(title: string, goLabel: string, initial: string): Promise<string | null> {
-    const input = el("input", { class: "rename__field", type: "text", "aria-label": "Name", maxlength: "60", autocomplete: "off", spellcheck: "false", value: initial }) as HTMLInputElement;
-    const { done } = openDialog({
-      host: document.body,
-      classes: DIALOG,
-      goLabel,
-      cancelLabel: "Cancel",
-      labelledBy: "todo-dialog-title",
-      build: (content, { go }) => {
-        content.append(el("h2", { id: "todo-dialog-title", text: title }), input);
-        const check = () => (go.disabled = input.value.trim() === "" || input.value.trim() === initial);
-        input.addEventListener("input", check);
-        check();
-        input.addEventListener("keydown", (e) => {
-          if (e.key !== "Enter") return;
-          e.preventDefault();
-          if (!go.disabled) go.click();
-        });
-      },
-    });
-    // The name is what is being asked for: focus it, not Cancel.
-    input.focus();
-    input.select();
-    return done.then((ok) => (ok && input.value.trim() !== "" ? input.value.trim() : null));
-  }
-
-  function confirmDeleteList(name: string, tasks: number): Promise<boolean> {
-    return openDialog({
-      host: document.body,
-      classes: { ...DIALOG, go: "btn is-danger" },
-      goLabel: "Delete list",
-      cancelLabel: "Cancel",
-      labelledBy: "todo-dialog-title",
-      build: (content) =>
-        content.append(
-          el("h2", { id: "todo-dialog-title", text: tasks ? `Delete "${name}" and its ${tasks} task${tasks === 1 ? "" : "s"}?` : `Delete "${name}"?` }),
-          el("p", { text: tasks ? "They are also removed from the tablet at its next sync. This can't be undone." : "It is also removed from the tablet at its next sync." }),
-        ),
-    }).done;
-  }
-
-  return { pop, close: () => closeOpen(), item, section, fileItem, sep, dateMenu, askName, confirmDeleteList };
+  return { pop, close: () => closeOpen(), item, section, fileItem, sep, dateMenu };
 }

@@ -11,6 +11,7 @@ const sn = @import("supernote");
 const noteindex = @import("note_index.zig");
 const spdindex = @import("spd_index.zig");
 const settingsmod = @import("settings.zig");
+const digest_purge = @import("digest_purge.zig");
 const blobstore = @import("../store/blobs.zig");
 const thumbstore = @import("../store/thumbs.zig");
 const controlplane_meta = @import("controlplane/meta.zig");
@@ -147,10 +148,24 @@ pub const ControlPlaneService = struct {
         return .{
             .entries = out.items,
             .totalBytes = total,
-            // The configured window (admin-settable), not the compiled default.
-            .retentionDays = (try settingsmod.Settings.init(self.files.io, self.files.db).binRetention()).days(),
+            .retentionDays = try self.binRetentionDays(),
             .syncVersion = try self.files.syncVersion(user_id),
         };
+    }
+
+    /// How long the bin keeps what is deleted, in days: the window the
+    /// administrator set, not the compiled default. Files and digests alike.
+    pub fn binRetentionDays(self: ControlPlaneService) !i64 {
+        return (try settingsmod.Settings.init(self.files.io, self.files.db).binRetention()).days();
+    }
+
+    /// `DELETE /api/controlplane/bin`: the person's whole bin, their digests
+    /// too while the server keeps them (`with_digests`). Digests first: a
+    /// failure after them leaves files the person can still see and empty again.
+    pub fn emptyBin(self: ControlPlaneService, user_id: u64, with_digests: bool) !EmptiedVO {
+        const digests: u64 = if (with_digests) try digest_purge.purgeAll(self.files.db, self.files.*, user_id) else 0;
+        const n = try self.files.emptyBin(user_id);
+        return .{ .entries = @intCast(n), .digests = @intCast(digests) };
     }
 
     /// Resolves `GET /note/{id}/page/{n}` into a `PagePlan` for the SNPG page

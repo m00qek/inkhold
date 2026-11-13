@@ -1,9 +1,10 @@
-// The To-Do page's lists: making, renaming and deleting one, and the bar's
-// list menu (⋯ on a list's page) and New list button. A part of the page,
-// built from its context.
+// The To-Do page's lists: making, renaming and deleting one (the apps' shared
+// dialogs, `ui/nameDialog.ts`), and the bar's list menu (⋯ on a list's page)
+// and New list button. A part of the page, built from its context.
 
-import { setMenuRows } from "../../ui/barMenu";
-import { ICONS } from "../../ui/icons";
+import { rowsFromItems, setMenuRows, toggleBarMenu, type BarRow } from "../../ui/barMenu";
+import { listActions } from "./todoView";
+import { askName, confirmDelete } from "../../ui/nameDialog";
 import { DEFAULT_SECTION_TITLE } from "../../ui/menu";
 import { viewPath } from "./todoModel";
 import type { TodoCtx } from "./todoContext";
@@ -17,11 +18,14 @@ export interface TodoLists {
   destroy(): void;
 }
 
+/** The longest list name the field takes, as before the dialogs were shared. */
+const MAX_LIST_TITLE = 60;
+
 export function createTodoLists(ctx: TodoCtx): TodoLists {
-  const { host, menus, st } = ctx;
+  const { host, st } = ctx;
 
   async function newList(then?: (id: string) => Promise<unknown>): Promise<void> {
-    const title = await menus.askName("New list", "Create list", "");
+    const title = await askName({ title: "New list", goLabel: "Create list", initial: "", maxLength: MAX_LIST_TITLE });
     if (!title) return;
     let created = "";
     if (!(await ctx.run("create the list", async () => { created = await host.api.todoCreateList(title); }))) return;
@@ -38,8 +42,8 @@ export function createTodoLists(ctx: TodoCtx): TodoLists {
   function renameList(id = listHere()): void {
     if (!st.snap || id === null) return;
     const current = st.snap.lists.find((l) => l.id === id)?.title ?? "";
-    void menus.askName("Rename list", "Rename", current).then((title) => {
-      if (title && title !== current) void ctx.run("rename the list", () => host.api.todoRenameList(id, title));
+    void askName({ title: "Rename list", goLabel: "Rename", initial: current, maxLength: MAX_LIST_TITLE }).then((title) => {
+      if (title) void ctx.run("rename the list", () => host.api.todoRenameList(id, title));
     });
   }
 
@@ -48,7 +52,11 @@ export function createTodoLists(ctx: TodoCtx): TodoLists {
     const list = st.snap.lists.find((l) => l.id === id);
     if (!list) return;
     const n = st.snap.tasks.filter((t) => t.listId === id).length;
-    void menus.confirmDeleteList(list.title, n).then(async (ok) => {
+    void confirmDelete({
+      title: n ? `Delete "${list.title}" and its ${n} task${n === 1 ? "" : "s"}?` : `Delete "${list.title}"?`,
+      body: n ? "They are also removed from the tablet at its next sync. This can't be undone." : "It is also removed from the tablet at its next sync.",
+      goLabel: "Delete list",
+    }).then(async (ok) => {
       if (!ok) return;
       if (await ctx.run("delete the list", () => host.api.todoDeleteList(id))) {
         ctx.say(`Deleted "${list.title}".`);
@@ -57,26 +65,21 @@ export function createTodoLists(ctx: TodoCtx): TodoLists {
     });
   }
 
+  /** The card's ⋯ menu, header and all, from the bar. */
+  const listRows = (): BarRow[] => {
+    const id = listHere();
+    return id === null ? [] : rowsFromItems(DEFAULT_SECTION_TITLE, listActions(id, { renameList, deleteList }));
+  };
   const onListBtn = (e: MouseEvent): void => {
     e.stopPropagation();
-    if (host.listBtn.getAttribute("aria-expanded") === "true") return menus.close();
-    // The card's ⋯ menu, header and all.
-    menus.pop(host.listBtn, [
-      menus.section(DEFAULT_SECTION_TITLE),
-      menus.item("Rename list", "edit", () => renameList()),
-      menus.item("Delete list", "trash", () => deleteList(), true),
-    ]);
+    toggleBarMenu(host.listBtn, listRows());
   };
   const onNewList = (): void => void newList();
   host.listBtn.addEventListener("click", onListBtn);
   host.newListBtn.addEventListener("click", onNewList);
   // On a phone the bar folds into ⋯ (`ui/barMenu.ts`); the list menu hands
   // it its rows rather than opening a menu inside a menu.
-  setMenuRows(host.listBtn, () => [
-    { kind: "section", title: DEFAULT_SECTION_TITLE },
-    { kind: "item", label: "Rename list", icon: ICONS.edit, onSelect: () => renameList() },
-    { kind: "item", label: "Delete list", icon: ICONS.trash, danger: true, onSelect: () => deleteList() },
-  ]);
+  setMenuRows(host.listBtn, listRows);
 
   return {
     newList,

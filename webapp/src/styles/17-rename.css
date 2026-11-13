@@ -130,3 +130,26 @@
   cursor: not-allowed;
   opacity: 0.5;
 }
+
+/* ---- the apps' name dialog (`ui/nameDialog.ts`): the rename field in the shared confirm ---- */
+.name-dialog .rename__field {
+  width: 100%;
+  margin-top: var(--sp-3);
+}
+/* What is wrong with the name, said while typing; and, when nothing is, a
+   quiet line. Under the dialog, to win over `.confirm p`. */
+.name-dialog .name-dialog__problem,
+.name-dialog .name-dialog__hint {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-caption);
+}
+.name-dialog .name-dialog__problem {
+  color: var(--margin-ink);
+}
+/* Empty while the name is fine: no room taken, still in place to speak. */
+.name-dialog .name-dialog__problem:empty {
+  margin: 0;
+}
+.name-dialog .name-dialog__hint {
+  color: var(--ink-soft);
+}

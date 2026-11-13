@@ -12,6 +12,8 @@ import type {
   PageRef,
   PageText,
 } from "../../src/core/types";
+import type { BinnedDigest, Digest, DigestBin, DigestSnapshot, DigestSource } from "../../src/api/digestTypes";
+import { digestBinOf, digestsOf } from "../../src/api/httpDigest";
 
 // The server writes `tests/fixtures/wire/*.json` through its real serializer (absent
 // optional = absent key). Every wire key must be decided by the client, survive the
@@ -382,5 +384,84 @@ describe("wire contract: PageTextVO", () => {
     serve({});
     const page = { index: 0, textHash: "deadbeef" } as unknown as PageRef;
     expect(await createHttpApi().getPageText("1", page)).toEqual({ text: "", words: [] });
+  });
+});
+
+// --- Digest (`/api/controlplane/digests…`), read by `api/httpDigest.ts` ---
+
+const DIGESTS_KEYS: KeyTable<DigestSnapshot> = {
+  success: null, // every reply's flag; `request` reads it, not the snapshot
+  enabled: "enabled",
+  categories: "categories",
+  digests: "digests",
+  tabletSyncedAt: "tabletSyncedAt",
+  waiting: "waiting",
+};
+
+const DIGESTS_ABSENT: AbsentTable<DigestSnapshot> = {
+  // No tablet has asked yet.
+  tabletSyncedAt: null,
+  waiting: false,
+};
+
+const DIGEST_KEYS: KeyTable<Digest> = {
+  id: "id",
+  text: "text",
+  comment: "comment",
+  categoryUid: "categoryUid",
+  author: "author",
+  createdAt: "createdAt",
+  modifiedAt: "modifiedAt",
+  source: "source",
+  note: "note",
+  waiting: "waiting",
+};
+
+const DIGEST_ABSENT: AbsentTable<Digest> = { comment: null, author: null, note: null, waiting: false };
+
+const SOURCE_KEYS: KeyTable<DigestSource> = { kind: "kind", path: "path", fileId: "fileId", page: "page", changed: "changed" };
+
+const SOURCE_ABSENT: AbsentTable<DigestSource> = { path: null, fileId: null, page: null, changed: false };
+
+const BIN_KEYS: KeyTable<DigestBin> = { success: null, enabled: "enabled", digests: "digests", retentionDays: "retentionDays" };
+
+const BINNED_KEYS: KeyTable<BinnedDigest> = {
+  id: "id",
+  text: "text",
+  categoryUid: "categoryUid",
+  categoryName: "categoryName",
+  deletedAt: "deletedAt",
+  back: "back",
+};
+
+const BINNED_ABSENT: AbsentTable<BinnedDigest> = { categoryName: null, back: false };
+
+const rec = (v: unknown): Record<string, unknown> => v as Record<string, unknown>;
+
+describe("wire contract: Digest", () => {
+  it("digests.json, walked to each digest and its source", () => {
+    const sent = wire("digests.json");
+    const got = digestsOf(sent);
+    checkShape("digests", DIGESTS_KEYS, DIGESTS_ABSENT, sent, rec(got));
+    const rows = sent.digests as Record<string, unknown>[];
+    expect(got.digests).toHaveLength(rows.length);
+    rows.forEach((d, i) => {
+      checkShape(`digests[${i}]`, DIGEST_KEYS, DIGEST_ABSENT, d, rec(got.digests[i]));
+      checkShape(`digests[${i}].source`, SOURCE_KEYS, SOURCE_ABSENT, rec(d.source), rec(got.digests[i]!.source));
+    });
+    // The fixture holds what the client must tell apart: a browser edit waiting, a typed entry with no file.
+    expect(got.waiting).toBe(true);
+    expect(got.digests.map((d) => d.waiting)).toEqual([false, true]);
+    expect(got.digests[1]!.source).toMatchObject({ kind: "manual", path: null, fileId: null });
+  });
+
+  it("digest-bin.json, walked to each binned digest and its source", () => {
+    const sent = wire("digest-bin.json");
+    const got = digestBinOf(sent);
+    checkShape("bin", BIN_KEYS, {}, sent, rec(got));
+    const rows = sent.digests as Record<string, unknown>[];
+    expect(got.digests).toHaveLength(rows.length);
+    rows.forEach((d, i) => checkShape(`bin.digests[${i}]`, BINNED_KEYS, BINNED_ABSENT, d, rec(got.digests[i])));
+    expect(got.digests[0]).toMatchObject({ categoryName: "Phonétique", back: false });
   });
 });

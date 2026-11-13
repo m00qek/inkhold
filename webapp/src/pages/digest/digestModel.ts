@@ -2,15 +2,21 @@
 // how that is written in the URL, and the digests' grouping and order, the
 // tablet's two ways of browsing them. By category, newest first, as the
 // tablet lists them. By source, each document's passages in page order, so a
-// document's digests read as notes on it, top to bottom. No DOM here.
+// document's digests read as notes on it, top to bottom. Each way has an
+// overview, a card per category or per source, as To-Do's lists have. No DOM here.
 
 import type { Digest, DigestSnapshot, DigestSourceKind } from "../../api/digestTypes";
 
 /**
- * A category (`uid` "" is Uncategorized, null is All), or a source (`key`
- * from {@link sourceKey}, null is every source).
+ * The categories' overview; a category's digests (`uid` "" is Uncategorized,
+ * null is All); the sources' overview; or a source's digests (`key` from
+ * {@link sourceKey}).
  */
-export type DigestView = { kind: "category"; uid: string | null } | { kind: "source"; key: string | null };
+export type DigestView =
+  | { kind: "categories" }
+  | { kind: "category"; uid: string | null }
+  | { kind: "sources" }
+  | { kind: "source"; key: string };
 
 /** A view, and the digest open in it; null: none. */
 export interface DigestPlace {
@@ -18,12 +24,20 @@ export interface DigestPlace {
   digest: string | null;
 }
 
-const ALL: DigestView = { kind: "category", uid: null };
+const OVERVIEW: DigestView = { kind: "categories" };
+export const ALL: DigestView = { kind: "category", uid: null };
+
+/** Whether a view lists digests, which one of them may be open beside; an overview lists cards. */
+export function listsDigests(v: DigestView): v is Extract<DigestView, { kind: "category" | "source" }> {
+  return v.kind === "category" || v.kind === "source";
+}
 
 /**
- * The place a `#/digest/…` path names: `""` (All), `uncategorized`,
- * `category/<uid>`, `sources`, `sources/<key>`, each maybe followed by
- * `d/<id>`. Anything else is All.
+ * The place a `#/digest/…` path names: `""` (the categories' overview), `all`,
+ * `uncategorized`, `category/<uid>`, `sources` (the sources' overview),
+ * `sources/<key>`; a list's maybe followed by `d/<id>`. A bare `d/<id>` (the
+ * page's links before the overviews) opens in All. Anything else is the
+ * overview.
  */
 export function parsePlace(path: string): DigestPlace {
   const parts = path.split("/").filter((p) => p !== "").map(decode);
@@ -33,32 +47,34 @@ export function parsePlace(path: string): DigestPlace {
     parts.length -= 2;
   }
   const [head, arg, ...rest] = parts;
-  if (rest.length > 0) return { view: ALL, digest };
-  if (head === "uncategorized" && arg === undefined) return { view: { kind: "category", uid: "" }, digest };
-  if (head === "category" && arg) return { view: { kind: "category", uid: arg }, digest };
-  if (head === "sources") return { view: { kind: "source", key: arg ?? null }, digest };
-  return { view: ALL, digest };
+  const view: DigestView | null =
+    rest.length > 0 ? null
+    : head === undefined ? (digest === null ? OVERVIEW : ALL)
+    : head === "all" && arg === undefined ? ALL
+    : head === "uncategorized" && arg === undefined ? { kind: "category", uid: "" }
+    : head === "category" && arg ? { kind: "category", uid: arg }
+    : head === "sources" ? (arg === undefined ? { kind: "sources" } : { kind: "source", key: arg })
+    : null;
+  if (view === null) return { view: OVERVIEW, digest: null };
+  return { view, digest: listsDigests(view) ? digest : null };
 }
 
 /** The `#/digest/…` path of a place; the inverse of {@link parsePlace}. */
 export function placePath(p: DigestPlace): string {
   const v = p.view;
   const view =
-    v.kind === "category"
-      ? v.uid === null ? "" : v.uid === "" ? "uncategorized" : `category/${encodeURIComponent(v.uid)}`
-      : v.key === null ? "sources" : `sources/${encodeURIComponent(v.key)}`;
-  if (p.digest === null) return view;
-  const d = `d/${encodeURIComponent(p.digest)}`;
-  return view === "" ? d : `${view}/${d}`;
+    v.kind === "categories" ? ""
+    : v.kind === "sources" ? "sources"
+    : v.kind === "category" ? (v.uid === null ? "all" : v.uid === "" ? "uncategorized" : `category/${encodeURIComponent(v.uid)}`)
+    : `sources/${encodeURIComponent(v.key)}`;
+  if (p.digest === null || !listsDigests(v)) return view;
+  return `${view}/d/${encodeURIComponent(p.digest)}`;
 }
 
 export function sameView(a: DigestView, b: DigestView): boolean {
-  return a.kind === "category" && b.kind === "category" ? a.uid === b.uid : a.kind === "source" && b.kind === "source" && a.key === b.key;
-}
-
-/** Which tab a view belongs to. */
-export function tabOf(v: DigestView): "categories" | "sources" {
-  return v.kind === "category" ? "categories" : "sources";
+  if (a.kind === "category" && b.kind === "category") return a.uid === b.uid;
+  if (a.kind === "source" && b.kind === "source") return a.key === b.key;
+  return a.kind === b.kind;
 }
 
 // ---- categories ----
@@ -70,7 +86,7 @@ export interface CategoryRow {
   count: number;
 }
 
-/** All, Uncategorized, then the person's categories in the order they made them, empty ones too. */
+/** All, Uncategorized, then the person's categories in the order they made them, empty ones too: the Move to… menu's choices and the overview's cards. */
 export function categoryRows(s: DigestSnapshot): CategoryRow[] {
   const count = (uid: string) => s.digests.filter((d) => d.categoryUid === uid).length;
   return [
@@ -165,15 +181,6 @@ export function changedLine(d: Digest): string {
     : `This file has changed since the digest was taken: page ${d.source.page} may no longer hold the passage.`;
 }
 
-/** At most `max` characters of `text`, cut at a word, with "…" when cut: a control's text, not a whole passage. */
-export function shorten(text: string, max = 240): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  if (flat.length <= max) return flat;
-  const cut = flat.slice(0, max);
-  const space = cut.lastIndexOf(" ");
-  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).trimEnd()}…`;
-}
-
 /** The digests taken from one library file, in page order: what its viewer's Digests panel lists. */
 export function fileDigests(s: DigestSnapshot, fileId: string): Digest[] {
   return s.digests.filter((d) => d.source.kind !== "manual" && d.source.fileId === fileId).sort(byPage);
@@ -186,21 +193,38 @@ export function digestPlace(d: Digest): DigestPlace {
 
 // ---- what a view shows ----
 
-/** The digests a view lists: a category's newest first, a source's in page order (every source: grouped, in the list's order). */
+/** The digests a view lists: a category's newest first, a source's in page order; an overview's none. */
 export function digestsIn(s: DigestSnapshot, v: DigestView): Digest[] {
   if (v.kind === "category") {
     const picked = v.uid === null ? s.digests : s.digests.filter((d) => d.categoryUid === v.uid);
     return [...picked].sort((a, b) => b.createdAt - a.createdAt);
   }
-  const groups = sourceGroups(s);
-  return (v.key === null ? groups : groups.filter((g) => g.key === v.key)).flatMap((g) => g.digests);
+  if (v.kind === "source") return sourceGroups(s).find((g) => g.key === v.key)?.digests ?? [];
+  return [];
 }
 
-/** The view's name, as its heading and the rail say it; null for a category or source that is gone. */
+/** The view's name, as the top bar and the tab's title say it; null for a category or source that is gone. */
 export function viewTitle(s: DigestSnapshot, v: DigestView): string | null {
-  if (v.kind === "category") return categoryRows(s).find((r) => r.uid === v.uid)?.name ?? null;
-  if (v.key === null) return "Sources";
-  return sourceGroups(s).find((g) => g.key === v.key)?.name ?? null;
+  switch (v.kind) {
+    case "categories": return "Categories";
+    case "sources": return "Sources";
+    case "category": return categoryRows(s).find((r) => r.uid === v.uid)?.name ?? null;
+    case "source": return sourceGroups(s).find((g) => g.key === v.key)?.name ?? null;
+  }
+}
+
+/** What the top bar says under the name: how many digests (an overview: how many cards too). */
+export function viewSummary(s: DigestSnapshot, v: DigestView): string {
+  const digests = (n: number) => (n === 1 ? "1 digest" : `${n} digests`);
+  if (v.kind === "categories") {
+    const n = s.categories.length;
+    return `${n === 1 ? "1 category" : `${n} categories`} · ${digests(s.digests.length)}`;
+  }
+  if (v.kind === "sources") {
+    const n = sourceGroups(s).length;
+    return `${n === 1 ? "1 source" : `${n} sources`} · ${digests(s.digests.length)}`;
+  }
+  return digests(digestsIn(s, v).length);
 }
 
 /** Where a digest came from, in a few words: "Appliance manual, page 2". */

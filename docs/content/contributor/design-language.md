@@ -51,6 +51,28 @@ same on every screen.
 
 - Every folder is the tablet's folder silhouette (`thumb--folder-shape`), a
   pinned category with its glyph inside; files are sheets.
+- A tablet app lives in the browser one way, To-Do's: its fixed views are
+  rows under it in the rail, its own places (To-Do's lists, Digest's
+  categories and sources) an overview of cards (`ui/appCard.ts`), each with
+  its **⋯**, and the top bar names the place and holds its tools (**+** where
+  places are made, **⋯** for the one on screen), with **‹** before the name
+  going up to the overview, named for it, as a viewer's does (the phone's ‹
+  sits in ☰'s place). On a desktop a Digest list opens with its first digest
+  beside it, in place of the list's history entry, so Back still leaves the
+  list; one the person closed stays closed when they come back to it. A
+  Digest category has a glyph of its own: the folder glyph is for folders.
+  An item's **Move to…** is one builder (`ui/moveTo.ts`): every place but
+  its own, then **New …** that makes a place and moves the item into it.
+- An app's page sits where To-Do's does (its padding, its 760px centred
+  column, the overview's cards in it). A list is one sheet of ruled rows with
+  square corners, as To-Do's tasks, search's results and the bin are; the open
+  row carries the rail's accent stroke. Where an open item has a panel beside
+  the list, a desktop keeps the panel's place, empty or not, so opening and
+  closing moves nothing. Handwriting in a row is To-Do's framed chip.
+- Something deleted goes to the bin the one way, with the bin's toast: the
+  device line and **Undo**, a digest as a file.
+- One recycle bin: what an app deletes (a digest) waits there beside the
+  files, by the day it went.
 - A file's type in text is its extension (`core/fileKind.ts`,
   `fileTypeLabel`: `.note`, `.pdf`), never upper-cased; only the large
   placeholder mark shouts.

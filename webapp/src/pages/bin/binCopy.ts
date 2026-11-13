@@ -1,9 +1,13 @@
-// The bin's words and rows: grouping by day, confirmations and result messages. No DOM.
+// The bin's words and rows: grouping by day, confirmations and result messages.
+// Files and, while the server keeps them, digests, one list by the day they
+// went. No DOM.
 
 import { pinAspect } from "../../ui/tileAspect";
 import { labelPathSegments } from "../rail/railPlaces";
 import { formatBytes, fileTypeLabel } from "../../core/fileKind";
 import { type Bin, type BinEntry, type Restored, type Trashed } from "../../core/binTypes";
+import type { BinnedDigest, DigestBin } from "../../api/digestTypes";
+import { shorten } from "../../core/passage";
 import { type Id } from "../../core/types";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -124,6 +128,63 @@ export function binRows(bin: Bin, now: number = Date.now()): BinRow[] {
   return rows;
 }
 
+/** A digest in the bin, as a row: its passage stands for its name. */
+export interface DigestBinRow {
+  digest: BinnedDigest;
+  group: string;
+  time: string;
+  daysLeft: number;
+  soon: boolean;
+  detail: string;
+  /** Where a restore puts it: its category, brought back if deleted; Uncategorized when that is gone for good. */
+  restoresTo: string;
+}
+
+export function digestBinRows(bin: DigestBin, now: number = Date.now()): DigestBinRow[] {
+  return bin.digests.map((d) => {
+    const elapsed = daysBetween(d.deletedAt, now);
+    const daysLeft = Math.max(0, bin.retentionDays - elapsed);
+    const restoresTo = d.categoryUid !== "" && d.categoryName !== null ? d.categoryName : "Uncategorized";
+    return {
+      digest: d,
+      group: groupLabel(d.deletedAt, now),
+      time: elapsed === 0 ? timeOfDay(d.deletedAt) : dayAndTime(d.deletedAt),
+      daysLeft,
+      soon: daysLeft <= SOON_DAYS,
+      detail: d.back ? "digest · back on your Supernote" : `digest · ${restoresTo}`,
+      restoresTo,
+    };
+  });
+}
+
+/** A digest's name in a sentence: its passage, short and quoted. Every bin message about a digest uses it. */
+export function digestName(text: string): string {
+  return `"${shorten(text, 60)}"`;
+}
+
+/** What a digest's restore did, as a file's says it. */
+export function restoreDigestMessage(category: string): string {
+  return `Restored the digest to ${category} — back on your Supernote at the next sync`;
+}
+
+/** A row of either kind, a folder's contents kept under it. */
+export type BinItem = { kind: "file"; row: BinRow } | { kind: "digest"; row: DigestBinRow };
+
+/**
+ * Files and digests in one list, the latest deleted first. A file row and the
+ * rows of its trashed contents travel as one block, at its own time.
+ */
+export function binItems(files: BinRow[], digests: DigestBinRow[]): BinItem[] {
+  const blocks: { at: number; items: BinItem[] }[] = [];
+  for (const row of files) {
+    if (row.child && blocks.length > 0) blocks.at(-1)!.items.push({ kind: "file", row });
+    else blocks.push({ at: row.entry.deletedAt, items: [{ kind: "file", row }] });
+  }
+  for (const row of digests) blocks.push({ at: row.digest.deletedAt, items: [{ kind: "digest", row }] });
+  // Stable: rows deleted at the same moment keep their listing's order.
+  return blocks.sort((a, b) => b.at - a.at).flatMap((b) => b.items);
+}
+
 function detailOf(entry: BinEntry, descendants: number): string {
   if (entry.kind === "folder") return descendants === 0 ? "folder" : `folder · ${plural(descendants, "item")}`;
   const type = fileTypeLabel(entry.fileType);
@@ -155,10 +216,27 @@ export function purgeConfirm(row: BinRow): ConfirmSpec {
   };
 }
 
-export function emptyConfirm(bin: Bin): ConfirmSpec {
+/** Deleting a digest for good: its passage, short, names it. */
+export function purgeDigestConfirm(row: DigestBinRow): ConfirmSpec {
   return {
-    title: `Delete all ${plural(bin.entries.length, "item")} permanently?`,
-    body: "Empties the recycle bin. This can’t be undone.",
+    title: `Delete ${digestName(row.digest.text)} permanently?`,
+    body: "The digest and its handwritten note, if it has one. This can’t be undone.",
+    frees: null,
+    action: "Delete permanently",
+  };
+}
+
+/** `unlisted`: the digests could not be listed just now, so they stay. */
+export function emptyConfirm(bin: Bin, digests = 0, unlisted = false): ConfirmSpec {
+  const items = bin.entries.length + digests;
+  const body = unlisted
+    ? "Empties the recycle bin of its files. Its digests couldn’t be listed just now, so they stay. This can’t be undone."
+    : digests > 0
+      ? `Empties the recycle bin, the ${plural(digests, "digest")} included. This can’t be undone.`
+      : "Empties the recycle bin. This can’t be undone.";
+  return {
+    title: `Delete all ${plural(items, "item")} permanently?`,
+    body,
     // The server's total sums files only; summing rows would double-count folders.
     frees: bin.totalBytes > 0 ? formatBytes(bin.totalBytes) : null,
     action: "Empty bin",
@@ -195,6 +273,6 @@ export function folderLabel(path: string, name: string): string {
   return shown.length > 0 ? shown.join(" / ") : "Library";
 }
 
-export function emptyStateBody(retentionDays: number): string {
-  return `Notes you delete — here or on your Supernote — wait here for ${retentionDays} days before they’re removed for good.`;
+export function emptyStateBody(retentionDays: number, digests = false): string {
+  return `${digests ? "Notes and digests" : "Notes"} you delete — here or on your Supernote — wait here for ${retentionDays} days before they’re removed for good.`;
 }

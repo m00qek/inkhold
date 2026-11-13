@@ -44,7 +44,7 @@ import { createLibraryFeatures } from "./libraryFeatures";
 import { createLibraryPreviews } from "./libraryPreviews";
 import { createLibraryRoutes } from "./libraryRoutes";
 import { warmWasm } from "../../core/warmWasm";
-import { appUp, installAppInks, installAppPages } from "./libraryApps";
+import { appUp, digestTitleOf, installAppBack, installAppInks, installAppPages } from "./libraryApps";
 
 export const ADMIN_KEY = "admin";
 /**
@@ -305,10 +305,11 @@ export function createAppShell(deps: AppDeps): AppShell {
     main: content,
     topbar: ctx.topbar,
     searchInput: ctx.topbar.searchInput,
-    section: () => (st.destination === TODO_KEY ? "todo" : st.destination === ACCOUNT_KEY ? "you" : "library"),
+    // Digest has no tab: it is in the drawer, so no tab says you are there.
+    section: () => (st.destination === TODO_KEY ? "todo" : st.destination === ACCOUNT_KEY ? "you" : st.destination === DIGEST_KEY ? null : "library"),
     up: () => {
       const r = current();
-      const inApp = appUp(r);
+      const inApp = appUp(r, { digestTitle: digestTitleOf(ctx) });
       if (inApp !== undefined) return inApp;
       if (r.name === "search") {
         // Back to where the search started, named as the rail names it.
@@ -336,6 +337,7 @@ export function createAppShell(deps: AppDeps): AppShell {
   }).observe(ctx.topbar.crumbs, { childList: true });
 
   installAppPages(ctx);
+  const dropAppBack = installAppBack(ctx, current);
 
   ctx.adminDest = createAdminDestination({
     api,
@@ -373,6 +375,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     // Routed to `#/bin/note/:id` (the live route 404s for trashed files) so Back,
     // reload and copy-link reopen the same trashed file with a `"bin"` origin.
     onOpen: (entry) => go(binNotePageHref(entry.id)),
+    onDigestsChanged: () => void ctx.digest.load(),
     onChanged: (mutated) => {
       // The badge moves every refresh; the folder only refetches on a real mutation.
       ctx.rail.build();
@@ -437,6 +440,7 @@ export function createAppShell(deps: AppDeps): AppShell {
     openBinNote: routes.openBinNote,
     destroy(): void {
       phone.destroy();
+      dropAppBack();
       cancelWarmWasm();
       unsubscribe();
       // Otherwise one coalescing window and engine memory leak per sign-in cycle.

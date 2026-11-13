@@ -76,6 +76,7 @@ test {
     _ = @import("services/todo_web.zig");
     _ = @import("services/tablet_path.zig");
     _ = @import("services/digest_web.zig");
+    _ = @import("services/digest_purge.zig");
     _ = @import("services/backup.zig");
     _ = @import("services/health.zig");
     _ = @import("services/note_index.zig");

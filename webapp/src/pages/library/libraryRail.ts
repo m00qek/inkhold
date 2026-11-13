@@ -2,7 +2,7 @@
 
 import { el } from "../../ui/dom";
 import { brandMark } from "../../ui/chrome";
-import { accountHref, destinationHref, folderHref, go, todoHref } from "../../router";
+import { accountHref, destinationHref, digestHref, folderHref, go, todoHref } from "../../router";
 import { createFolderCache } from "../folderCache";
 import { createNameplate, createQuotaMeter } from "../railFooter";
 import { createRail } from "../rail/rail";
@@ -12,6 +12,7 @@ import type { LibraryCtx } from "./libraryContext";
 import { ADMIN_KEY, DIGEST_KEY, TODO_KEY } from "./library";
 import type { RailChildren } from "../rail/rail";
 import { FIXED_VIEWS, openCount, sameView, viewPath, type TodoView } from "../todo/todoModel";
+import { ALL, categoryRows, placePath, sameView as sameDigestView, type DigestView } from "../digest/digestModel";
 import type { IconName } from "../../ui/icons";
 
 /** To-Do's rows in the rail, in the tablet's order; the lists besides the Inbox are the overview's cards. */
@@ -22,28 +23,56 @@ const VIEW_ROWS: Record<(typeof FIXED_VIEWS)[number], { name: string; icon: Icon
   completed: { name: "Completed", icon: "done" },
 };
 
+/** Digest's rows: its fixed views, as To-Do's; the categories it made are the overview's cards. */
+const DIGEST_ROWS: { view: DigestView; name: string; icon: IconName }[] = [
+  { view: ALL, name: "All", icon: "stack" },
+  { view: { kind: "category", uid: "" }, name: "Uncategorized", icon: "inbox" },
+  { view: { kind: "sources" }, name: "Sources", icon: "sources" },
+];
+
+type ChildRow = RailChildren["rows"][number];
+
+/**
+ * A tablet app's rows in the rail: unfolded while you are in the app and
+ * folded everywhere else; the chevron overrides that until you next enter or
+ * leave it.
+ */
+function appChildren(name: string, rebuild: () => void) {
+  let folded = false;
+  let peek = false;
+  let wasHere = false;
+  return (here: boolean, rows: ChildRow[]): RailChildren => {
+    if (here !== wasHere) {
+      folded = false;
+      peek = false;
+      wasHere = here;
+    }
+    const expanded = here ? !folded : peek;
+    return {
+      expanded,
+      toggleLabel: expanded ? `Fold ${name}` : `Unfold ${name}`,
+      onToggle: () => {
+        if (here) folded = !folded;
+        else peek = !peek;
+        rebuild();
+      },
+      rows,
+    };
+  };
+}
+
 /** Builds the folder cache, the rail, the nameplate and the storage meter onto `ctx`. */
 export function installLibraryRail(ctx: LibraryCtx): void {
   const { st } = ctx;
-  /**
-  * To-Do's rows unfold while you are in To-Do and fold everywhere else; the
-  * chevron overrides that until you next enter or leave To-Do.
-  */
-  let todoFolded = false;
-  let todoPeek = false;
-  let wasOnTodo = false;
+  const todoRows = appChildren("To-Do", () => ctx.rail.build());
+  const digestRows = appChildren("Digest", () => ctx.rail.build());
+
   function todoChildren(): RailChildren | null {
     const snap = ctx.todo?.snapshot();
     if (!snap?.enabled) return null;
     const onTodo = st.destination === TODO_KEY;
-    if (onTodo !== wasOnTodo) {
-      todoFolded = false;
-      todoPeek = false;
-      wasOnTodo = onTodo;
-    }
-    const expanded = onTodo ? !todoFolded : todoPeek;
     const here = ctx.todo.view();
-    const row = (v: TodoView, name: string, icon: IconName) => ({
+    const row = (v: TodoView, name: string, icon: IconName): ChildRow => ({
       icon,
       name,
       count: openCount(snap, v),
@@ -51,16 +80,26 @@ export function installLibraryRail(ctx: LibraryCtx): void {
       href: todoHref(viewPath(v)),
       select: () => go(todoHref(viewPath(v))),
     });
-    return {
-      expanded,
-      toggleLabel: expanded ? "Fold To-Do" : "Unfold To-Do",
-      onToggle: () => {
-        if (onTodo) todoFolded = !todoFolded;
-        else todoPeek = !todoPeek;
-        ctx.rail.build();
-      },
-      rows: FIXED_VIEWS.map((k) => row({ kind: k }, VIEW_ROWS[k].name, VIEW_ROWS[k].icon)),
-    };
+    return todoRows(onTodo, FIXED_VIEWS.map((k) => row({ kind: k }, VIEW_ROWS[k].name, VIEW_ROWS[k].icon)));
+  }
+
+  function digestChildren(): RailChildren | null {
+    const snap = ctx.digest?.snapshot();
+    if (!snap?.enabled) return null;
+    const onDigest = st.destination === DIGEST_KEY;
+    const view = ctx.digest.place()?.view ?? null;
+    // A row counts the digests it shows, as To-Do's count tasks: the sources' page shows them all.
+    const count = (v: DigestView) =>
+      v.kind === "sources" ? snap.digests.length : (categoryRows(snap).find((r) => v.kind === "category" && r.uid === v.uid)?.count ?? 0);
+    return digestRows(
+      onDigest,
+      DIGEST_ROWS.map(({ view: v, name, icon }) => {
+        const href = digestHref(placePath({ view: v, digest: null }));
+        // A source's digests are the Sources row's.
+        const current = onDigest && view !== null && (sameDigestView(view, v) || (view.kind === "source" && v.kind === "sources"));
+        return { icon, name, count: count(v), current, href, select: () => go(href) };
+      }),
+    );
   }
   // `aria-busy` until the walk lands: counts are provisional.
   const nav = el("div", { class: "nav", role: "group", "aria-label": "Folders", "aria-busy": "true" });
@@ -136,7 +175,7 @@ export function installLibraryRail(ctx: LibraryCtx): void {
     // The tablet's apps only while the server keeps their data: an off switch is not a place to go.
     destinationShown: (key) =>
       key === TODO_KEY ? ctx.todo?.snapshot()?.enabled === true : key === DIGEST_KEY ? ctx.digest?.snapshot()?.enabled === true : true,
-    destinationChildren: (key) => (key === TODO_KEY ? todoChildren() : null),
+    destinationChildren: (key) => (key === TODO_KEY ? todoChildren() : key === DIGEST_KEY ? digestChildren() : null),
     onSettled: () => ctx.render.renderGallery({ rail: false }),
     onLabelsSettled: () => ctx.render.relabelFolders(),
   });

@@ -13,7 +13,8 @@ import { wordMarks } from "../../search/match";
 import { el } from "../../ui/dom";
 import { onPlainClick } from "../../ui/link";
 import { digestHref } from "../../router";
-import { categoryName, fileName, placePath, shorten, sourceLine, type DigestPlace } from "./digestModel";
+import { categoryName, fileName, placePath, sourceLine, type DigestPlace } from "./digestModel";
+import { shorten } from "../../core/passage";
 
 /** The search index's rows for Digest, keyed by the digest's id. */
 export function digestRows(s: DigestSnapshot): ItemRow[] {

@@ -181,7 +181,7 @@ test.describe("recycle bin", () => {
     await openBin(page);
 
     const aside = page.locator(".bin__aside");
-    await expect(aside).toContainText("Deleted files are removed from your Supernote too.");
+    await expect(aside).toContainText("Deleted files and digests are removed from your Supernote too.");
     await expect(aside).toContainText("30 days");
   });
 

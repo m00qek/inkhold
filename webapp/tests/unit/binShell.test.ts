@@ -1,10 +1,12 @@
 // The bin controller: what asks, what opens where, by-id actions and shell seams.
 
 import { describe, it, expect, vi } from "vitest";
-import { BIN_KEY, DEVICE_LINE, binFileUrl, binRows, createBin, createBinScope, type BinActions, type BinModel, type BinView, type ConfirmSpec } from "../../src/pages/bin/bin";
+import { BIN_KEY, DEVICE_LINE, binFileUrl, binRows, createBin, digestBinRows, createBinScope, type BinActions, type BinModel, type BinView, type ConfirmSpec } from "../../src/pages/bin/bin";
 import { DESTINATIONS } from "../../src/pages/rail/railPlaces";
 import type { Api } from "../../src/api/types";
 import type { Bin, BinEntry } from "../../src/core/binTypes";
+import type { BinnedDigest, DigestBin } from "../../src/api/digestTypes";
+import { ApiError } from "../../src/api/errors";
 
 // --- fixtures ----------------------------------------------------------------
 import { NOW, entry, bin, FOLDER_DELETE } from "./bin.shared";
@@ -37,6 +39,7 @@ function stubApi(over: Partial<Api> = {}): Api {
     restoreEntry: async () => ({ name: "a.note", renamed: false, ancestors: 0, descendants: 0 }),
     purgeEntry: async () => undefined,
     emptyBin: async () => 3,
+    digestBin: async () => ({ enabled: false, digests: [], retentionDays: 30 }),
     ...over,
   } as unknown as Api;
 }
@@ -46,7 +49,7 @@ const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 describe("what asks, and what does not", () => {
   it("trashes with NO dialog, and offers the reverse plus the device line", async () => {
     const view = stubView();
-    const controller = createBin({ api: stubApi(), view, onOpen: vi.fn(), onChanged: vi.fn(), handled: () => false });
+    const controller = createBin({ api: stubApi(), view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false });
     await settle();
 
     await controller.trash({ id: "n1", name: "a.note", kind: "note" });
@@ -61,7 +64,7 @@ describe("what asks, and what does not", () => {
   it("purges only after the destructive button is chosen", async () => {
     const purgeEntry = vi.fn(async () => undefined);
     const view = stubView({ confirm: async () => false });
-    const controller = createBin({ api: stubApi({ purgeEntry }), view, onOpen: vi.fn(), onChanged: vi.fn(), handled: () => false });
+    const controller = createBin({ api: stubApi({ purgeEntry }), view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false });
     await settle();
 
     const actions = captureActions(controller, view);
@@ -74,7 +77,7 @@ describe("what asks, and what does not", () => {
   it("empties only after the destructive button is chosen, and quotes the freed total", async () => {
     const emptyBin = vi.fn(async () => 3);
     const view = stubView();
-    const controller = createBin({ api: stubApi({ emptyBin }), view, onOpen: vi.fn(), onChanged: vi.fn(), handled: () => false });
+    const controller = createBin({ api: stubApi({ emptyBin }), view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false });
     await settle();
 
     controller.empty();
@@ -92,6 +95,7 @@ describe("what asks, and what does not", () => {
       view,
       onOpen: vi.fn(),
       onChanged: vi.fn(),
+      onDigestsChanged: vi.fn(),
       handled: () => true,
     });
     await settle();
@@ -106,6 +110,7 @@ describe("what asks, and what does not", () => {
       view,
       onOpen: vi.fn(),
       onChanged: vi.fn(),
+      onDigestsChanged: vi.fn(),
       handled: () => false,
     });
     await settle();
@@ -135,6 +140,7 @@ describe("what opens where", () => {
       view,
       onOpen,
       onChanged: vi.fn(),
+      onDigestsChanged: vi.fn(),
       handled: () => false,
     });
     await settle();
@@ -175,6 +181,7 @@ describe("the viewers' by-id restore and purge", () => {
       view: stubView(),
       onOpen: vi.fn(),
       onChanged: vi.fn(),
+      onDigestsChanged: vi.fn(),
       handled: () => false,
     });
     await settle();
@@ -185,7 +192,7 @@ describe("the viewers' by-id restore and purge", () => {
   it("purge(id) cannot skip the confirm — a cancel destroys nothing and reports so", async () => {
     const purgeEntry = vi.fn(async () => undefined);
     const view = stubView({ confirm: async () => false });
-    const controller = createBin({ api: stubApi({ purgeEntry }), view, onOpen: vi.fn(), onChanged: vi.fn(), handled: () => false });
+    const controller = createBin({ api: stubApi({ purgeEntry }), view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false });
     await settle();
 
     await expect(controller.purge("a")).resolves.toBe(false);
@@ -195,7 +202,7 @@ describe("the viewers' by-id restore and purge", () => {
   it("purge(id) with the confirm accepted purges, names the entry, and reports success", async () => {
     const purgeEntry = vi.fn(async () => undefined);
     const view = stubView();
-    const controller = createBin({ api: stubApi({ purgeEntry }), view, onOpen: vi.fn(), onChanged: vi.fn(), handled: () => false });
+    const controller = createBin({ api: stubApi({ purgeEntry }), view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false });
     await settle();
 
     await expect(controller.purge("a")).resolves.toBe(true);
@@ -210,6 +217,7 @@ describe("the viewers' by-id restore and purge", () => {
       view,
       onOpen: vi.fn(),
       onChanged: vi.fn(),
+      onDigestsChanged: vi.fn(),
       handled: () => false,
     });
     await settle();
@@ -241,7 +249,7 @@ describe("shell seams", () => {
   });
 
   it("reports the count and the deleted-from path the reader's subtitle needs", async () => {
-    const controller = createBin({ api: stubApi(), view: stubView(), onOpen: vi.fn(), onChanged: vi.fn(), handled: () => false });
+    const controller = createBin({ api: stubApi(), view: stubView(), onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false });
     await settle();
     expect(controller.count()).toBe(3);
     expect(controller.isTrashed("a")).toBe(true);
@@ -364,5 +372,158 @@ describe("shell seams", () => {
     expect(binFileUrl(e, { download: true })).toBe("/api/controlplane/bin/file/7?v=abc&download=1");
     // The route requires `?v=`, so a hashless entry has no URL.
     expect(binFileUrl({ ...e, fileHash: null })).toBeNull();
+  });
+});
+
+// --- digests in the bin ---------------------------------------------------------
+
+describe("digests in the bin", () => {
+  const binned = (id: string, deletedAt: number, over: Partial<BinnedDigest> = {}): BinnedDigest => ({
+    id, text: `passage ${id}`, categoryUid: "kb", categoryName: "Verbes", deletedAt, back: false, ...over,
+  });
+  const withDigests = (digests: BinnedDigest[]) => async (): Promise<DigestBin> => ({ enabled: true, retentionDays: 30, digests });
+
+  it("lists them among the files by when they went, a folder's contents kept under it; counted with them", async () => {
+    const view = stubView();
+    const controller = createBin({
+      api: stubApi({ digestBin: withDigests([binned("15", NOW + 1), binned("16", 0)]) }),
+      view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false,
+    });
+    await settle();
+    controller.open();
+    await settle();
+    const m = view.rendered.at(-1)!;
+    expect(m.digestsOn).toBe(true);
+    expect(m.items.map((i) => (i.kind === "file" ? i.row.entry.id : `d${i.row.digest.id}`))).toEqual(["d15", "f", "a", "b", "d16"]);
+    expect(controller.count()).toBe(FOLDER_DELETE.entries.length + 2);
+  });
+
+  it("restores to where it was, tells the Digest page, and says a digest the tablet sent back is in Digest", async () => {
+    const onDigestsChanged = vi.fn();
+    const digestRestore = vi.fn(async () => undefined);
+    const view = stubView();
+    const controller = createBin({
+      api: stubApi({ digestBin: withDigests([binned("15", NOW)]), digestRestore }),
+      view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged, handled: () => false,
+    });
+    await settle();
+    const actions = captureActions(controller, view);
+    await settle();
+    const row = digestBinRows({ enabled: true, retentionDays: 30, digests: [binned("15", NOW)] }, NOW)[0]!;
+    expect(row.restoresTo).toBe("Verbes");
+    actions.restoreDigest(row);
+    await vi.waitFor(() => expect(digestRestore).toHaveBeenCalledWith("15"));
+    await vi.waitFor(() => expect(view.toasts.at(-1)!.msg).toBe("Restored the digest to Verbes — back on your Supernote at the next sync"));
+    expect(onDigestsChanged).toHaveBeenCalled();
+
+    const refused = createBin({
+      api: stubApi({ digestBin: withDigests([binned("15", NOW)]), digestRestore: async () => Promise.reject(new ApiError("BACK_ALREADY", "x", 409)) }),
+      view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false,
+    });
+    await settle();
+    captureActions(refused, view).restoreDigest(row);
+    await vi.waitFor(() => expect(view.toasts.at(-1)!.msg).toBe("Your Supernote sent this digest back already: it is in Digest."));
+  });
+
+  it("deletes one for good only after saying so; Empty bin counts the digests in", async () => {
+    const digestPurge = vi.fn(async () => undefined);
+    const view = stubView();
+    const controller = createBin({
+      api: stubApi({ digestBin: withDigests([binned("15", NOW, { text: "Der Plural hat für alle drei Geschlechter denselben Artikel: die." })]), digestPurge }),
+      view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false,
+    });
+    await settle();
+    const actions = captureActions(controller, view);
+    await settle();
+    const item = view.rendered.at(-1)!.items.find((i) => i.kind === "digest")!;
+    actions.purgeDigest(item.row as never);
+    await vi.waitFor(() => expect(digestPurge).toHaveBeenCalledWith("15"));
+    expect(view.confirms.at(-1)!.title).toBe('Delete "Der Plural hat für alle drei Geschlechter denselben…" permanently?');
+
+    // The stub still lists the digest: Empty bin counts it with the files.
+    controller.empty();
+    await vi.waitFor(() => expect(view.confirms.at(-1)!.title).toBe(`Delete all ${FOLDER_DELETE.entries.length + 1} items permanently?`));
+    expect(view.confirms.at(-1)!.body).toBe("Empties the recycle bin, the 1 digest included. This can’t be undone.");
+  });
+
+  it("a digest listing that fails keeps the last one, and Empty bin then leaves the digests alone", async () => {
+    let fail = false;
+    const emptyBin = vi.fn(async () => 3);
+    const view = stubView();
+    const read = withDigests([binned("15", NOW)]);
+    const controller = createBin({
+      api: stubApi({ digestBin: () => (fail ? Promise.reject(new Error("503")) : read()), emptyBin }),
+      view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false,
+    });
+    await settle();
+    fail = true;
+    controller.open();
+    await settle();
+    expect(view.rendered.at(-1)!.items.some((i) => i.kind === "digest")).toBe(true);
+    controller.empty();
+    await vi.waitFor(() => expect(emptyBin).toHaveBeenCalledWith(false));
+    expect(view.confirms.at(-1)!.title).toBe(`Delete all ${FOLDER_DELETE.entries.length} items permanently?`);
+    expect(view.confirms.at(-1)!.body).toMatch(/^Empties the recycle bin of its files\. Its digests couldn’t be listed/);
+
+    // Listed again, they go with the files.
+    fail = false;
+    controller.open();
+    await settle();
+    controller.empty();
+    await vi.waitFor(() => expect(emptyBin).toHaveBeenLastCalledWith(true));
+  });
+
+  it("off on the server: no digests, and the bin speaks of files alone", async () => {
+    const view = stubView();
+    const controller = createBin({ api: stubApi(), view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false });
+    await settle();
+    controller.open();
+    await settle();
+    expect(view.rendered.at(-1)!.digestsOn).toBe(false);
+  });
+});
+
+describe("a digest to the bin from Digest", () => {
+  it("goes as a file goes: no confirmation, the device line, and Undo that brings it back", async () => {
+    const digestDelete = vi.fn(async () => undefined);
+    const digestRestore = vi.fn(async () => undefined);
+    const onDigestsChanged = vi.fn();
+    const view = stubView();
+    const controller = createBin({ api: stubApi({ digestDelete, digestRestore }), view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged, handled: () => false });
+    await settle();
+    await expect(controller.trashDigest({ id: "15", text: "Im Nebensatz steht das Verb am Ende." })).resolves.toBe(true);
+    expect(view.confirms).toHaveLength(0);
+    const t = view.toasts.at(-1)!;
+    expect(t.msg).toBe('Moved "Im Nebensatz steht das Verb am Ende." to Recycle bin');
+    expect(t.sub).toBe(DEVICE_LINE);
+    t.undo!();
+    await vi.waitFor(() => expect(digestRestore).toHaveBeenCalledWith("15"));
+    await vi.waitFor(() => expect(view.toasts.at(-1)!.msg).toBe('Restored "Im Nebensatz steht das Verb am Ende." — back on your Supernote at the next sync'));
+    expect(onDigestsChanged).toHaveBeenCalled();
+  });
+
+  it("a refused move says so and reports false", async () => {
+    const view = stubView();
+    const controller = createBin({ api: stubApi({ digestDelete: async () => Promise.reject(new Error("boom")) }), view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false });
+    await settle();
+    await expect(controller.trashDigest({ id: "15", text: "x" })).resolves.toBe(false);
+    expect(view.toasts.at(-1)!.msg).toBe('Couldn’t delete "x". Try again.');
+  });
+});
+
+describe("the files bin stands on its own", () => {
+  it("a digest listing that fails lists no digests, and the files are still there to restore", async () => {
+    const view = stubView();
+    const controller = createBin({
+      api: stubApi({ digestBin: async () => Promise.reject(new Error("digests down")) }),
+      view, onOpen: vi.fn(), onChanged: vi.fn(), onDigestsChanged: vi.fn(), handled: () => false,
+    });
+    await settle();
+    controller.open();
+    await settle();
+    const m = view.rendered.at(-1)!;
+    expect(m.state).toBe("ready");
+    expect(m.digestsOn).toBe(false);
+    expect(m.items.map((i) => (i.kind === "file" ? i.row.entry.id : "digest"))).toEqual(["f", "a", "b"]);
   });
 });

@@ -58,7 +58,7 @@ describe("the Digests group", () => {
     expect([...g.querySelectorAll(".digest-hit__text mark")].map((m) => m.textContent)).toEqual(["sublet"]);
     expect([...g.querySelectorAll(".digest-hit__comment mark")].map((m) => m.textContent)).toEqual(["summer"]);
     expect(g.querySelector(".digest-hit__meta")?.textContent).toBe("Home · Lease, page 3");
-    expect(g.querySelector("a")?.getAttribute("href")).toBe("#/digest/d/1");
+    expect(g.querySelector("a")?.getAttribute("href")).toBe("#/digest/all/d/1");
   });
 
   it("marks the typo ladder's spelling, not the typed one", () => {
