@@ -22,7 +22,8 @@ Run Inkhold's container image, with its data and settings kept outside it.
    ```
 
    The `/backup` line is optional: it turns on [nightly backups](@/manual/back-up.md)
-   into that folder. Leave it out and there are none.
+   into that folder, and a weekly check that re-reads every file in it. Leave
+   it out and there are none.
 
 2. Read the first account's password, printed once:
 
@@ -54,6 +55,19 @@ docker run -d --name inkhold -p 8089:8089 \
 ```
 
 Every setting is listed in [config.zon settings](@/manual/configuration.md).
+
+## Backups
+
+With a folder mounted at `/backup`, the container backs up into it every night
+at 03:00 UTC, keeping 7 snapshots and checking each new one, and re-reads every
+file in it on Sundays at 04:00. `docker logs inkhold` shows each run, and an
+admin sees a failed one in the library. To change the times or options, see
+[Back up automatically](@/manual/back-up.md).
+
+Mount a folder on another disk, such as a NAS share: a backup on the same disk
+goes down with it. To also keep a copy away from this machine, run rclone on
+the host, not in the container, as in
+[Keep a copy away from the server](@/manual/offsite-copy.md).
 
 ## Which image
 

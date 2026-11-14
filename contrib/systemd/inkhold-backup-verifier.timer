@@ -1,0 +1,18 @@
+# Runs inkhold-backup-verifier.service on Sundays at 04:00, after that night's
+# backup. A week missed while the machine was off is made up at the next boot
+# (Persistent=true).
+#
+#   cp inkhold-backup-verifier.service inkhold-backup-verifier.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now inkhold-backup-verifier.timer
+
+[Unit]
+Description=Weekly Inkhold backup deep check
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

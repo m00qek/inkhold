@@ -1,0 +1,26 @@
+# Weekly deep check of the Inkhold backups: re-reads every file in BACKUP_DIR
+# against its name and checks each snapshot's database, so a file gone bad on
+# the disk is found before a restore needs it. Started by
+# inkhold-backup-verifier.timer; run it by hand with
+#   systemctl start inkhold-backup-verifier
+#
+# Edit before enabling (or use `systemctl edit inkhold-backup-verifier`): the
+# same User=/Group=, --config= and BACKUP_DIR as inkhold-backup.service.
+#
+# On an "online-only" cloud folder this downloads the whole backup each week.
+
+[Unit]
+Description=Inkhold backup deep check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=inkhold
+Group=inkhold
+Environment=BACKUP_DIR=/mnt/nas/inkhold
+ExecStart=/usr/local/bin/inkhold --config=/etc/inkhold/config.zon backup verify ${BACKUP_DIR} --deep
+# The check lowers its own priority; these repeat it for whatever it starts.
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=idle
