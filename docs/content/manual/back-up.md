@@ -76,5 +76,7 @@ To run it every night, either:
 - On FAT32 a file cannot exceed 4 GB. On "online-only" cloud folders,
   `verify --deep` downloads everything to check it.
 
+[Keep a copy away from the server](@/manual/offsite-copy.md) copies the
+folder to a NAS, a cloud drive or another computer.
 [How backups work](@/manual/how-backups-work.md) explains snapshots and why
 each night's backup is small.
