@@ -1,6 +1,6 @@
 .{
     .name = .inkhold,
-    .version = "1.0.0-beta.1",
+    .version = "1.0.0-beta.2",
     .fingerprint = 0x61d02c25fdacbf98,
     // 0.17.0's HTTP server drops a DELETE's body, which the Digest app's deletes carry.
     .minimum_zig_version = "0.17.1",

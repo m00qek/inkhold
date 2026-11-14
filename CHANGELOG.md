@@ -4,6 +4,46 @@ What changed in each release of Inkhold, for the people who run it. When a
 release asks for something before you upgrade, it says so first, under
 **Upgrade notes**. Install and upgrade steps: <https://m00qek.github.io/inkhold/>.
 
+## 1.0.0-beta.2 (2026-11-14)
+
+**Upgrade notes**
+
+- **Take a backup first.** The database moves forward four steps (schema 22 to
+  26) at the first start, and an older Inkhold can't open it afterwards: going
+  back means restoring that backup.
+- **The container now checks every backup file once a week**, Sundays at
+  04:00, besides the nightly quick check. On an "online-only" cloud folder that
+  downloads the whole backup each week; mount your own `crontab` to change it.
+- Building from source needs Zig 0.17.1.
+
+What's new:
+
+- **Digest sync**: the tablet's Digest app syncs its digests, categories and
+  handwritten notes. New and tested on one Nomad, so it is off until you turn
+  it on (`digest_sync`).
+- **Digest in the browser**: read your digests by category or by source, change
+  their comments, move them between categories, make, rename and delete
+  categories. Deleted digests go to the Recycle bin with your files, and come
+  back from there.
+- **One search** for notes, documents, file names, to-dos and digests, which
+  keeps working offline.
+- **Backups**: a weekly check that re-reads every file in the backup folder
+  (also as a systemd timer in `contrib/systemd`), and a guide to keeping a copy
+  away from the server, on a NAS, a cloud drive or another computer.
+
+Fixed:
+
+- Text typed into a note's text boxes is searchable, whether handwriting
+  recognition is on or off.
+- A to-do changed in the browser is no longer overridden by a tablet whose
+  clock runs ahead.
+- Signing out leaves nothing of yours in the browser.
+- Closing the reader while a page is drawing no longer leaves an error behind.
+
+Known issue: Inkhold doesn't yet notice a stored file whose bytes changed on
+disk, and would serve it as it is
+([#7](https://github.com/m00qek/inkhold/issues/7)).
+
 ## 1.0.0-beta.1 (2026-11-08)
 
 The first public beta. Inkhold is a private cloud for your Supernote: the
