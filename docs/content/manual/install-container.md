@@ -22,7 +22,8 @@ Run Inkhold's container image, with its data and settings kept outside it.
    ```
 
    The `/backup` line is optional: it turns on [nightly backups](@/manual/back-up.md)
-   into that folder. Leave it out and there are none.
+   into that folder, and a weekly check that re-reads every file in it. Leave
+   it out and there are none.
 
 2. Read the first account's password, printed once:
 

@@ -25,8 +25,10 @@ docker run -d --name inkhold -p 8089:8089 \
 ```
 
 The container then backs up every night at 03:00 UTC, keeps 7 snapshots, and
-checks each new one. If the computer was off at 03:00, it backs up a minute
-after it next starts. `docker logs inkhold` shows each run.
+checks each new one. On Sundays at 04:00 it also re-reads every file in the
+folder, so one gone bad on the disk is found before a restore needs it. If the
+computer was off at 03:00, it backs up a minute after it next starts.
+`docker logs inkhold` shows each run.
 
 Mount the NAS share itself. A bind mount of a folder whose share has dropped
 off quietly fills the computer's own disk instead.
@@ -47,20 +49,23 @@ inkhold backup list   /mnt/nas/inkhold
 inkhold backup verify /mnt/nas/inkhold            # --deep re-reads every file
 ```
 
-To run it every night, either:
+To back up every night and re-read every file on Sundays, either:
 
-- add one line with `crontab -e`:
+- add two lines with `crontab -e`:
 
   ```text
-  0 3 * * *  /usr/local/bin/inkhold --config=/etc/inkhold/config.zon backup create /mnt/nas/inkhold --keep=7 >/dev/null
+  0 3 * * *  /usr/local/bin/inkhold --config=/etc/inkhold/config.zon backup create /mnt/nas/inkhold --keep=7 >/dev/null && /usr/local/bin/inkhold --config=/etc/inkhold/config.zon backup verify /mnt/nas/inkhold
+  0 4 * * 0  /usr/local/bin/inkhold --config=/etc/inkhold/config.zon backup verify /mnt/nas/inkhold --deep
   ```
 
-- or use the systemd service and timer in
+- or use the systemd services and timers in
   [`contrib/systemd/`](https://github.com/m00qek/inkhold/tree/main/contrib/systemd):
   set the account, config path and folder at the top of
-  `inkhold-backup.service`, copy both files to `/etc/systemd/system/`, then
-  `systemctl enable --now inkhold-backup.timer`. It backs up at 03:00, makes up
-  for a night the computer was off, and checks each new snapshot.
+  `inkhold-backup.service` and `inkhold-backup-verifier.service`, copy the four
+  files to `/etc/systemd/system/`, then
+  `systemctl enable --now inkhold-backup.timer inkhold-backup-verifier.timer`.
+  It backs up at 03:00 and checks each new snapshot, re-reads every file on
+  Sundays at 04:00, and makes up for a run missed while the computer was off.
 
 ## Worth knowing
 
@@ -74,7 +79,7 @@ To run it every night, either:
 - **Backing up is slow on purpose:** low priority, reading 4 MiB/s
   (`--max-rate` changes it), so syncing stays quick meanwhile.
 - On FAT32 a file cannot exceed 4 GB. On "online-only" cloud folders,
-  `verify --deep` downloads everything to check it.
+  the Sunday check (`verify --deep`) downloads everything each week.
 
 [Keep a copy away from the server](@/manual/offsite-copy.md) copies the
 folder to a NAS, a cloud drive or another computer.

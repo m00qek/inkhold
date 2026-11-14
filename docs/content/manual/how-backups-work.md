@@ -49,7 +49,9 @@ only once complete: an interrupted one is never mistaken for a backup.
 
 `inkhold backup verify` checks that each snapshot is whole and its list of files
 present. `--deep` also re-reads every file and the database, page by page: it
-proves the backup can be restored without restoring it.
+proves the backup can be restored without restoring it. The nightly backup
+runs the quick check on each new snapshot; the deep one runs weekly, because a
+file can go bad on the disk long after it was written.
 
 ## What it leaves out
 
