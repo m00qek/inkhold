@@ -76,9 +76,10 @@ export interface PageRef {
   /** 0-based position within the note. */
   index: number;
   /**
-   * The page's own 1-based number in its container. `null` for a `.note`
-   * (always `index + 1`). A `.mark` holds only the annotated pages of its PDF
-   * and names them by PDF page, e.g. 2, 5, 6 (`note-format.md` §13.2).
+   * The page's own 1-based number in its container; `null` when it is
+   * `index + 1`, which the server leaves out (every `.note` page). A `.mark`
+   * holds only the annotated pages of its PDF and names them by PDF page, e.g.
+   * 2, 5, 6 (`note-format.md` §13.2); one annotating pages 1 and 2 sends none.
    */
   sourcePage: number | null;
   /** Per-page content hash — the cache key and the `?v=` URL version. */

@@ -222,8 +222,11 @@ describe(".pdf viewer, past the shared seam", () => {
             id: "mark-1",
             fileType: "mark",
             pages: [
-              { index: 0, hash: "h1", width: 1404, height: 1872, sourcePage: 1, layers: [] },
-              { index: 1, hash: "h2", width: 1404, height: 1872, sourcePage: 3, layers: [] },
+              // Ink on PDF pages 1 and 2, as the wire sends it: no `sourcePage`,
+              // since each is its page's `index + 1`. Read as missing, these
+              // pages were dropped, and the annotated export never offered.
+              { index: 0, hash: "h1", width: 1404, height: 1872, layers: [] },
+              { index: 1, hash: "h2", width: 1404, height: 1872, layers: [] },
             ] as unknown as NoteMeta["pages"],
           }),
         ),
