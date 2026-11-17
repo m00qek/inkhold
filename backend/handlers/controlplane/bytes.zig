@@ -31,6 +31,7 @@ const inline_types = [_]InlineType{
     .{ .ext = "jpeg", .mime = "image/jpeg" },
     .{ .ext = "webp", .mime = "image/webp" },
     .{ .ext = "gif", .mime = "image/gif" },
+    .{ .ext = "bmp", .mime = "image/bmp" },
     .{ .ext = "pdf", .mime = "application/pdf" },
 };
 

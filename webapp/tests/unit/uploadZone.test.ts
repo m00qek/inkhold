@@ -38,7 +38,7 @@ describe("the accept list", () => {
   });
 
   it("accepts what the device opens, including .spd", () => {
-    for (const name of ["a.pdf", "a.note", "a.spd", "a.epub", "a.docx", "a.PNG", "a.mobi"]) {
+    for (const name of ["a.pdf", "a.note", "a.spd", "a.epub", "a.docx", "a.PNG", "a.bmp", "a.mobi", "a.azw", "a.AZW3"]) {
       expect(isAcceptedUpload(name)).toBe(true);
     }
   });

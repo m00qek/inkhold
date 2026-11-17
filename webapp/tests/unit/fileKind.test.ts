@@ -16,7 +16,7 @@ describe("fileKind", () => {
   });
 
   it("classifies the previewable image types as images", () => {
-    for (const t of ["png", "jpg", "jpeg", "webp", "gif"]) {
+    for (const t of ["png", "jpg", "jpeg", "webp", "gif", "bmp"]) {
       expect(fileKind(t)).toBe("image");
     }
   });

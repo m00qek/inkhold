@@ -12,7 +12,7 @@ export type FileKind = "note" | "image" | "file";
  * `handlers/controlplane.zig`; anything else is served as an attachment. `svg`
  * is excluded on both sides because it can carry `<script>` (stored XSS).
  */
-export const PREVIEWABLE_IMAGE_TYPES: readonly string[] = ["png", "jpg", "jpeg", "webp", "gif"];
+export const PREVIEWABLE_IMAGE_TYPES: readonly string[] = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
 /**
  * Types the `.note` stage can paint. `mark` is the device's PDF-annotation
@@ -66,8 +66,8 @@ export function hasDedicatedViewer(fileType: string): boolean {
 
 /**
  * Extensions the device opens, lowercase, no dot: Ratta's list for Manta/Nomad
- * plus `.spd` (device-authored, restorable from backup) and `.mobi` (opens via
- * the bundled Kindle app).
+ * plus `.spd` (device-authored, restorable from backup) and the MOBI family
+ * (opens via the bundled Kindle app). The server's `upload_extensions` matches it.
  */
 export const UPLOAD_ACCEPT: readonly string[] = [
   "note",
@@ -81,10 +81,13 @@ export const UPLOAD_ACCEPT: readonly string[] = [
   "jpg",
   "jpeg",
   "webp",
+  "bmp",
   "cbz",
   "fb2",
   "xps",
   "mobi",
+  "azw",
+  "azw3",
 ];
 
 /**

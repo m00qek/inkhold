@@ -144,6 +144,7 @@ test "raw file route: ownership, versioning, and the inline/attachment allowlist
         .{ .name = "a.JPEG", .mime = "image/jpeg", .disposition = "inline" }, // case-insensitive
         .{ .name = "a.webp", .mime = "image/webp", .disposition = "inline" },
         .{ .name = "a.gif", .mime = "image/gif", .disposition = "inline" },
+        .{ .name = "a.BMP", .mime = "image/bmp", .disposition = "inline" },
         .{ .name = "a.pdf", .mime = "application/pdf", .disposition = "inline" },
         // SVG executes script: inline from our origin would be stored XSS.
         .{ .name = "a.svg", .mime = "application/octet-stream", .disposition = "attachment" },
