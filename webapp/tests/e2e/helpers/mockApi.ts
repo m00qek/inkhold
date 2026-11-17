@@ -120,6 +120,13 @@ export async function mockApi(page: Page, scenario: Scenario): Promise<void> {
         return;
       }
 
+      // The live-update stream, as the server answers it: an event stream with nothing in it
+      // yet. JSON here makes WebKit abort the EventSource and report a page error.
+      if (pathname === "/api/controlplane/events") {
+        await route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+        return;
+      }
+
       // Unmatched /api call: succeed so it never hangs, but log it.
       console.warn(`[mockApi] unmatched ${method} ${url}`);
       await route.fulfill({
