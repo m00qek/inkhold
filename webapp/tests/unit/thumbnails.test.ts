@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createThumbnails, strategyFor, TEXT_THUMB_BYTES } from "../../src/render/thumbnails";
 import { FACADE_THUMB_TYPES } from "../../src/pages/galleryCards";
 import { fileKind, PREVIEWABLE_IMAGE_TYPES, UPLOAD_ACCEPT } from "../../src/core/fileKind";
-import type { Id, PageRef, Theme } from "../../src/core/types";
+import type { Hash, Id, PageRef, Theme } from "../../src/core/types";
 
 // The facade's orchestration with every pixel/network seam faked; the real seams are e2e's.
 import { tagOf, page, fakePainter, fakeNet, build, noteSrc, fileSrc } from "./thumbnails.shared";
@@ -166,6 +166,86 @@ describe("thumbnail facade", () => {
     t.thumbs.evictTheme("light");
     await t.thumbs.getThumbnail({ fileHash: "pdfh", fileId: "p1" }, "pdf");
     expect(t.renderPdfPage).toHaveBeenCalledTimes(1);
+  });
+
+  describe("a paged document's page-1 ink", () => {
+    const inked = () => {
+      const bitmap = { width: 230, height: 345, closed: false, close(): void { bitmap.closed = true; } };
+      return bitmap;
+    };
+    const src = (hash: string) => ({ fileHash: "pdfh" as Hash, fileId: "p1", coverInk: { markId: "m1", hash: hash as Hash } });
+
+    it("draws the tile with the ink over page 1, and frees both bitmaps", async () => {
+      const made: Array<{ closed: boolean }> = [];
+      const inkCover = vi.fn(async () => {
+        const b = inked();
+        made.push(b);
+        return b as unknown as ImageBitmap;
+      });
+      const t = build({ inkCover });
+      await t.thumbs.getThumbnail(src("ink1"), "xps");
+      expect(inkCover).toHaveBeenCalledWith(t.pdfBitmaps[0], { markId: "m1", hash: "ink1" }, { bin: undefined });
+      expect(t.painter.fromBitmap).toHaveBeenCalledWith(made[0]);
+      expect(made[0]!.closed).toBe(true);
+      expect(t.pdfBitmaps[0]!.closed).toBe(true);
+    });
+
+    it("new ink is a new tile; the same ink is the cached one", async () => {
+      const inkCover = vi.fn(async () => inked() as unknown as ImageBitmap);
+      const t = build({ inkCover });
+      await t.thumbs.getThumbnail(src("ink1"), "pdf");
+      await t.thumbs.getThumbnail(src("ink1"), "pdf");
+      expect(t.renderPdfPage).toHaveBeenCalledTimes(1);
+      await t.thumbs.getThumbnail(src("ink2"), "pdf");
+      expect(t.renderPdfPage).toHaveBeenCalledTimes(2);
+      expect(inkCover).toHaveBeenCalledTimes(2);
+    });
+
+    it("ink there is none of leaves the plain page for that ink, drawn once and kept", async () => {
+      const inkCover = vi.fn(async () => null);
+      const t = build({ inkCover });
+      await t.thumbs.getThumbnail(src("ink1"), "pdf");
+      // The plain page stood in, drawn from the same render: one MuPDF render.
+      expect(t.renderPdfPage).toHaveBeenCalledTimes(1);
+      expect(t.painter.fromBitmap).toHaveBeenLastCalledWith(t.pdfBitmaps[0]);
+      await t.thumbs.getThumbnail(src("ink1"), "pdf");
+      expect(inkCover).toHaveBeenCalledTimes(1); // a definite answer, not retried
+      expect(t.renderPdfPage).toHaveBeenCalledTimes(1);
+    });
+
+    it("a passing failure shows the plain page from the same render, kept for the session and never stored", async () => {
+      const inkCover = vi.fn(async () => {
+        throw new Error("this ink layer would not decode");
+      });
+      const put = vi.fn(async () => {});
+      const t = build({ inkCover, persistent: { get: async () => null, put } });
+      await t.thumbs.getThumbnail(src("ink1"), "pdf");
+      expect(t.renderPdfPage).toHaveBeenCalledTimes(1); // no second render for the fallback
+      expect(t.painter.fromBitmap).toHaveBeenLastCalledWith(t.pdfBitmaps[0]);
+      expect(t.painter.glyph).not.toHaveBeenCalled();
+      // Seen again: not a full render and a mark fetch each time it scrolls by.
+      await t.thumbs.getThumbnail(src("ink1"), "pdf");
+      expect(inkCover).toHaveBeenCalledTimes(1);
+      expect(t.renderPdfPage).toHaveBeenCalledTimes(1);
+      expect(put).not.toHaveBeenCalled();
+      // New ink is a new key: tried afresh.
+      await t.thumbs.getThumbnail(src("ink2"), "pdf");
+      expect(inkCover).toHaveBeenCalledTimes(2);
+    });
+
+    it("a trashed document's ink is asked for through the bin", async () => {
+      const inkCover = vi.fn(async () => null);
+      const t = build({ inkCover });
+      await t.thumbs.getThumbnail({ ...src("ink1"), bin: true }, "pdf");
+      expect(inkCover).toHaveBeenCalledWith(expect.anything(), { markId: "m1", hash: "ink1" }, { bin: true });
+    });
+
+    it("only the cover carries it: another page is drawn plain", async () => {
+      const inkCover = vi.fn(async () => inked() as unknown as ImageBitmap);
+      const t = build({ inkCover });
+      await t.thumbs.getThumbnail({ ...src("ink1"), pdfPage: 2 }, "pdf");
+      expect(inkCover).not.toHaveBeenCalled();
+    });
   });
 
   it("a .pdf's other page (a digest's source) renders that page, keyed apart from the cover, and leaves the cover's aspect alone", async () => {

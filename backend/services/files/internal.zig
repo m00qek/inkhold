@@ -16,12 +16,14 @@ const Paired = Files.Paired;
 const Child = Files.Child;
 
 /// Shared by the listing and `get`, so both read one expression.
-pub const paired_mark_id = markpair.pairedMarkId("f");
+pub const paired_mark_id = markpair.pairedMarkId("f", "0");
 
 pub const hide_paired_mark = markpair.hidePairedMark("f", "0");
 
 /// The bin's view: a trashed pair is one row there too.
 pub const hide_paired_bin_mark = markpair.hidePairedMark("f", "1");
+/// The trashed `.mark` a trashed document row `f` went to the bin with.
+pub const paired_bin_mark_id = markpair.pairedMarkId("f", "1");
 
 /// The other half of a pair, or null. The only entry point for the two-way
 /// rule: `trash`, `restore`, `purge` and `move` call it once and then work a
@@ -48,6 +50,8 @@ pub fn pairOf(self: Files, user_id: u64, id: u64) !?Paired {
     defer self.gpa.free(name);
 
     const entry_is_mark = std.mem.endsWith(u8, name, markpair.mark_ext);
+    // The bin can hold a name twice: there the pair is the one rule's, not the name's.
+    if (deleted != 0) return binPairOf(self, user_id, id, entry_is_mark);
     var owned_want: ?[]u8 = null;
     defer if (owned_want) |w| self.gpa.free(w);
     var want: []const u8 = undefined;
@@ -71,6 +75,22 @@ pub fn pairOf(self: Files, user_id: u64, id: u64) !?Paired {
     if (!try s.step()) return null;
     return .{ .id = @intCast(s.columnInt(0)), .entry_is_mark = entry_is_mark };
 }
+
+/// `pairOf` in the bin, by the SQL the bin listing folds with.
+fn binPairOf(self: Files, user_id: u64, id: u64, entry_is_mark: bool) !?Paired {
+    const binds = [_]sqlite.Bind{ .{ .int = @intCast(id) }, .{ .int = @intCast(user_id) } };
+    var r = (if (entry_is_mark)
+        try self.db.row(bin_doc_of_mark_sql, &binds)
+    else
+        try self.db.row(bin_mark_of_doc_sql, &binds)) orelse return null;
+    defer r.finalize();
+    if (r.isNull(0)) return null;
+    return .{ .id = @intCast(r.int(0)), .entry_is_mark = entry_is_mark };
+}
+
+const bin_mark_of_doc_sql = "SELECT " ++ paired_bin_mark_id ++ " FROM files f WHERE f.id = ?1 AND f.user_id = ?2;";
+const bin_doc_of_mark_sql = "SELECT " ++ markpair.pairedDocId("f", "1") ++
+    " FROM files f WHERE f.id = ?1 AND f.user_id = ?2 AND f.is_folder = 0;";
 
 /// Callers holding a transaction bump inside it, so it commits atomically.
 /// Also moves `Files.changes`, the live-update streams' cue to look again.

@@ -108,7 +108,10 @@ The code and the config call an allotment a quota.
 
 - The tablet writes a document's annotations to `<the document's full name>.mark`,
   with the extension appended. A pair lists as one row, the document's, which
-  carries `annotationsId`.
+  carries `annotationsId`, and `coverInkHash` when page 1 has ink: the person
+  sees one file, so its tile is page 1 with the ink on it, and it redraws when
+  either half changes. A bin row carries both too, for the mark that went to
+  the bin with it.
 - The rule is relational, not a list of extensions: the same folder, the exact
   stem, no chains (`a.mark.mark`), neither half a folder, the same `deleted`
   state. One SQL rule (`mark_pairing.zig`) serves every listing, and `pairOf`

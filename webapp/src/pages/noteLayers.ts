@@ -8,6 +8,7 @@ import type { LayeredExportModel } from "../export/layered";
 import { drawDownscaledInto } from "../render/thumbnails";
 import { templatePlacement, type TemplateProvider } from "../render/template";
 import {
+  NOTE_DECODE_WASM_URL,
   browserLoader,
   decodeLayerWithExports,
   type DecoderExports,
@@ -117,7 +118,7 @@ function layerCanvas(raw: RawDecoded): HTMLCanvasElement {
 }
 
 export function createNoteLayersController(opts: NoteLayersControllerOptions = {}): NoteLayersController {
-  const load = opts.loader ?? browserLoader(opts.wasmUrl ?? "/note-decode.wasm");
+  const load = opts.loader ?? browserLoader(opts.wasmUrl ?? NOTE_DECODE_WASM_URL);
   const getTemplate = opts.getTemplate;
   const backdrop = opts.backdrop === undefined ? "#fff" : opts.backdrop;
   let exportsPromise: Promise<DecoderExports> | null = null;
@@ -281,47 +282,64 @@ export function createNoteLayersController(opts: NoteLayersControllerOptions = {
       };
     },
 
-    async inkRaster(
-      bytes: ArrayBuffer,
-      dst: { width: number; height: number },
-    ): Promise<HTMLCanvasElement | null> {
-      const w = Math.max(1, Math.round(dst.width));
-      const h = Math.max(1, Math.round(dst.height));
-      let out: HTMLCanvasElement | null = null;
-      try {
-        const wasm = await decoder();
-        if (typeof wasm.decode_layer !== "function") return null;
-        const u8 = new Uint8Array(bytes);
-        const enumerated = enumerateSnpg(wasm, u8);
-        if (!enumerated) return null;
-        out = document.createElement("canvas");
-        out.width = w;
-        out.height = h;
-        const ctx = out.getContext("2d"); // null in happy-dom
-        if (!ctx) {
-          zeroCanvas(out);
-          return null;
-        }
-        const ink = inkRecordIndices(enumerated.records);
-        if (ink.length === 0) {
-          zeroCanvas(out);
-          return null;
-        }
-        for (const index of ink) {
-          // One layer resident at a time: decoding them all first would be
-          // ~40 MB of canvas for a 120 px picture.
-          const full = layerCanvas(decodeLayerWithExports(wasm, u8, index));
-          // Shared quality downscale; a ~15× bilinear step would drop thin strokes.
-          await drawDownscaledInto(ctx, full, w, h, 0, 0);
-          zeroCanvas(full);
-        }
-        return out;
-      } catch {
-        if (out) zeroCanvas(out);
-        return null;
-      }
-    },
+    inkRaster: createInkRasterizer(decoder),
 
     release,
+  };
+}
+
+/**
+ * A `.mark` page's ink, every ink layer reduced into a canvas of `dst`'s size,
+ * or null. Needs no stack or viewer: the layers controller and the gallery's
+ * tiles share it. The canvas is the caller's to free.
+ */
+export function createInkRasterizer(
+  load: () => Promise<DecoderExports>,
+): (bytes: ArrayBuffer, dst: { width: number; height: number }) => Promise<HTMLCanvasElement | null> {
+  // One decoder instance however many pages are drawn: the loader fetches and
+  // instantiates the wasm on every call.
+  let once: Promise<DecoderExports> | null = null;
+  const decoder = (): Promise<DecoderExports> => {
+    once ??= load().catch((e: unknown) => {
+      once = null; // a failed load is retried, not kept
+      throw e;
+    });
+    return once;
+  };
+  return async function inkRaster(
+    bytes: ArrayBuffer,
+    dst: { width: number; height: number },
+  ): Promise<HTMLCanvasElement | null> {
+    const w = Math.max(1, Math.round(dst.width));
+    const h = Math.max(1, Math.round(dst.height));
+    // Null only where there is definitely nothing to draw: bytes that are no
+    // page, or a page with no ink. A decoder that will not load, a decode or a
+    // canvas that fails, throws: those pass, and the caller tries again.
+    const wasm = await decoder();
+    if (typeof wasm.decode_layer !== "function") throw new Error("this note-decode.wasm has no decode_layer");
+    const u8 = new Uint8Array(bytes);
+    const enumerated = enumerateSnpg(wasm, u8);
+    if (!enumerated) return null;
+    const ink = inkRecordIndices(enumerated.records);
+    if (ink.length === 0) return null;
+    const out = document.createElement("canvas");
+    out.width = w;
+    out.height = h;
+    try {
+      const ctx = out.getContext("2d");
+      if (!ctx) throw new Error("no 2d canvas for the ink");
+      for (const index of ink) {
+        // One layer resident at a time: decoding them all first would be
+        // ~40 MB of canvas for a 120 px picture.
+        const full = layerCanvas(decodeLayerWithExports(wasm, u8, index));
+        // Shared quality downscale; a ~15× bilinear step would drop thin strokes.
+        await drawDownscaledInto(ctx, full, w, h, 0, 0);
+        zeroCanvas(full);
+      }
+      return out;
+    } catch (e) {
+      zeroCanvas(out);
+      throw e;
+    }
   };
 }

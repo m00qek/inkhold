@@ -105,10 +105,16 @@ test("an XPS and a comic book get their page 1 as a gallery tile, at its shape",
     ["Harbour at dusk", true],
   ] as const) {
     const img = page.locator(".card", { hasText: name }).locator("img.thumb__img");
-    await expect.poll(() => img.evaluate((e: HTMLImageElement) => e.src.startsWith("blob:")), { timeout: 20_000 }).toBe(true);
-    const shape = await img.evaluate((e: HTMLImageElement) => ({ w: e.naturalWidth, h: e.naturalHeight }));
-    expect(shape.w).toBeGreaterThan(0);
-    expect(shape.h > shape.w).toBe(portrait);
+    // Polled: a slow tile shows the type's glyph first, a portrait of its own.
+    await expect
+      .poll(
+        () =>
+          img.evaluate((e: HTMLImageElement) =>
+            e.src.startsWith("blob:") && e.naturalWidth > 0 ? e.naturalHeight > e.naturalWidth : null,
+          ),
+        { timeout: 20_000 },
+      )
+      .toBe(portrait);
   }
 });
 
@@ -122,4 +128,53 @@ test("the tablet's handwriting on an XPS paints on its page, as a PDF's does", a
   if ((await pages.getAttribute("aria-pressed")) !== "true") await pages.click();
   await expect(viewer.locator(".filmstrip__page--inked")).toHaveCount(1);
   await expect(viewer.locator(".filmstrip__page").first()).toHaveClass(/filmstrip__page--inked/);
+});
+
+/** Dark pixels in the bottom tenth of an `<img>`, 0..1: where the fake mark's ink band lies. */
+async function bottomInk(img: import("@playwright/test").Locator): Promise<number> {
+  return img.evaluate((e: HTMLImageElement) => {
+    const c = document.createElement("canvas");
+    c.width = e.naturalWidth;
+    c.height = e.naturalHeight;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(e, 0, 0);
+    const top = Math.floor(c.height * 0.9);
+    const d = ctx.getImageData(0, top, c.width, c.height - top).data;
+    let dark = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i]! < 100) dark++;
+    return dark / (d.length / 4);
+  });
+}
+
+test("a tile is page 1 as the person sees it: with the tablet's ink on it", async ({ page }) => {
+  // The fake XPS's mark writes on page 1 (`coverInkHash`); the comic has no mark.
+  await signedIn(page);
+  await mockThumbnailBackend(page, {});
+  await serve(page);
+  await page.goto("/");
+  await railSettled(page);
+  await page.locator(".card--folder", { hasText: "Document" }).click();
+  const tile = (name: string) => page.locator(".card", { hasText: name }).locator("img.thumb__img");
+  for (const name of ["Quince — a pocket guide", "Harbour at dusk"]) {
+    await expect
+      .poll(() => tile(name).evaluate((e: HTMLImageElement) => e.src.startsWith("blob:")), { timeout: 20_000 })
+      .toBe(true);
+  }
+  await expect.poll(() => bottomInk(tile("Quince — a pocket guide")), { timeout: 20_000 }).toBeGreaterThan(0.2);
+
+  // The control is the same XPS's page alone: the viewer draws the page on its
+  // own canvas, the ink on a layer above it, and the page has nothing there.
+  await page.goto("/#/note/146");
+  await freezeMotion(page);
+  await expect(page.getByRole("region", { name: "XPS document viewer" })).toBeVisible();
+  await expect.poll(() => inkFraction(page), { timeout: 20_000 }).toBeGreaterThan(0);
+  const pageBottom = await page.evaluate(() => {
+    const c = document.querySelector(".viewer--pdf .pdf-page") as HTMLCanvasElement;
+    const top = Math.floor(c.height * 0.9);
+    const d = c.getContext("2d")!.getImageData(0, top, c.width, c.height - top).data;
+    let dark = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i]! < 100) dark++;
+    return dark / (d.length / 4);
+  });
+  expect(pageBottom).toBeLessThan(0.05);
 });

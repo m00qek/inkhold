@@ -163,6 +163,11 @@ export function createBinView(opts: BinViewOptions): BinView {
       fileHash: entry.fileHash,
       bin: true,
       aspect: entry.thumbAspect,
+      // Page 1 as it was seen, ink included, as in the library.
+      coverInk:
+        entry.annotationsId && entry.coverInkHash
+          ? { markId: entry.annotationsId, hash: entry.coverInkHash }
+          : undefined,
     };
     if (kind === "image" || FACADE_THUMB_TYPES.has(type)) {
       const img = el("img", { loading: "lazy", decoding: "async", alt: "" }) as HTMLImageElement;

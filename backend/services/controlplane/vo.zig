@@ -84,9 +84,13 @@ pub const EntryVO = struct {
     itemCount: ?i64 = null,
     /// The paired live `.mark`, same value as `NoteMetaVO.annotationsId`.
     /// Paired marks are hidden from listings, so the document's card is the only
-    /// place to reach them. PDF only, gated on the verified `fileType`; omitted
-    /// when none.
+    /// place to reach them. Paged documents only (PDF, XPS, CBZ), gated on the
+    /// verified `fileType`; omitted when none.
     annotationsId: ?[]const u8 = null,
+    /// The content hash of that mark's page written on the document's page 1,
+    /// omitted when page 1 has no ink. The card's tile is page 1 as the person
+    /// sees it, ink included, so this is what moves when they write on it.
+    coverInkHash: ?[]const u8 = null,
 };
 
 /// The contents of one folder plus the freshness token.
@@ -142,6 +146,11 @@ pub const BinEntryVO = struct {
     firstPage: ?PageRefVO = null,
     /// As `EntryVO.thumbAspect`; trash still holds the blob.
     thumbAspect: ?AspectVO = null,
+    /// The trashed `.mark` that went with it, as `EntryVO.annotationsId`;
+    /// paged documents only, omitted when none.
+    annotationsId: ?[]const u8 = null,
+    /// As `EntryVO.coverInkHash`: the bin's tile is page 1 with its ink too.
+    coverInkHash: ?[]const u8 = null,
 };
 
 /// `GET /api/controlplane/bin`.

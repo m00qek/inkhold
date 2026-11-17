@@ -17,6 +17,11 @@ import type { Entry, Folder, Hash, Id, NoteSummary } from "../core/types";
 import type { Category } from "./rail/railPlaces";
 import type { LazyEngine } from "../render/lazy";
 
+/** A paged document's page-1 ink, when it has any: its tile is drawn with it. */
+function coverInkOf(note: NoteSummary): { markId: Id; hash: Hash } | undefined {
+  return note.annotationsId && note.coverInkHash ? { markId: note.annotationsId, hash: note.coverInkHash } : undefined;
+}
+
 /**
 * Types previewed through the thumbnail facade (`.spd` embedded thumb, `.txt`
 * snippet, a paged document's page 0 via MuPDF) instead of a glyph tile. Must agree with
@@ -174,7 +179,12 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     target: HTMLImageElement | null;
     thumbClass: string;
     /** `aspect` lets the facade crop a `.spd`'s letterboxed preview at transcode. */
-    thumb?: { fileType: string; fileHash: Hash | null; aspect?: { w: number; h: number } };
+    thumb?: {
+      fileType: string;
+      fileHash: Hash | null;
+      aspect?: { w: number; h: number };
+      coverInk?: { markId: Id; hash: Hash };
+    };
     alt?: string;
   } {
     const kind = fileKind(note.fileType);
@@ -205,7 +215,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
           node: img,
           target: img,
           thumbClass: "thumb",
-          thumb: { fileType: t, fileHash: note.fileHash, aspect: note.thumbAspect },
+          thumb: { fileType: t, fileHash: note.fileHash, aspect: note.thumbAspect, coverInk: coverInkOf(note) },
           alt: note.name,
         };
       }

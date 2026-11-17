@@ -15,7 +15,7 @@ import { createBinFake } from "./binFake";
 import { LAYERED_NOTE_ID, layeredPageLayers, layeredPagePayload, withLayeredPageLayers } from "./layeredFixture";
 import { fakeFileHash } from "./fakeHash";
 import { DEMO_GRAMMAR_ID, demoMeta, demoNotesOn, demoPageBytes, demoPageText, demoSummaries, isDemoNote } from "./demoNotes";
-import { FAKE_MARKS, RECOGNIZED_FROM, fakeTextHash, pages, fakeText, fakePageLinks, note, UNSCALED_NOTE_ID, fakeWords, fakeSize, FAKE_UPLOAD_HEADROOM, uploadSteps, UPLOAD_ID_BASE, NOW, versionPageCount, baseVersions, CHILDREN, ALL_NOTES, noteSummary, pathTo, withItemCount } from "./fakeFixtures";
+import { FAKE_MARKS, FAKE_MARK_PAGE_HASH, RECOGNIZED_FROM, fakeTextHash, pages, fakeText, fakePageLinks, note, UNSCALED_NOTE_ID, fakeWords, fakeSize, FAKE_UPLOAD_HEADROOM, uploadSteps, UPLOAD_ID_BASE, NOW, versionPageCount, baseVersions, CHILDREN, ALL_NOTES, noteSummary, pathTo, withItemCount } from "./fakeFixtures";
 
 /** Upload ids, per module; the counter only grows. */
 let uploadSeq = 0;
@@ -44,7 +44,7 @@ function markMeta(id: Id): NoteMeta {
     pages: [
       {
         index: 0,
-        hash: "m".repeat(32) as PageRef["hash"],
+        hash: FAKE_MARK_PAGE_HASH,
         width: 1404,
         height: 1872,
         textHash: null,

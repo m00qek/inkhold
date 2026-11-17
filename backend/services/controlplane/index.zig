@@ -142,6 +142,29 @@ pub fn pageRefAt(self: ControlPlaneService, arena: std.mem.Allocator, md5: []con
     };
 }
 
+/// The content hash of `mark_id`'s page written on the document's page 1, or
+/// null: no such page, its ink known to be empty, or the mark not indexed yet
+/// (the next listing has it). Page 1 by the viewer's own rule: a page's
+/// number, or `index + 1` where none was recorded (0); of two, the last, as
+/// the viewer keeps, and only then whether it has ink, so tile and viewer
+/// agree. One cached statement; only annotated rows ask, live or trashed alike
+/// (the caller picks the mark).
+pub fn coverInkHash(self: ControlPlaneService, arena: std.mem.Allocator, mark_id: u64) !?[]const u8 {
+    var s = try self.files.db.prepareCached(
+        "SELECT npi.content_hash, npi.has_ink FROM files m " ++
+            "JOIN note_page_index npi ON npi.blob_md5 = m.md5 " ++
+            "WHERE m.id = ?1 " ++
+            "AND (npi.source_page = 1 OR (npi.source_page = 0 AND npi.page_index = 0)) " ++
+            "ORDER BY npi.page_index DESC LIMIT 1;",
+    );
+    defer s.finalize();
+    s.bindInt(1, @intCast(mark_id));
+    if (!try s.step()) return null;
+    // NULL (not scanned yet) may have ink: the tile asks, and keeps the answer.
+    if (!s.columnIsNull(1) and s.columnInt(1) == 0) return null;
+    return try arena.dupe(u8, s.columnText(0));
+}
+
 /// Every page of a note in `page_index` order, one statement, no file I/O.
 fn pageRefsFromIndex(self: ControlPlaneService, arena: std.mem.Allocator, md5: []const u8) ![]const PageRefVO {
     var out: std.ArrayList(PageRefVO) = .empty;

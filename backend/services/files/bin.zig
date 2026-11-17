@@ -58,6 +58,7 @@ pub fn listBin(self: Files, alloc: std.mem.Allocator, user_id: u64) ![]BinEntry 
             .deleted_at = s.columnInt(6),
             .path = try alloc.dupe(u8, s.columnText(7)),
             .is_root = s.columnInt(8) != 0,
+            .mark_id = if (s.columnIntOpt(9)) |mid| @intCast(mid) else null,
         });
     }
     return out.toOwnedSlice(alloc);
@@ -454,19 +455,18 @@ const expired_bin_ids_sql =
 
 /// The bin listing: a direct read of tombstones via `files_deleted_at`, O(bin).
 /// `is_root` is computed live. A trashed pair is one row (the document's), and
-/// its size is the pair's, because purging frees both.
+/// its size is the pair's, because purging frees both. Column 9 is the pair's
+/// mark id, by the one pairing rule (`mark_pairing.pairedMarkId`).
 pub const bin_listing_sql =
     \\SELECT f.id, f.parent_id, f.name, f.is_folder, f.md5,
-    \\       f.size + COALESCE((SELECT m.size FROM files m
-    \\                           WHERE m.user_id = f.user_id
-    \\                             AND COALESCE(m.parent_id, 0) = COALESCE(f.parent_id, 0)
-    \\                             AND m.name = f.name || '.mark'
-    \\                             AND m.is_folder = 0 AND m.deleted = 1
-    \\                             AND f.is_folder = 0
-    \\                             AND substr(f.name, -5) <> '.mark'), 0),
+    \\       f.size + COALESCE((SELECT pm.size FROM files pm WHERE pm.id =
+++ " " ++ internal.paired_bin_mark_id ++ "), 0)," ++
+    \\
     \\       COALESCE(f.deleted_at, 0), COALESCE(f.deleted_path, ''),
     \\       (f.parent_id IS NULL OR NOT EXISTS (
-    \\          SELECT 1 FROM files p WHERE p.id = f.parent_id AND p.deleted = 1))
+    \\          SELECT 1 FROM files p WHERE p.id = f.parent_id AND p.deleted = 1)),
+++ " " ++ internal.paired_bin_mark_id ++
+    \\
     \\FROM files f WHERE f.user_id = ?1 AND f.deleted = 1
 ++ internal.hide_paired_bin_mark ++
     \\

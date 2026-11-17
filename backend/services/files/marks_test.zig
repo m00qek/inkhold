@@ -416,3 +416,113 @@ const shared = @import("marks_helpers.zig");
 const putPair = shared.putPair;
 const deletedFlagOf = shared.deletedFlagOf;
 const nameOf = shared.nameOf;
+
+/// Backdates a trashed row, so a test can order trashes without sleeping.
+fn setDeletedAt(f: *Fixture, id: u64, t: i64) !void {
+    try f.db.run("UPDATE files SET deleted_at = ?2 WHERE id = ?1;", &.{ .{ .int = @intCast(id) }, .{ .int = t } });
+}
+
+test "the bin pairs a document with the mark it was trashed WITH, not any mark of its name" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // t=100: a.pdf with its ink. t=200: a new a.pdf, never written on.
+    const p = try putPair(&f, null, "a", "first", "ink");
+    defer freeEntry(p.pdf);
+    defer freeEntry(p.mark);
+    try f.files.trash(1, p.pdf.id);
+    try setDeletedAt(&f, p.pdf.id, 100);
+    try setDeletedAt(&f, p.mark.id, 100);
+    const plain = try putBytes(&f, 1, null, "a.pdf", "second!");
+    defer freeEntry(plain);
+    try f.files.trash(1, plain.id);
+    try setDeletedAt(&f, plain.id, 200);
+
+    const inked = (try binRow(a, &f, 1, p.pdf.id)).?;
+    try testing.expectEqual(@as(?u64, p.mark.id), inked.mark_id);
+    try testing.expectEqual(@as(u64, 5 + 3), inked.size);
+    const bare = (try binRow(a, &f, 1, plain.id)).?;
+    try testing.expectEqual(@as(?u64, null), bare.mark_id);
+    try testing.expectEqual(@as(u64, 7), bare.size);
+    try testing.expect((try binRow(a, &f, 1, p.mark.id)) == null);
+
+    // Restoring the bare one leaves the ink in the bin with its own document.
+    var r = try f.files.restore(1, plain.id);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, p.mark.id));
+    try testing.expectEqual(@as(?u64, p.mark.id), (try binRow(a, &f, 1, p.pdf.id)).?.mark_id);
+}
+
+test "two trashed pairs of one name each keep their own ink, sizes and restores" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const one = try putPair(&f, null, "b", "one", "i1");
+    defer freeEntry(one.pdf);
+    defer freeEntry(one.mark);
+    try f.files.trash(1, one.pdf.id);
+    try setDeletedAt(&f, one.pdf.id, 100);
+    try setDeletedAt(&f, one.mark.id, 100);
+    const two = try putPair(&f, null, "b", "two!", "ink2");
+    defer freeEntry(two.pdf);
+    defer freeEntry(two.mark);
+    try f.files.trash(1, two.pdf.id);
+    try setDeletedAt(&f, two.pdf.id, 200);
+    try setDeletedAt(&f, two.mark.id, 200);
+
+    try testing.expectEqual(@as(?u64, one.mark.id), (try binRow(a, &f, 1, one.pdf.id)).?.mark_id);
+    try testing.expectEqual(@as(u64, 3 + 2), (try binRow(a, &f, 1, one.pdf.id)).?.size);
+    try testing.expectEqual(@as(?u64, two.mark.id), (try binRow(a, &f, 1, two.pdf.id)).?.mark_id);
+    try testing.expectEqual(@as(u64, 4 + 4), (try binRow(a, &f, 1, two.pdf.id)).?.size);
+    try testing.expectEqual(@as(usize, 2), (try f.files.listBin(a, 1)).len);
+
+    // From the mark's side too: restoring the older ink brings back the older document.
+    var r = try f.files.restore(1, one.mark.id);
+    defer r.deinit(testing.allocator);
+    try testing.expectEqual(@as(i64, 0), try deletedFlagOf(&f, one.pdf.id));
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, two.pdf.id));
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, two.mark.id));
+}
+
+test "purging one of two trashed pairs of one name destroys its own ink and leaves the other pair whole" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const one = try putPair(&f, null, "d", "one", "i1");
+    defer freeEntry(one.pdf);
+    defer freeEntry(one.mark);
+    try f.files.trash(1, one.pdf.id);
+    try setDeletedAt(&f, one.pdf.id, 100);
+    try setDeletedAt(&f, one.mark.id, 100);
+    const plain = try putBytes(&f, 1, null, "d.pdf", "plain");
+    defer freeEntry(plain);
+    try f.files.trash(1, plain.id);
+    try setDeletedAt(&f, plain.id, 200);
+    const two = try putPair(&f, null, "d", "two!", "ink2");
+    defer freeEntry(two.pdf);
+    defer freeEntry(two.mark);
+    try f.files.trash(1, two.mark.id);
+    try setDeletedAt(&f, two.pdf.id, 300);
+    try setDeletedAt(&f, two.mark.id, 300);
+
+    // The bare one has no ink to take with it.
+    try f.files.purge(1, plain.id);
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, one.mark.id));
+    try testing.expectEqual(@as(i64, 1), try deletedFlagOf(&f, two.mark.id));
+
+    // The older pair, from its mark: both its halves go, and only those.
+    try f.files.purge(1, one.mark.id);
+    try testing.expectEqual(@as(i64, -1), try deletedFlagOf(&f, one.pdf.id));
+    try testing.expectEqual(@as(i64, -1), try deletedFlagOf(&f, one.mark.id));
+    try testing.expectEqual(@as(?u64, two.mark.id), (try binRow(a, &f, 1, two.pdf.id)).?.mark_id);
+    try f.expectQuotaBalanced(1);
+}

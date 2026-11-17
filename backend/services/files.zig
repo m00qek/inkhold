@@ -100,6 +100,8 @@ pub const BinEntry = struct {
     /// Top of a trashed subtree (parent is root or live). Computed here because
     /// the client never sees live parents in the bin listing.
     is_root: bool,
+    /// The trashed `.mark` that went to the bin with this document, if any.
+    mark_id: ?u64 = null,
 };
 
 /// An in-flight device upload keyed by `inner_name`; slices owned by the caller.

@@ -29,6 +29,11 @@ export interface ThumbSource {
   /** A PDF's page other than its cover, 0-based (a digest's source page). */
   pdfPage?: number;
   /**
+   * A paged document's ink on its page 1 (`NoteSummary.coverInkHash`): the
+   * tile is page 1 as the person sees it, so it is drawn on, and keyed by it.
+   */
+  coverInk?: { markId: Id; hash: Hash };
+  /**
    * Trashed file: raw-file strategies must use the bin-scoped route (live
    * `/file/{id}` 404s for deleted files). `/thumbnail/{hash}` serves trashed
    * blobs too, so cache keys stay hash-only.
@@ -123,6 +128,12 @@ export interface ThumbnailsDeps {
    * MuPDF's pixels are the same in both.
    */
   renderPdfPage?(fileId: Id, hash: Hash, opts?: { bin?: boolean; page?: number }): Promise<PdfPageThumb>;
+  /**
+   * `page` with `ink`'s mark page drawn over it. Null: there is definitely
+   * nothing to draw (the tile is the plain page for good, for this ink). A
+   * throw: a passing failure, tried again next time. `page` stays the caller's.
+   */
+  inkCover?(page: ImageBitmap, ink: { markId: Id; hash: Hash }, opts: { bin?: boolean }): Promise<ImageBitmap | null>;
   /** Record an image document's true dims (cache/dimsMemo.ts); advisory. */
   setDims?(hash: string, dims: ImageDims): Promise<void>;
   /**
@@ -164,6 +175,13 @@ function glyphKind(fileType: string): string {
 // 3: the painter read the page's theme, not the one asked for, and stored
 // wrong-theme `.txt` cards and glyphs; every stored one is drawn again.
 const THUMB_CACHE_VERSION = 3;
+
+/** A tile drawn without its ink: shown, kept for this session only (`rememberForSession`), never stored. */
+class PlainFallback extends Error {
+  constructor(readonly blob: Blob) {
+    super("ink not drawn this time");
+  }
+}
 
 export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
   const { getTheme, net, painter, renderNote } = deps;
@@ -213,6 +231,17 @@ export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
     });
     cache.set(vkey, p);
     return p;
+  }
+
+  /**
+   * `blob` under `key` in memory alone, for this session: what a tile shows when
+   * its ink failed in a way that may pass. A mark page that always fails then
+   * costs one render per session, not one per sighting; a reload, or new ink
+   * (a new key), tries again, and the persistent store never sees it.
+   */
+  function rememberForSession(key: string, blob: Blob): Blob {
+    cache.set(`v${THUMB_CACHE_VERSION}:${key}`, Promise.resolve(blob));
+    return blob;
   }
 
   /** The generic glyph, drawn client-side, never fetched: every strategy's floor. */
@@ -277,19 +306,49 @@ export function createThumbnails(deps: ThumbnailsDeps): Thumbnails {
         // Theme-free (MuPDF draws on white; re-rendering per toggle would be the
         // facade's costliest produce) and keyed by file md5; the cover's key
         // has no page, as before pages other than the cover were drawn.
-        return memo(page === 0 ? `${hash}:pdf:b${bucket}` : `${hash}:pdf:p${page}:b${bucket}`, async () => {
+        const bareKey = page === 0 ? `${hash}:pdf:b${bucket}` : `${hash}:pdf:p${page}:b${bucket}`;
+        const drawn = (draw: (bitmap: ImageBitmap) => Promise<Blob>) => async (): Promise<Blob> => {
           const frame = await renderPdfPage(fileId, hash, { bin, page });
           try {
             // Record the cover's aspect for the masonry memo; fire-and-forget.
             if (page === 0 && frame.pageW > 0 && frame.pageH > 0) {
               void recordDims(hash, { w: frame.pageW, h: frame.pageH }).catch(() => {});
             }
-            return await painter.fromBitmap(frame.bitmap);
+            return await draw(frame.bitmap);
           } finally {
             // Ours to free: the worker transferred it and nothing else holds it.
             frame.bitmap.close();
           }
-        }).catch(() => glyph(fileType, theme, bucket));
+        };
+        const bare = (): Promise<Blob> => memo(bareKey, drawn((bitmap) => painter.fromBitmap(bitmap)));
+        // Page 1 with its ink, keyed by the ink too: new ink is a new tile. One
+        // render either way. Ink there is definitely none of (`null`) leaves the
+        // plain page under this key, for good; a passing failure shows the
+        // plain page from the same render, for this session only.
+        const ink = page === 0 ? source.coverInk : undefined;
+        const inkCover = deps.inkCover;
+        const inkKey = ink ? `${bareKey}+${ink.hash}` : "";
+        const tile =
+          ink && inkCover
+            ? memo(
+                inkKey,
+                drawn(async (bitmap) => {
+                  let inked: ImageBitmap | null;
+                  try {
+                    inked = await inkCover(bitmap, ink, { bin });
+                  } catch {
+                    throw new PlainFallback(await painter.fromBitmap(bitmap));
+                  }
+                  if (!inked) return painter.fromBitmap(bitmap);
+                  try {
+                    return await painter.fromBitmap(inked);
+                  } finally {
+                    inked.close();
+                  }
+                }),
+              ).catch((e: unknown) => (e instanceof PlainFallback ? rememberForSession(inkKey, e.blob) : bare()))
+            : bare();
+        return tile.catch(() => glyph(fileType, theme, bucket));
       }
 
       case "image": {

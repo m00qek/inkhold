@@ -33,7 +33,9 @@ const FLAG_RASTER_IMAGE = 0b100; // bit2
 
 /**
  * Enumerate a payload's records via the wasm (the one SNPG parser lives in Zig).
- * Null for anything the stack cannot present, or a module without the enumerator.
+ * Null for bytes the stack cannot present: an answer about the page, kept by
+ * callers that cache. A module without the enumerator (an older cached one) or
+ * out of memory throws instead, since neither says anything about the page.
  */
 export function enumerateSnpg(wasm: DecoderExports, bytes: Uint8Array): SnpgEnumeration | null {
   const {
@@ -54,11 +56,11 @@ export function enumerateSnpg(wasm: DecoderExports, bytes: Uint8Array): SnpgEnum
     typeof hashPtrOf !== "function" ||
     typeof hashLenOf !== "function"
   ) {
-    return null; // an older cached module without the enumerator
+    throw new Error("this note-decode.wasm has no SNPG enumerator (an older cached module)");
   }
 
   const inPtr = wasm.alloc(bytes.length);
-  if (inPtr === 0) return null;
+  if (inPtr === 0) throw new Error("note-decode.wasm is out of memory");
   new Uint8Array(wasm.memory.buffer, inPtr, bytes.length).set(bytes);
   const count = enumerate.call(wasm, inPtr, bytes.length);
   wasm.free(inPtr, bytes.length);

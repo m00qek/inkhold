@@ -20,25 +20,54 @@ const mark_len = std.fmt.comptimePrint("{d}", .{mark_ext.len});
 pub fn hidePairedMark(comptime a: []const u8, comptime deleted: []const u8) []const u8 {
     return " AND NOT (" ++ a ++ ".is_folder = 0" ++
         " AND substr(" ++ a ++ ".name, -" ++ mark_len ++ ") = '" ++ mark_ext ++ "'" ++
-        " AND EXISTS (SELECT 1 FROM files p" ++
-        " WHERE p.user_id = " ++ a ++ ".user_id" ++
-        " AND COALESCE(p.parent_id, 0) = COALESCE(" ++ a ++ ".parent_id, 0)" ++
-        " AND p.name = substr(" ++ a ++ ".name, 1, length(" ++ a ++ ".name) - " ++ mark_len ++ ")" ++
-        " AND substr(p.name, -" ++ mark_len ++ ") <> '" ++ mark_ext ++ "'" ++
-        " AND p.is_folder = 0 AND p.deleted = " ++ deleted ++ "))";
+        " AND EXISTS (SELECT 1" ++ docOfMark(a, deleted) ++ "))";
 }
 
-/// SQL: the live `.mark` id carried by document row `a`, or NULL. A subquery
-/// (one index seek inside the caller's statement) rather than a per-row
-/// `liveMarkIdFor` call. Live only; same guards as `hidePairedMark`.
-pub fn pairedMarkId(comptime a: []const u8) []const u8 {
+/// SQL: the document id the `.mark` row `a` is the ink of, or NULL. `deleted`
+/// as in `hidePairedMark`, whose set it matches.
+pub fn pairedDocId(comptime a: []const u8, comptime deleted: []const u8) []const u8 {
+    return "(SELECT p.id" ++ docOfMark(a, deleted) ++ " LIMIT 1)";
+}
+
+/// SQL: the `.mark` id carried by document row `a`, or NULL. A subquery (one
+/// index seek inside the caller's statement) rather than a per-row
+/// `liveMarkIdFor` call. `deleted` as in `hidePairedMark`: "0" pairs a live
+/// document with its live mark, "1" a trashed one with the mark it went to the
+/// bin with (`inBin`). Same guards as `hidePairedMark`.
+pub fn pairedMarkId(comptime a: []const u8, comptime deleted: []const u8) []const u8 {
     return "(SELECT m.id FROM files m" ++
         " WHERE " ++ a ++ ".is_folder = 0" ++
         " AND substr(" ++ a ++ ".name, -" ++ mark_len ++ ") <> '" ++ mark_ext ++ "'" ++
         " AND m.user_id = " ++ a ++ ".user_id" ++
         " AND COALESCE(m.parent_id, 0) = COALESCE(" ++ a ++ ".parent_id, 0)" ++
         " AND m.name = " ++ a ++ ".name || '" ++ mark_ext ++ "'" ++
-        " AND m.is_folder = 0 AND m.deleted = 0)";
+        " AND m.is_folder = 0 AND m.deleted = " ++ deleted ++
+        inBin(deleted, "m", a) ++ " LIMIT 1)";
+}
+
+/// `FROM ... WHERE ...` of the document the mark row `a` names, in `deleted`.
+fn docOfMark(comptime a: []const u8, comptime deleted: []const u8) []const u8 {
+    return " FROM files p" ++
+        " WHERE p.user_id = " ++ a ++ ".user_id" ++
+        " AND COALESCE(p.parent_id, 0) = COALESCE(" ++ a ++ ".parent_id, 0)" ++
+        " AND p.name = substr(" ++ a ++ ".name, 1, length(" ++ a ++ ".name) - " ++ mark_len ++ ")" ++
+        " AND substr(p.name, -" ++ mark_len ++ ") <> '" ++ mark_ext ++ "'" ++
+        " AND p.is_folder = 0 AND p.deleted = " ++ deleted ++
+        inBin(deleted, a, "p");
+}
+
+/// The library holds one row per name, so a name is the pair. The bin can hold
+/// several: there a mark is the ink of the document it was trashed with. Both
+/// halves always go to the bin in one transaction under one timestamp, whichever was deleted
+/// (`Files.trash`), so they share `deleted_at`; a document trashed again later,
+/// alone, takes no ink that was never on it. A mark trashed alone is restored
+/// alone, and then pairs by name like any other: with a live document of that
+/// name, if there is one.
+fn inBin(comptime deleted: []const u8, comptime m: []const u8, comptime d: []const u8) []const u8 {
+    return if (comptime std.mem.eql(u8, deleted, "1"))
+        " AND COALESCE(" ++ m ++ ".deleted_at, 0) = COALESCE(" ++ d ++ ".deleted_at, 0)"
+    else
+        "";
 }
 
 /// `foo.epub.mark` -> `foo.epub`, or null when `name` cannot be a mark (no
