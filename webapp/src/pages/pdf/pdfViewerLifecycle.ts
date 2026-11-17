@@ -37,8 +37,9 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
   }
 
   /**
-   * Index the `.mark`'s pages by PDF page (`sourcePage` is 1-based). Pages without
-   * one are skipped rather than guessed, or ink lands on the wrong page.
+   * Index the `.mark`'s pages by PDF page (`sourcePage` is 1-based). The server
+   * leaves it out when it is `index + 1`, so a page annotating PDF page 1 (or a
+   * run from page 1) arrives without one: that is its number, not a guess.
    */
   async function loadMark(id: Id, mine: number): Promise<void> {
     let mm: NoteMeta;
@@ -52,7 +53,7 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
     markPages.clear();
     layersToggle.hidden = false;
     for (const ref of mm.pages) {
-      if (ref.sourcePage !== null && ref.sourcePage > 0) markPages.set(ref.sourcePage - 1, ref);
+      markPages.set((ref.sourcePage ?? ref.index + 1) - 1, ref);
     }
     // The whole-document export row learns about ink here, not on visiting the page.
     downloads.refreshGroups();
