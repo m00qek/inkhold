@@ -102,10 +102,9 @@ const upload_extensions = [_][]const u8{
     ".txt",  ".png",
     ".jpg",  ".jpeg",
     ".webp", ".bmp",
-    ".cbz",
-    ".fb2",  ".xps",
-    ".mobi", ".azw",
-    ".azw3",
+    ".cbz",  ".fb2",
+    ".xps",  ".mobi",
+    ".azw",  ".azw3",
 };
 
 /// `>` not `>=`: a bare `.pdf` is a dotfile, not a PDF.
