@@ -19,7 +19,7 @@ show of it.
 | PDF (`.pdf`) | With its outline, selectable text, and your handwriting on it (`.mark`) | Its own text, not your handwriting | `.png` or `.ora` per page, with your handwriting; the original `.pdf` |
 | Sketch (`.spd`) | With its layers and their opacity | No | `.png` or `.ora`; the original `.spd` |
 | Text (`.txt`) | As text, with its own size control | Its text | The original |
-| Image (`.png`, `.jpg`, `.webp`, `.gif`) | As an image | Its name only | The original |
+| Image (`.png`, `.jpg`, `.webp`, `.gif`, `.bmp`) | As an image | Its name only | The original |
 | EPUB, Office documents and anything else | No viewer | Its name only | The original |
 
 Every file's name is searchable. Version history keeps earlier versions of

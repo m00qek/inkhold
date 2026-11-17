@@ -302,7 +302,7 @@ test "web upload: an off-list extension is 415 and an unsafe filename is 400, bo
     const accepted = [_][]const u8{
         "a.note", "b.SPD", "c.pdf",  "d.EPUB", "e.doc",  "f.docx",
         "g.txt",  "h.PNG", "i.jpg",  "j.jpeg", "k.webp", "l.cbz",
-        "m.fb2",  "n.xps", "o.mobi", "p.azw",  "q.AZW3",
+        "m.fb2",  "n.xps", "o.mobi", "p.azw",  "q.AZW3", "r.BMP",
     };
     for (accepted, 0..) |name, i| {
         var pbuf: [64]u8 = undefined;

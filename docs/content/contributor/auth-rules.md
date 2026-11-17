@@ -48,7 +48,7 @@ sends. Why they are this way: [How sign-in and trust work](@/contributor/securit
   `files` row says whose bytes are whose. An id or md5 that belongs to someone
   else answers exactly like one that does not exist: a 404 with a byte-identical
   body.
-- `/file/{id}` serves inline only an allowlist of types (png, jpg, webp, gif,
+- `/file/{id}` serves inline only an allowlist of types (png, jpg, webp, gif, bmp,
   pdf), with `nosniff`; everything else is an attachment. An SVG or HTML file
   from a tablet, served inline, would be stored cross-site scripting.
 - Link schemes are allowlisted (http, https, mailto) in the server, in the PDF
