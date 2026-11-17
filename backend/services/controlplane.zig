@@ -92,9 +92,9 @@ pub const ControlPlaneService = struct {
             .hasRecognizedText = s.has_recognized_text,
             .thumbAspect = s.aspect,
             // No query here: `e.mark_id` was resolved in the listing's own
-            // statement (`mark_pairing.pairedMarkId`). Gated on the verified PDF
+            // statement (`mark_pairing.pairedMarkId`). Gated on the verified paged
             // type to match `noteMetaIn`, though pairing itself is format-agnostic.
-            .annotationsId = if (isPdf(s.file_type))
+            .annotationsId = if (takesInk(s.file_type))
                 if (e.mark_id) |m| try idStr(arena, m) else null
             else
                 null,
@@ -273,7 +273,7 @@ pub const ControlPlaneService = struct {
     pub const lookup = controlplane_meta.lookup;
     pub const noteMeta = controlplane_meta.noteMeta;
     pub const binNoteMeta = controlplane_meta.binNoteMeta;
-    const isPdf = controlplane_meta.isPdf;
+    const takesInk = controlplane_meta.takesInk;
     const noteMetaIn = controlplane_meta.noteMetaIn;
     pub const historyNoteMeta = controlplane_meta.historyNoteMeta;
 

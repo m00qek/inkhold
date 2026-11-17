@@ -10,9 +10,9 @@ extra:
 # Work through a PDF
 
 A PDF opens in its own viewer, with what makes long documents manageable. XPS
-documents and comic books (`.cbz`) open in the same viewer, page by page. A
-comic book has no text to select or find, and only a PDF can be exported as a
-PDF.
+documents and comic books (`.cbz`) open in the same viewer, page by page,
+with your handwriting on them too. A comic book has no text to select or find,
+and only a PDF can be exported as a PDF.
 
 - **Outline** shows the PDF's own table of contents: choose an entry to go
   there.

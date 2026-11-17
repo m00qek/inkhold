@@ -197,6 +197,39 @@ test "wire contract: EntryVO — a note row, and a PDF row naming its mark" {
     try expectWireFixture("entry-annotated-pdf.json", pinEntryTime(doc));
 }
 
+test "a listing row names an XPS's or a comic book's mark as noteMeta does; an EPUB's, neither" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const mark = try wireMarkBytes(gpa);
+    defer gpa.free(mark);
+
+    var ids: [3]u64 = undefined;
+    inline for (.{ "guide.xps", "comic.cbz", "book.epub" }, 0..) |name, i| {
+        ids[i] = try seedBytes(&f, null, name, "PK\x03\x04 a zip");
+        _ = try seedBytes(&f, null, name ++ ".mark", mark);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+    const root = try svc.listing(a, 1, null);
+
+    inline for (.{ "guide.xps", "comic.cbz", "book.epub" }, 0..) |name, i| {
+        const row = try entryNamed(root, name);
+        const meta = (try svc.noteMeta(a, 1, ids[i])).?;
+        if (i < 2) {
+            try testing.expect(row.annotationsId != null);
+            try testing.expectEqualStrings(meta.annotationsId.?, row.annotationsId.?);
+        } else {
+            try testing.expect(row.annotationsId == null and meta.annotationsId == null);
+        }
+    }
+    // Paired, so the marks themselves list as no rows of their own.
+    for (root.entries) |e| try testing.expect(!std.mem.endsWith(u8, e.name, ".mark"));
+}
+
 test "wire contract: ListingVO — a subfolder listing, breadcrumb and all" {
     var f = try Fixture.init();
     defer f.deinit();

@@ -9,6 +9,7 @@ const NoteMetaVO = controlplane.NoteMetaVO;
 const fileTypeFor = controlplane.fileTypeFor;
 const idStr = controlplane.idStr;
 const controlplane_index = @import("index.zig");
+const pdf_index = @import("../pdf_index.zig");
 
 /// Which state a read may see: `.trashed` for the bin's preview and history
 /// endpoints, `.live` otherwise. Same type as `Files.HistoryScope`.
@@ -33,9 +34,15 @@ pub fn binNoteMeta(self: ControlPlaneService, arena: std.mem.Allocator, user_id:
     return noteMetaIn(self, arena, user_id, id, .trashed);
 }
 
-/// Compares the verified type, never the filename.
-pub fn isPdf(file_type: ?[]const u8) bool {
-    return file_type != null and std.mem.eql(u8, file_type.?, "pdf");
+/// Whether a file takes the tablet's `.mark` ink: a paged document (a PDF, an
+/// XPS or a CBZ; the tablet was seen writing all three). Compares the verified
+/// type, never the filename.
+pub fn takesInk(file_type: ?[]const u8) bool {
+    const t = file_type orelse return false;
+    for (pdf_index.extensions) |ext| {
+        if (std.mem.eql(u8, t, ext)) return true;
+    }
+    return false;
 }
 
 /// The live `.mark` beside `entry` (`foo.pdf` -> `foo.pdf.mark`: the
@@ -64,7 +71,7 @@ pub fn noteMetaIn(self: ControlPlaneService, arena: std.mem.Allocator, user_id: 
         .pxPerMm = described.px_per_mm,
         // Live only: the lookup is live-scoped and must not pair with a
         // trashed document.
-        .annotationsId = if (scope == .live and isPdf(described.file_type))
+        .annotationsId = if (scope == .live and takesInk(described.file_type))
             try annotationsIdFor(self, arena, user_id, entry)
         else
             null,

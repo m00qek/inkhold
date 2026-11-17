@@ -9,13 +9,13 @@ import { fakeAccountMethods } from "./fakeAccount";
 import { fakeTodoMethods } from "./fakeTodo";
 import { fakeDigestMethods } from "./fakeDigest";
 
-export { FAKE_UPLOAD_HEADROOM, MARKED_PDF_ID, PDF_MARK_ID } from "./fakeFixtures";
+export { FAKE_UPLOAD_HEADROOM, MARKED_PDF_ID, PDF_MARK_ID, MARKED_XPS_ID, XPS_MARK_ID } from "./fakeFixtures";
 export { fakeFileHash } from "./fakeHash";
 import { createBinFake } from "./binFake";
 import { LAYERED_NOTE_ID, layeredPageLayers, layeredPagePayload, withLayeredPageLayers } from "./layeredFixture";
 import { fakeFileHash } from "./fakeHash";
 import { DEMO_GRAMMAR_ID, demoMeta, demoNotesOn, demoPageBytes, demoPageText, demoSummaries, isDemoNote } from "./demoNotes";
-import { MARKED_PDF_ID, PDF_MARK_ID, PDF_MARK_SOURCE_PAGE, RECOGNIZED_FROM, fakeTextHash, pages, fakeText, fakePageLinks, note, UNSCALED_NOTE_ID, fakeWords, fakeSize, FAKE_UPLOAD_HEADROOM, uploadSteps, UPLOAD_ID_BASE, NOW, versionPageCount, baseVersions, CHILDREN, ALL_NOTES, noteSummary, pathTo, withItemCount } from "./fakeFixtures";
+import { FAKE_MARKS, RECOGNIZED_FROM, fakeTextHash, pages, fakeText, fakePageLinks, note, UNSCALED_NOTE_ID, fakeWords, fakeSize, FAKE_UPLOAD_HEADROOM, uploadSteps, UPLOAD_ID_BASE, NOW, versionPageCount, baseVersions, CHILDREN, ALL_NOTES, noteSummary, pathTo, withItemCount } from "./fakeFixtures";
 
 /** Upload ids, per module; the counter only grows. */
 let uploadSeq = 0;
@@ -29,12 +29,13 @@ export interface FakeApiOptions {
   syncVersion?: number;
 }
 
-/** The paired `.mark`'s one page is PDF page 2; its dims are the device panel, not the PDF page. */
-function markMeta(): NoteMeta {
+/** A paired `.mark`'s one page (`FAKE_MARKS`); its dims are the device panel, not the document page. */
+function markMeta(id: Id): NoteMeta {
+  const mark = FAKE_MARKS[id]!;
   const layers = layeredPageLayers(0);
   return {
-    id: PDF_MARK_ID,
-    name: "Appliance manual.pdf.mark",
+    id,
+    name: mark.name,
     annotationsId: null,
     fileType: "mark",
     fileHash: "m".repeat(32) as NoteMeta["fileHash"],
@@ -49,12 +50,17 @@ function markMeta(): NoteMeta {
         textHash: null,
         // A `.mark` imports no template, so no links of its own.
         linksHash: null,
-        sourcePage: PDF_MARK_SOURCE_PAGE,
+        sourcePage: mark.sourcePage,
         hasInk: true,
         layers,
       },
     ],
   };
+}
+
+/** The mark annotating `id`, or null. */
+function markOn(id: Id): Id | null {
+  return Object.entries(FAKE_MARKS).find(([, m]) => m.on === id)?.[0] ?? null;
 }
 
 /**
@@ -128,12 +134,12 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
 
     async getNoteMeta(id: Id): Promise<NoteMeta> {
       await delay(latency);
-      if (id === PDF_MARK_ID) return markMeta();
+      if (FAKE_MARKS[id]) return markMeta(id);
       if (isDemoNote(id)) return demoMeta(id);
       const summary = ALL_NOTES[id];
       if (!summary) throw new Error(`no such note: ${id}`);
       return {
-        annotationsId: id === MARKED_PDF_ID ? PDF_MARK_ID : null,
+        annotationsId: markOn(id),
         id,
         name: summary.name,
         // Layers per note (same helper as the listing's `firstPage`); dims from the summary so a landscape meta agrees.
@@ -156,7 +162,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
     async getPageBytes(_id: Id, page: PageRef): Promise<ArrayBuffer> {
       await delay(latency);
       if (isDemoNote(_id)) return demoPageBytes(_id, page);
-      if (_id === PDF_MARK_ID) {
+      if (FAKE_MARKS[_id]) {
         const payload = layeredPagePayload(0);
         if (payload) return payload.slice().buffer as ArrayBuffer;
       }
@@ -234,7 +240,7 @@ export function createFakeApi(opts: FakeApiOptions = {}): Api {
     async historyPageBytes(_id: Id, md5: string, index: number): Promise<ArrayBuffer> {
       await delay(latency);
       // The PDF annotation preview decodes this for real, so serve the live mark payload rather than junk.
-      if (_id === PDF_MARK_ID) {
+      if (FAKE_MARKS[_id]) {
         const payload = layeredPagePayload(0);
         if (payload) return payload.slice().buffer as ArrayBuffer;
       }

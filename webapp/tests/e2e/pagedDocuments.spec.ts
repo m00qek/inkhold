@@ -111,3 +111,15 @@ test("an XPS and a comic book get their page 1 as a gallery tile, at its shape",
     expect(shape.h > shape.w).toBe(portrait);
   }
 });
+
+test("the tablet's handwriting on an XPS paints on its page, as a PDF's does", async ({ page }) => {
+  // The fake mark's one page has no `sourcePage`, as the wire sends ink on page 1.
+  const viewer = await open(page, "146", "XPS document viewer");
+  await expect(page.locator(".pdf-mark canvas").first()).toBeAttached({ timeout: 20_000 });
+  await expect(viewer.getByRole("button", { name: "Annotations" })).toBeVisible();
+
+  const pages = viewer.getByRole("button", { name: "Pages", exact: true });
+  if ((await pages.getAttribute("aria-pressed")) !== "true") await pages.click();
+  await expect(viewer.locator(".filmstrip__page--inked")).toHaveCount(1);
+  await expect(viewer.locator(".filmstrip__page").first()).toHaveClass(/filmstrip__page--inked/);
+});
