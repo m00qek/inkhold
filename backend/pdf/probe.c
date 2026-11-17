@@ -103,29 +103,3 @@ int ink_pdf_probe(int fd, struct ink_pdf_info *out)
     }
     return rc;
 }
-
-/* JPX stubs. MuPDF 1.28.1's `load-jpx.c` is excluded from the build because
- * its `FZ_ENABLE_JPX == 0` stub for `fz_load_jpx_info` lacks the `defcs`
- * parameter its declaration has; these are correctly typed replacements. */
-
-fz_pixmap *fz_load_jpx(fz_context *ctx, const unsigned char *data, size_t size, fz_colorspace *defcs)
-{
-    (void)data;
-    (void)size;
-    (void)defcs;
-    fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "JPX support disabled");
-}
-
-void fz_load_jpx_info(fz_context *ctx, const unsigned char *data, size_t size,
-    int *wp, int *hp, int *xresp, int *yresp, fz_colorspace **cspacep, fz_colorspace *defcs)
-{
-    (void)data;
-    (void)size;
-    (void)wp;
-    (void)hp;
-    (void)xresp;
-    (void)yresp;
-    (void)cspacep;
-    (void)defcs;
-    fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "JPX support disabled");
-}

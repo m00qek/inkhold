@@ -263,33 +263,6 @@ int ink_shim_page_size(fz_document *doc, int number, float *w, float *h)
  */
 __asm__(".globl __c_longjmp\n.tagtype __c_longjmp i32\n__c_longjmp:\n");
 
-/* --- JPX stubs ---
- * MuPDF 1.28.1's disabled-JPX stub of `fz_load_jpx_info` lacks the trailing
- * `defcs` parameter; wasm-ld turns the mismatch into a trapping stub. So
- * `load-jpx.c` is excluded in `build.zig` and correct stubs live here. */
-
-fz_pixmap *fz_load_jpx(fz_context *ctx, const unsigned char *data, size_t size, fz_colorspace *defcs)
-{
-	(void)data;
-	(void)size;
-	(void)defcs;
-	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "JPX support disabled");
-}
-
-void fz_load_jpx_info(fz_context *ctx, const unsigned char *data, size_t size,
-	int *wp, int *hp, int *xresp, int *yresp, fz_colorspace **cspacep, fz_colorspace *defcs)
-{
-	(void)data;
-	(void)size;
-	(void)wp;
-	(void)hp;
-	(void)xresp;
-	(void)yresp;
-	(void)cspacep;
-	(void)defcs;
-	fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "JPX support disabled");
-}
-
 /* --- wasi-libc gap --- */
 
 /* wasi-libc has no `mkstemp`; MuPDF only uses it on a save-to-path we never

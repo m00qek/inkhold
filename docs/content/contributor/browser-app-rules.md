@@ -101,4 +101,4 @@ A PDF has no version history of its own; its `.mark` does.
   browser floor at about Chrome 95, Firefox 131 and Safari 18.4. Every export
   that can suspend on `ink.host_read` must be wrapped for JSPI.
 - MuPDF is a pinned, unpatched dependency. An upstream bug is worked around by
-  excluding sources and supplying stubs (`load-jpx.c`), never by patching.
+  excluding sources and supplying stubs, never by patching.
