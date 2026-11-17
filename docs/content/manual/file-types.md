@@ -20,7 +20,9 @@ show of it.
 | Sketch (`.spd`) | With its layers and their opacity | No | `.png` or `.ora`; the original `.spd` |
 | Text (`.txt`) | As text, with its own size control | Its text | The original |
 | Image (`.png`, `.jpg`, `.webp`, `.gif`, `.bmp`) | As an image | Its name only | The original |
-| EPUB, Office documents and anything else | No viewer | Its name only | The original |
+| XPS document (`.xps`) | Page by page, with its outline and selectable text | Its own text | `.png` per page; the original `.xps` |
+| Comic book (`.cbz`) | Page by page, one image each | Its name only | `.png` per page; the original `.cbz` |
+| EPUB, FB2, Word, Kindle books and anything else | No viewer | Its name only | The original |
 
 Every file's name is searchable. Version history keeps earlier versions of
 every file; notebooks, sketches, text files and images can be previewed there.

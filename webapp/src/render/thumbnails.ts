@@ -6,7 +6,7 @@
 // runs in Node; the real canvas/fetch seams are at the bottom.
 
 import type { Hash, Id, PageRef, Theme } from "../core/types";
-import { PREVIEWABLE_IMAGE_TYPES, rawFileUrl } from "../core/fileKind";
+import { isPagedDocument, PREVIEWABLE_IMAGE_TYPES, rawFileUrl } from "../core/fileKind";
 import { densityBucket } from "./types";
 import { setDims as memoSetDims, type ImageDims } from "../cache/dimsMemo";
 // A content hash's thumbnail 404 is permanent (new cover => new hash), so it is
@@ -142,7 +142,7 @@ export function strategyFor(fileType: string): ThumbStrategy {
   if (t === "spd") return "image";
   if (PREVIEWABLE_IMAGE_TYPES.includes(t)) return "image-doc";
   if (t === "txt") return "text";
-  if (t === "pdf") return "pdf-page";
+  if (isPagedDocument(t)) return "pdf-page";
   return "glyph";
 }
 

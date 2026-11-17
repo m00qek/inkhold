@@ -183,9 +183,9 @@ export function createPdfFindController(deps: PdfFindDeps): PdfFindController {
   };
 }
 
-/** The counter's words: the shared wording, a PDF's own "no text" line. */
-export function pdfCountText(state: PdfFindState): string {
-  return findCountText(state, "file", "No text to search: this PDF's pages are images, like a scan.");
+/** The counter's words: the shared wording, a paged document's own "no text" line. */
+export function pdfCountText(state: PdfFindState, noun = "PDF"): string {
+  return findCountText(state, "file", `No text to search: this ${noun}'s pages are images, like a scan.`);
 }
 
 export const pdfCountIsNone = findCountIsNone;

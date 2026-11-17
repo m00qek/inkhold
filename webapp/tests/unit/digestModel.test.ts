@@ -141,6 +141,10 @@ describe("opening a digest's source", () => {
   it("a PDF or a note opens at its page; an EPUB, or a file not in the library, does not", () => {
     expect(opensAtPage(at("Document/a.PDF"))).toBe(true);
     expect(opensAtPage(at("Note/n.note"))).toBe(true);
+    expect(opensAtPage(at("Document/guide.xps"))).toBe(true);
+    expect(opensAtPage(at("Document/comic.CBZ"))).toBe(true);
+    expect(opensAtPage(at("Document/book.fb2"))).toBe(false);
+    expect(opensAtPage(at("Document/pdf"))).toBe(false); // a name, not an extension
     expect(opensAtPage(at("Document/book.epub"))).toBe(false);
     expect(opensAtPage(at("Document/a.pdf", null))).toBe(false);
   });

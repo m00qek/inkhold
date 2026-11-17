@@ -2,7 +2,7 @@
 // release it.
 
 import type { Id, NoteMeta, NoteSummary } from "../../core/types";
-import { formatBytes, rawFileUrl, fileTypeLabel } from "../../core/fileKind";
+import { formatBytes, rawFileUrl, fileTypeLabel, pagedDocument } from "../../core/fileKind";
 import { FIT_PAGE } from "../viewer/viewerControls";
 import { backWord, originSubtitle } from "../viewer/viewerChrome";
 import type { ReaderOrigin } from "../viewer/viewer";
@@ -139,7 +139,9 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
     // The stepper keeps its own label, so reset the readout too.
     zoomStepper.set(FIT_PAGE);
     st.pageIndex = Math.max(0, page);
-    body.showPlaceholder(summary.name, "Opening this PDF…");
+    // Named for what it is before anything shows: labels, badge, whether Find applies.
+    ctx.nameFor(summary.fileType);
+    body.showPlaceholder(summary.name, `Opening this ${pagedDocument(summary.fileType).noun}…`);
     ctx.nav.syncPager();
     // As every viewer: focus on ‹ (a keyboard's way back out), unless the
     // route asked for a search, whose field then keeps it.
@@ -149,7 +151,7 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
       // MuPDF's error handling needs wasm exception handling.
       body.showPlaceholder(
         summary.name,
-        "This browser can't preview PDFs. Download it to read it, or try a newer browser.",
+        `This browser can't preview this ${pagedDocument(summary.fileType).noun}. Download it to read it, or try a newer browser.`,
       );
       return;
     }
@@ -197,7 +199,7 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
       // a PDF" (the shim never calls `fz_needs_password`), so the only distinction
       // shown is bytes not arriving versus not opening.
       if (err instanceof PdfLoadError) {
-        body.showPlaceholder(summary.name, "Couldn't load this PDF.");
+        body.showPlaceholder(summary.name, `Couldn't load this ${pagedDocument(summary.fileType).noun}.`);
       } else {
         console.warn("[pdf] open failed:", (err as Error).message ?? err);
         body.showPlaceholder(summary.name, "Couldn't read this file.");
@@ -210,7 +212,7 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
       originSubtitle(origin, `${st.pageCount} ${st.pageCount === 1 ? "page" : "pages"}`),
     );
     if (st.pageCount === 0) {
-      body.showPlaceholder(summary.name, "This PDF has no pages.");
+      body.showPlaceholder(summary.name, `This ${pagedDocument(summary.fileType).noun} has no pages.`);
       release();
       return;
     }
@@ -218,7 +220,8 @@ export function createPdfLifecycle(ctx: PdfViewerCtx): PdfLifecycle {
     // Prime find from a `?q=` deep link, after the clamp. Bin URLs carry no query.
     find.setDocument(m.id, m.fileHash);
     find.setPage(st.pageIndex);
-    if (query !== "") {
+    // Find is dimmed on a comic book (`nameFor`), so a `?q=` link just opens it.
+    if (query !== "" && !ctx.findToggle.disabled) {
       findBar.input.value = query;
       find.open();
       find.setQuery(query);

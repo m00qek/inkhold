@@ -20,13 +20,23 @@ feature degrades silently.
 | 3 | `core/fileKind.ts` — `UPLOAD_ACCEPT` | whether the web may upload it |
 | 4 | `render/thumbnails.ts` — `strategyFor()` | which thumbnail strategy draws its tile |
 | 5 | `pages/galleryCards.ts` — `FACADE_THUMB_TYPES` | whether the card asks for a tile at all |
-| 6 | `pages/library/library.ts` — `viewerFor()` | which viewer opens it |
+| 6 | `pages/viewer/viewerSet.ts` — `viewerFor()` | which viewer opens it |
 | 7 | `api/fake.ts` | a fixture, or no e2e can reach it |
 | 8 | `backend/services/controlplane.zig` — `fileTypeFor()` | the type the server reports (parser-verified, not the extension) |
 | 9 | `backend/handlers/controlplane/bytes.zig` — `inline_types` | inline or attachment |
 
 4 and 5 must agree; `thumbnails.test.ts` asserts it for every type. 8 is why a
 `.mark` (a thin `.note`) reports as `"note"`.
+
+A format MuPDF opens with fixed pages joins the paged documents instead: a row
+in `PAGED_DOCUMENTS` in `core/fileKind.ts` (rows 4 to 6, the tile's shape, the
+viewer's words and download row, and digests opening at a page follow it) and
+`pdf_index.extensions` on the server (the page count, page-1 shape and text
+pass), plus its handler registered in `backend/pdf/probe.c` and `text.c`; the
+worker's two queries are generated from that list. Only a PDF can be grafted
+into a new PDF. A format that reflows (EPUB, FB2) is never one: laying a book
+out is too much for a Pi.
+
 Then:
 
 1. Add the type's fixture to the fake API (row 7) and an e2e spec that opens

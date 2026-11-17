@@ -8,7 +8,7 @@ import { insideMarks, insideOf, typedMarks } from "../search/match";
 import { el } from "../ui/dom";
 import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
 import { ICONS, svg, type IconName } from "../ui/icons";
-import { fileKind, rawFileUrl } from "../core/fileKind";
+import { fileKind, PAGED_DOCUMENT_TYPES, rawFileUrl } from "../core/fileKind";
 import { getDims } from "../cache/dimsMemo";
 import { go, folderHref, noteHref, notePageHref } from "../router";
 import { pageSummary, deepLinkQuery } from "./noteSearch";
@@ -19,10 +19,10 @@ import type { LazyEngine } from "../render/lazy";
 
 /**
 * Types previewed through the thumbnail facade (`.spd` embedded thumb, `.txt`
-* snippet, `.pdf` page 0 via MuPDF) instead of a glyph tile. Must agree with
+* snippet, a paged document's page 0 via MuPDF) instead of a glyph tile. Must agree with
 * `strategyFor`; `thumbnails.test.ts` checks the pair. Also read by `bin.ts`.
 */
-export const FACADE_THUMB_TYPES: ReadonlySet<string> = new Set(["spd", "txt", "pdf"]);
+export const FACADE_THUMB_TYPES: ReadonlySet<string> = new Set(["spd", "txt", ...PAGED_DOCUMENT_TYPES]);
 
 /** Client-side: the facade rasterises `.txt` snippets at 3:4 itself. */
 const TXT_ASPECT = 3 / 4;

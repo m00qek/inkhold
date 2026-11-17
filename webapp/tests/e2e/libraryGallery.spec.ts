@@ -29,7 +29,7 @@ test.describe("library rail + gallery", () => {
       await page.goto("/");
 
       await openCategory(page, "Document");
-      await expect(head(page)).toHaveText("4 docs");
+      await expect(head(page)).toHaveText("6 docs");
 
       await openCategory(page, "Screenshot");
       await expect(head(page)).toHaveText("2 docs");

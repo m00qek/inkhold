@@ -53,7 +53,7 @@ function inkholdServiceWorker(): Plugin {
 
 /**
  * `npm run demo` only: answer `/file/:id` (a file's raw bytes) for the fake
- * library's `.txt`, `.spd` and `.pdf` entries with committed fixtures, so
+ * library's `.txt`, `.spd` and paged entries with committed fixtures, so
  * their viewers show real content instead of this page's own HTML, and
  * `/thumbnail/:hash` for the sketches' cards.
  */
@@ -63,9 +63,13 @@ function demoFiles(): Plugin {
   const spd = { path: at("../parsers/spd/tests/fixtures/layers_hidden.spd"), type: "application/octet-stream" };
   const pdf = { path: at("./wasm/tests/fixtures/two-page.pdf"), type: "application/pdf" };
   const grammar = { path: at("./tests/fixtures/demo/deutsch-lernen.pdf"), type: "application/pdf" };
+  const xps = { path: at("../backend/pdf/testdata/text-three-page.xps"), type: "application/octet-stream" };
+  const cbz = { path: at("../backend/pdf/testdata/two-page.cbz"), type: "application/octet-stream" };
   // Ids from `src/api/fakeFixtures.ts`, and the German grammar sheet's from `src/api/demoNotes.ts`.
   const files: Record<string, { path: URL; type: string }> = {
     "142": pdf,
+    "146": xps,
+    "147": cbz,
     "193": grammar,
     "174": spd,
     "175": spd,

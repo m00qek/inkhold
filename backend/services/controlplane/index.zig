@@ -19,7 +19,7 @@ const controlplane_meta = @import("meta.zig");
 const IndexRow = struct {
     indexable: bool,
     page_count: i64,
-    /// `.note`: device panel; `.pdf`: page 1's box in points
+    /// `.note`: device panel; a paged document: page 1's box in points
     /// (`pdf_index.zig`). Zero when unmeasured.
     width: i64,
     height: i64,
@@ -86,7 +86,7 @@ pub fn aspectOf(row: IndexRow, first_page: ?PageRefVO) ?AspectVO {
         const p = first_page orelse return null;
         return positivePair(p.width, p.height);
     }
-    // A `.pdf`'s shape (`pdf_index.zig`); `indexable` means "real `.note`".
+    // A paged document's shape (`pdf_index.zig`); `indexable` means "real `.note`".
     return positivePair(row.spd_surface_w, row.spd_surface_h) orelse
         positivePair(row.spd_thumb_w, row.spd_thumb_h) orelse
         positivePair(row.width, row.height);

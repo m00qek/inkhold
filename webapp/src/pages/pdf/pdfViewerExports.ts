@@ -85,6 +85,7 @@ export function createPdfViewerExports(opts: PdfViewerExportsOptions): PdfViewer
       tuned:
         canvas.style.visibility === "hidden" ||
         (ink?.views.some((v) => v.visible !== v.authoredVisible) ?? false),
+      fileType: (state.meta()?.fileType ?? "pdf").toLowerCase(),
     };
   }
 

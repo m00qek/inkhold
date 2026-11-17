@@ -2,6 +2,7 @@
 // the page's highlight layer and the page strip's match counts. A part of
 // the viewer like navigation and the lifecycle, built from its context.
 
+import { pagedDocument } from "../../core/fileKind";
 import type { PdfWord } from "../../render/pdfWire";
 import { createPdfFindController, pdfCountIsNone, pdfCountText, type PdfFindController } from "./pdfFind";
 import type { PdfViewerCtx } from "./pdfViewerContext";
@@ -35,7 +36,7 @@ export function createPdfViewerFind(ctx: PdfViewerCtx): PdfFindController {
         if (!isOpen) ctx.findLayer.clear();
       },
       setState(state) {
-        ctx.findBar.count.textContent = pdfCountText(state);
+        ctx.findBar.count.textContent = pdfCountText(state, pagedDocument(ctx.st.meta?.fileType).noun);
         ctx.findBar.count.classList.toggle("is-none", pdfCountIsNone(state));
         ctx.findBar.ask.hidden = state.kind !== "fuzzyPrompt";
         // The URL follows the query, so a find is shareable.

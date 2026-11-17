@@ -287,14 +287,18 @@ pub const ddl_v8 =
 
 /// `pdf_probe` verdict (`backend/pdf/probe.zig`), recorded so a file is never
 /// probed twice: NULL never probed, 0 shape recorded, 1 unopenable, 2 encrypted,
-/// 3 no pages or degenerate page 1.
+/// 3 no pages or degenerate page 1, 4 opening it needed more than MuPDF's
+/// memory ceiling (`pdf_index.Verdict`, `backend/pdf/budget.h`; 4 needed no
+/// migration).
 pub const ddl_v9 =
     \\ALTER TABLE note_index ADD COLUMN pdf_probe INTEGER;
 ;
 
 /// `pdf_text` verdict for deriving `terms/<md5>` and `text/<md5>`: NULL never
 /// extracted, 0 every page, 1 no text (a scan), 2 truncated at
-/// `pdf_text.max_pages`, 3 could not open what the probe could.
+/// `pdf_text.max_pages`, 3 could not open what the probe could, 4 opening it
+/// or a page's text needed more than MuPDF's memory ceiling (4 needed no
+/// migration).
 pub const ddl_v10 =
     \\ALTER TABLE note_index ADD COLUMN pdf_text INTEGER;
 ;

@@ -17,6 +17,9 @@ describe("strategyFor", () => {
     expect(strategyFor("gif")).toBe("image-doc");
     expect(strategyFor("txt")).toBe("text");
     expect(strategyFor("pdf")).toBe("pdf-page");
+    expect(strategyFor("xps")).toBe("pdf-page");
+    expect(strategyFor("CBZ")).toBe("pdf-page");
+    expect(strategyFor("fb2")).toBe("glyph"); // reflows, like EPUB
     expect(strategyFor("epub")).toBe("glyph");
     expect(strategyFor("")).toBe("glyph");
     expect(strategyFor("mystery")).toBe("glyph");

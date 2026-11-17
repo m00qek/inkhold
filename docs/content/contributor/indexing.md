@@ -125,3 +125,13 @@ being indexed" and asks again, instead of "No matches".
 **Cost.** Handwriting the tablet never recognised, and ink on PDFs, can't be searched.
 
 **Revisit when** the server runs on hardware that can afford recognition and people ask for it. The rules themselves: [Indexing and derived data](@/contributor/indexing-rules.md).
+
+### MuPDF's memory is bounded where it is spent
+
+**Problem.** MuPDF reads parts of a document whole (a zip entry, a decompressed stream, a font), and a small file can ask for gigabytes. A check before opening is a second parser of the same file: every place it reads the file differently from MuPDF (tar flavours, a zip's end records, letter case) let a file through, three times over.
+
+**Decision.** Every server-side MuPDF context allocates from a pool of its own with a ceiling (`backend/pdf/pool.zig`); MuPDF and all its libraries allocate through the context, so nothing escapes it. The pool counts the pages it maps, not the bytes asked for, and unmaps them all when the context is dropped. Counting requests under the C library's `malloc` was measured on the Pi and was not enough: MuPDF's many small blocks took 1.7 times what was counted, and `malloc` kept it, 80 MB after two documents. A refused allocation that MuPDF cannot get past ends the job with the `too_large` verdict, and a page whose text cannot fit is left out of search and makes the text pass `too_large` too. The check before opening only sorts by format: a `.pdf`, a PDF or a zip goes to MuPDF, anything else is refused; and only a zip is then opened by its content, the rest as a PDF, so MuPDF's tar and OLE readers never see an upload.
+
+**Cost.** A document that legitimately needs more than the ceiling (a comic with a 40 MB page scan) gets no shape or text on the server; the browser still opens it. CPU time is not bounded by this, only by the worker's low priority and the page cap.
+
+**Revisit when** the server runs on hardware with memory to spare, by raising the ceiling, not by removing it.

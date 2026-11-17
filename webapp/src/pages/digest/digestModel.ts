@@ -5,6 +5,7 @@
 // document's digests read as notes on it, top to bottom. Each way has an
 // overview, a card per category or per source, as To-Do's lists have. No DOM here.
 
+import { isPagedDocument, uploadExtension } from "../../core/fileKind";
 import type { Digest, DigestSnapshot, DigestSourceKind } from "../../api/digestTypes";
 
 /**
@@ -166,12 +167,13 @@ export function sourceGroups(s: DigestSnapshot): SourceGroup[] {
 }
 
 /**
- * Whether the digest's source opens at its page here: a PDF or a notebook in
- * the library. An EPUB, a CBZ and the like have no viewer that goes to a page.
+ * Whether the digest's source opens at its page here: a paged document (PDF,
+ * XPS, CBZ) or a notebook in the library. An EPUB or an FB2 has no viewer that
+ * goes to a page.
  */
 export function opensAtPage(d: Digest): boolean {
-  const path = d.source.path?.toLowerCase() ?? "";
-  return d.source.fileId !== null && (path.endsWith(".pdf") || path.endsWith(".note"));
+  const ext = uploadExtension(d.source.path ?? "");
+  return d.source.fileId !== null && (isPagedDocument(ext) || ext === "note");
 }
 
 /** What a digest from a changed file says: its page may not hold the passage any more. */

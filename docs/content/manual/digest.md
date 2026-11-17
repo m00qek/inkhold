@@ -72,12 +72,13 @@ at the top, goes back to the categories or the sources.
   seen on a tablet yet.
 
 A digest whose file is no longer in the library (it was never synced, or it
-moved) can't be opened, and says so. One from an EPUB offers **Open the file**
-instead: the browser can't open an EPUB at a page yet. If a document's file
+moved) can't be opened, and says so. One from an EPUB or an FB2 offers **Open the
+file** instead: the browser can't open a book at a page yet. If a document's file
 has changed since you took the digest, the digest says so, here and in the
 document's **Digests**: the page it names may no longer hold the passage.
 
-The other way round, a PDF or a notebook lists its own digests: **Digests**, in
+The other way round, a PDF, an XPS document, a comic book or a notebook lists
+its own digests: **Digests**, in
 its bar, shows them in page order beside the page, the ones on the page you
 are on marked. Choose one to go to its page; **Open in Digest** brings you
 back here.

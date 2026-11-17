@@ -296,6 +296,17 @@ pub fn build(b: *std.Build) void {
     const idxwrite_step = b.step("index-write-bench", "Build the write-side search bench (measurement only)");
     idxwrite_step.dependOn(&b.addInstallArtifact(idxwrite_exe, .{}).step);
 
+    // MuPDF memory bench: what the ceiling counts against the real RssAnon.
+    const pdfmem_mod = b.createModule(.{
+        .root_source_file = b.path("backend/pdf/memory_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    pdfmem_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, optimize));
+    const pdfmem_exe = b.addExecutable(.{ .name = "pdf-memory-bench", .root_module = pdfmem_mod });
+    const pdfmem_step = b.step("pdf-memory-bench", "Build the MuPDF memory bench (measurement only)");
+    pdfmem_step.dependOn(&b.addInstallArtifact(pdfmem_exe, .{}).step);
+
     // ---- Tests ----
     const test_step = b.step("test", "Run all tests");
 
@@ -324,6 +335,16 @@ pub fn build(b: *std.Build) void {
         });
     }
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = backend_test_mod })).step);
+
+    // The MuPDF wrappers' tests again, optimised: a `fz_try` local that is not
+    // `volatile` reads stale only there, and leaks the whole document.
+    const pdf_release_mod = b.createModule(.{
+        .root_source_file = b.path("backend/pdf/text.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    pdf_release_mod.linkLibrary(buildMupdfNative(b, mupdf_dep, target, .ReleaseSafe));
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pdf_release_mod, .name = "pdf-release-test" })).step);
 
     // The `.note` parser's own unit tests.
     const note_unit_mod = b.createModule(.{

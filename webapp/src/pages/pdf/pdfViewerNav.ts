@@ -48,7 +48,8 @@ export function createPdfNav(ctx: PdfViewerCtx): PdfNav {
   function onKey(e: KeyboardEvent): void {
     if (ctx.root.hidden) return;
     // Ctrl+F before the input guard, so it reaches (or re-focuses) the field from anywhere.
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+    // Not on a comic book (`nameFor` dims Find): the browser's own find stays.
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f" && !ctx.findToggle.disabled) {
       e.preventDefault();
       ctx.find.open();
       return;

@@ -22,7 +22,8 @@ test.describe("library rail + gallery", () => {
     // Direct items (`FolderVO.itemCount`): the Projects subfolder plus 4 loose notes.
     await expect(navItem(page, "Note").locator(".nav__count")).toHaveText("5");
     await expect(navItem(page, "MyStyle").locator(".nav__count")).toHaveText("3");
-    await expect(navItem(page, "Document").locator(".nav__count")).toHaveText("4");
+    // The four before XPS and CBZ, plus one of each.
+    await expect(navItem(page, "Document").locator(".nav__count")).toHaveText("6");
     await expect(navItem(page, "Export").locator(".nav__count")).toHaveText("0");
     await expect(navItem(page, "Screenshot").locator(".nav__count")).toHaveText("2");
     await expect(navItem(page, "Inbox").locator(".nav__count")).toHaveText("1");

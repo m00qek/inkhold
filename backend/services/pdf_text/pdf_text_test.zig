@@ -36,10 +36,16 @@ test "NoContext is not a verdict — a transient failure must not write off a go
 }
 
 test "verdictFor: a truncated document is SAID to be truncated, never silently short" {
-    try testing.expectEqual(Verdict.ok, verdictFor(3, 3, true));
-    try testing.expectEqual(Verdict.truncated, verdictFor(6000, max_pages, true));
-    try testing.expectEqual(Verdict.no_text, verdictFor(3, 3, false));
-    try testing.expectEqual(Verdict.no_text, verdictFor(6000, max_pages, false));
+    try testing.expectEqual(Verdict.ok, verdictFor(3, 3, true, 0));
+    try testing.expectEqual(Verdict.truncated, verdictFor(6000, max_pages, true, 0));
+    try testing.expectEqual(Verdict.no_text, verdictFor(3, 3, false, 0));
+    try testing.expectEqual(Verdict.no_text, verdictFor(6000, max_pages, false, 0));
+}
+
+test "verdictFor: a page past the memory ceiling is said, ahead of a scan or a short record" {
+    try testing.expectEqual(Verdict.too_large, verdictFor(3, 3, true, 1));
+    try testing.expectEqual(Verdict.too_large, verdictFor(3, 3, false, 3));
+    try testing.expectEqual(Verdict.too_large, verdictFor(6000, max_pages, true, 1));
 }
 
 test "the page cap is a decision with a stated value, not an accident" {
@@ -215,7 +221,7 @@ test "TRUNCATION IS RECORDED — a capped document says so, and says how much it
     const md5 = try f.putRaw(1, "book.pdf", book_pdf);
     const capped: u32 = 40; // stands in for `max_pages` against a 120-page book
     try f.db.exec("BEGIN IMMEDIATE;");
-    try finish(f.db, &md5, capped, verdictFor(120, capped, true));
+    try finish(f.db, &md5, capped, verdictFor(120, capped, true, 0));
     try f.db.exec("COMMIT;");
 
     try testing.expectEqual(@as(?i64, @backingInt(Verdict.truncated)), try f.verdictOf(&md5));

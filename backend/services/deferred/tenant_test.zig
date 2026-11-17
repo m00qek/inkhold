@@ -491,3 +491,192 @@ test "a tenant's discovery statement CONTAINS its predicate, so a second reader 
         try std.testing.expect(std.mem.indexOf(u8, t.pending_sql, t.from_where) != null);
     }
 }
+
+test "an XPS and a CBZ go through the paged tenant: shape, then text where there is any" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const terms_dir = try f.tmp.dir.createDirPathOpen(testing.io, "terms", .{});
+    const text_dir = try f.tmp.dir.createDirPathOpen(testing.io, "text", .{});
+    const terms = try derivedstore.DerivedStore.init(testing.io, terms_dir);
+    const text = try derivedstore.DerivedStore.init(testing.io, text_dir);
+
+    const xps = try f.put("Quince guide.XPS", fixture.three_page_xps);
+    const cbz = try f.put("Harbour.cbz", fixture.two_page_cbz);
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = terms,
+        .text = text,
+    };
+    w.drain();
+
+    // Shapes in points, so only their proportions are the files' own: an XPS
+    // page is 400x300 in 1/96 inch, the CBZ's first image 300x400 pixels.
+    const Want = struct { md5: []const u8, pages: i64, landscape: bool, text_verdict: i64 };
+    for ([_]Want{
+        .{ .md5 = &xps, .pages = 3, .landscape = true, .text_verdict = @backingInt(pdftext.Verdict.ok) },
+        .{ .md5 = &cbz, .pages = 2, .landscape = false, .text_verdict = @backingInt(pdftext.Verdict.no_text) }, // like a scan
+    }) |want| {
+        var r = (try f.db.row(
+            "SELECT page_count, width, height, pdf_probe, pdf_text FROM note_index WHERE blob_md5 = ?1;",
+            &.{.{ .text = want.md5 }},
+        )).?;
+        defer r.finalize();
+        try testing.expectEqual(want.pages, r.int(0));
+        const w_pt = r.int(1);
+        const h_pt = r.int(2);
+        try testing.expect(w_pt > 0 and h_pt > 0);
+        // 4:3 or 3:4, as the file has it.
+        if (want.landscape) try testing.expectEqual(w_pt * 3, h_pt * 4) else try testing.expectEqual(w_pt * 4, h_pt * 3);
+        try testing.expectEqual(@as(?i64, @backingInt(pdfindex.Verdict.ok)), r.intOpt(3));
+        try testing.expectEqual(@as(?i64, want.text_verdict), r.intOpt(4));
+    }
+
+    // The XPS's words reach the search files.
+    const t = try derivedstore.readPlain(testing.allocator, terms, &xps, derivesearch.index_version);
+    defer testing.allocator.free(t);
+    try testing.expect(std.mem.indexOf(u8, t, "\"n\":3") != null);
+    try testing.expect(std.mem.indexOf(u8, t, "quince") != null);
+
+    // The CBZ's are its header alone, written without a text pass.
+    for ([_]derivedstore.DerivedStore{ terms, text }) |store| {
+        const c = try derivedstore.readPlain(testing.allocator, store, &cbz, derivesearch.index_version);
+        defer testing.allocator.free(c);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, c, "\n"));
+        try testing.expect(std.mem.indexOf(u8, c, "\"n\":2") != null);
+    }
+}
+
+fn probeVerdict(f: *Fixture, md5: []const u8) !?i64 {
+    var r = (try f.db.row("SELECT pdf_probe FROM note_index WHERE blob_md5 = ?1;", &.{.{ .text = md5 }})).?;
+    defer r.finalize();
+    return r.intOpt(0);
+}
+
+test "a part past MuPDF's memory ceiling ends as too_large, whatever the file is named" {
+    // MuPDF picks the format by content: a zip named `.pdf` or `.xps` opens as
+    // a comic book and reads its entries whole; the ceiling bounds it anyway.
+    // One install per name, so the blob is offered under that name alone.
+    for ([_][]const u8{ "Scans.cbz", "Scans.pdf", "Guide.xps" }) |name| {
+        var f = try Fixture.init();
+        defer f.deinit();
+
+        const md5 = try f.put(name, fixture.over_budget_cbz);
+        f.drain();
+
+        try testing.expectEqual(@as(?i64, @backingInt(pdfindex.Verdict.too_large)), try probeVerdict(&f, &md5));
+        var r = (try f.db.row("SELECT page_count FROM note_index WHERE blob_md5 = ?1;", &.{.{ .text = &md5 }})).?;
+        defer r.finalize();
+        try testing.expectEqual(@as(i64, 0), r.int(0)); // no shape: the tile keeps its A4 guess
+
+        var w: Worker = .{ .gpa = testing.allocator, .db = f.db, .blobs = f.files.blobs, .lock = &f.lock, .io = testing.io };
+        w.drain();
+        try testing.expectEqual(@as(usize, 0), w.done.load(.acquire));
+    }
+}
+
+test "nor does the idle-time rebuild of search files open a refused file" {
+    // Reconcile rebuilds missing derived files; a `too_large` file never got
+    // any, so it is exactly what reconcile would pick, with stores in place.
+    var f = try Fixture.init();
+    defer f.deinit();
+    const terms_dir = try f.tmp.dir.createDirPathOpen(testing.io, "terms", .{});
+    const text_dir = try f.tmp.dir.createDirPathOpen(testing.io, "text", .{});
+    const terms = try derivedstore.DerivedStore.init(testing.io, terms_dir);
+    const text = try derivedstore.DerivedStore.init(testing.io, text_dir);
+
+    const md5 = try f.put("Guide.xps", fixture.over_budget_cbz);
+    var w: Worker = .{
+        .gpa = testing.allocator,
+        .db = f.db,
+        .blobs = f.files.blobs,
+        .lock = &f.lock,
+        .io = testing.io,
+        .terms = terms,
+        .text = text,
+    };
+    w.drain();
+    try testing.expectEqual(@as(?i64, @backingInt(pdfindex.Verdict.too_large)), try probeVerdict(&f, &md5));
+    w.reconcileDerived();
+    try testing.expect(!terms.has(&md5, derivesearch.index_version));
+    try testing.expect(!text.has(&md5, derivesearch.index_version));
+}
+
+test "a big part under the ceiling is MuPDF's to judge, not refused for its size" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    // 17 MiB of zeros named `01.png`: read whole, then not an image.
+    const md5 = try f.put("Big.cbz", fixture.huge_page_cbz);
+    f.drain();
+    const v = try probeVerdict(&f, &md5);
+    try testing.expect(v != null);
+    try testing.expect(v.? != @backingInt(pdfindex.Verdict.too_large));
+}
+
+test "only a PDF or a zip reaches MuPDF; tricks inside a zip end at the ceiling" {
+    const Case = struct { name: []const u8, bytes: []const u8, verdict: pdfindex.Verdict };
+    const cases = [_]Case{
+        // Neither a PDF nor a zip, though MuPDF would open each: refused unseen.
+        .{ .name = "Tar.cbz", .bytes = fixture.two_page_tar_cbz, .verdict = .unopenable },
+        .{ .name = "V7.cbz", .bytes = fixture.two_page_v7tar_cbz, .verdict = .unopenable },
+        .{ .name = "Office.xps", .bytes = fixture.ole_header, .verdict = .unopenable },
+        // A file named `.pdf` is MuPDF's to read, as before XPS and CBZ: its
+        // header up to 4 KB in, or none at all, which MuPDF repairs.
+        .{ .name = "Junk first.pdf", .bytes = fixture.junk_first_pdf, .verdict = .ok },
+        .{ .name = "Headerless.pdf", .bytes = fixture.headerless_pdf, .verdict = .ok },
+        // Named `.pdf`, a tar or an OLE file is read as a PDF (`open.h`), not
+        // as the comic book MuPDF would make of it: no pages.
+        .{ .name = "Tar.pdf", .bytes = fixture.two_page_tar_cbz, .verdict = .unopenable },
+        .{ .name = "V7.pdf", .bytes = fixture.two_page_v7tar_cbz, .verdict = .unopenable },
+        .{ .name = "Office.pdf", .bytes = fixture.ole_header, .verdict = .unopenable },
+        // A zip, however odd, goes to MuPDF: an end record naming disk 1 is
+        // just a comic book; a hidden directory and joined pieces hit the ceiling.
+        .{ .name = "Disk.cbz", .bytes = fixture.disk_one_cbz, .verdict = .ok },
+        .{ .name = "Hidden.cbz", .bytes = fixture.two_eocd_cbz, .verdict = .too_large },
+        .{ .name = "Pieces.xps", .bytes = fixture.upper_pieces_xps, .verdict = .too_large },
+    };
+    for (cases) |c| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        const md5 = try f.put(c.name, c.bytes);
+        f.drain();
+        try testing.expectEqual(@as(?i64, @backingInt(c.verdict)), try probeVerdict(&f, &md5));
+    }
+}
+
+test "a page whose text passes the memory ceiling makes the text verdict too_large, and the rest is still read" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const md5 = try f.put("Bomb.pdf", fixture.text_bomb_pdf);
+    f.drain();
+
+    var r = (try f.db.row("SELECT page_count, pdf_probe, pdf_text FROM note_index WHERE blob_md5 = ?1;", &.{.{ .text = &md5 }})).?;
+    defer r.finalize();
+    try testing.expectEqual(@as(i64, 2), r.int(0));
+    try testing.expectEqual(@as(?i64, @backingInt(pdfindex.Verdict.ok)), r.intOpt(1)); // the shape is cheap
+    try testing.expectEqual(@as(?i64, @backingInt(pdftext.Verdict.too_large)), r.intOpt(2));
+}
+
+test "which paged documents have text, by extension: not a CBZ, and a .zip is none" {
+    try testing.expect(!pdfindex.wants("Scans.zip"));
+    try testing.expect(pdfindex.hasText("a.PDF") and pdfindex.hasText("a.xps"));
+    try testing.expect(!pdfindex.hasText("a.CBZ") and !pdfindex.hasText("a.epub"));
+}
+
+test "an EPUB is never offered to the paged tenant: it reflows" {
+    var f = try Fixture.init();
+    defer f.deinit();
+
+    const md5 = try f.put("book.epub", fixture.one_chapter_epub);
+    f.drain();
+
+    var r = (try f.db.row("SELECT pdf_probe, page_count FROM note_index WHERE blob_md5 = ?1;", &.{.{ .text = &md5 }})).?;
+    defer r.finalize();
+    try testing.expectEqual(@as(?i64, null), r.intOpt(0)); // never probed
+    try testing.expectEqual(@as(i64, 0), r.int(1));
+}

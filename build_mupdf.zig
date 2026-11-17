@@ -100,11 +100,25 @@ const mupdf_harfbuzz_flags = [_][]const u8{
     "-DHAVE_UCDN",
     "-DHB_NO_MT",
     "-DHB_NO_PRAGMA_GCC_DIAGNOSTIC",
-    // HarfBuzz allocates through MuPDF's allocator, so the store cap bounds shaping too.
+};
+
+/// The browser's HarfBuzz allocates through MuPDF's allocator, as MuPDF ships it.
+const mupdf_harfbuzz_alloc_wasm = [_][]const u8{
     "-Dhb_malloc_impl=fz_hb_malloc",
     "-Dhb_calloc_impl=fz_hb_calloc",
     "-Dhb_free_impl=fz_hb_free",
     "-Dhb_realloc_impl=fz_hb_realloc",
+};
+
+/// The server's through `backend/pdf/budget.c`: counted against the open
+/// document's ceiling, but from `malloc`, not the document's pool. HarfBuzz
+/// keeps a few blocks in statics for the life of the process; a pool unmapped
+/// under them is a crash on the next document that shapes text.
+const mupdf_harfbuzz_alloc_native = [_][]const u8{
+    "-Dhb_malloc_impl=ink_hb_malloc",
+    "-Dhb_calloc_impl=ink_hb_calloc",
+    "-Dhb_free_impl=ink_hb_free",
+    "-Dhb_realloc_impl=ink_hb_realloc",
 };
 
 /// MuPDF sources we skip. `office.c`/`mobi.c` are not guarded internally, so the
@@ -237,6 +251,7 @@ fn addMupdfSources(
     dep: *std.Build.Dependency,
     mod: *std.Build.Module,
     flags: []const []const u8,
+    harfbuzz_alloc: []const []const u8,
 ) void {
     for (&mupdf_includes) |inc| mod.addIncludePath(dep.path(inc));
 
@@ -266,11 +281,12 @@ fn addMupdfSources(
     mod.addCSourceFiles(.{
         .root = dep.path(""),
         .files = mupdfListedSources(b, dep, &.{"HARFBUZZ"}),
-        .flags = concatFlags(b, vflags, &mupdf_harfbuzz_flags),
+        .flags = concatFlags(b, concatFlags(b, vflags, &mupdf_harfbuzz_flags), harfbuzz_alloc),
     });
 }
 
-/// MuPDF for the server (`backend/pdf/probe.c`, `backend/pdf/text.c`).
+/// MuPDF for the server (`backend/pdf/probe.c`, `backend/pdf/text.c`), every
+/// context under `backend/pdf/budget.c`'s memory ceiling.
 pub fn buildMupdfNative(
     b: *std.Build,
     dep: *std.Build.Dependency,
@@ -280,7 +296,7 @@ pub fn buildMupdfNative(
     const mod = b.createModule(.{ .target = target, .optimize = optimize });
     mod.link_libc = true;
     mod.link_libcpp = true; // HarfBuzz is C++
-    addMupdfSources(b, dep, mod, &mupdf_native_flags);
+    addMupdfSources(b, dep, mod, &mupdf_native_flags, &mupdf_harfbuzz_alloc_native);
     mod.addCSourceFile(.{
         .file = b.path("backend/pdf/probe.c"),
         .flags = &mupdf_native_flags,
@@ -289,6 +305,11 @@ pub fn buildMupdfNative(
     // probe runs at the default.
     mod.addCSourceFile(.{
         .file = b.path("backend/pdf/text.c"),
+        .flags = &mupdf_native_flags,
+    });
+    // The memory ceiling both contexts allocate through.
+    mod.addCSourceFile(.{
+        .file = b.path("backend/pdf/budget.c"),
         .flags = &mupdf_native_flags,
     });
     return b.addLibrary(.{ .name = "mupdf-native", .root_module = mod, .linkage = .static });
@@ -309,7 +330,7 @@ pub fn buildMupdfWasm(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step
     mod.link_libc = true;
     mod.link_libcpp = true;
 
-    addMupdfSources(b, dep, mod, &mupdf_wasm_flags);
+    addMupdfSources(b, dep, mod, &mupdf_wasm_flags, &mupdf_harfbuzz_alloc_wasm);
 
     for ([_][]const u8{ "pdf_shim.c", "pdf_shim_links.c", "pdf_shim_text.c", "pdf_shim_export.c" }) |shim| {
         mod.addCSourceFile(.{

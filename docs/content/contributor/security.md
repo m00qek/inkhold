@@ -66,11 +66,15 @@ compromised, and the server reads offsets out of it to serve pages. So every
 offset is bounds-checked, every decoder uses checked arithmetic (the
 WebAssembly build has no overflow traps), and a sketch, which is a SQLite
 database, is copied into memory and opened read-only rather than opened as a
-file. Only an allowlist of image types and PDF is ever served inline; an SVG
-from a tablet, shown inline, would be stored cross-site scripting. And because
-blobs are shared across the household, a file that is not yours answers
-exactly like a file that does not exist, so nobody can learn what others have
-by probing ids.
+file. Paged documents (PDF, XPS, CBZ) are parsed by MuPDF, in C, on the server
+and in the browser's worker: the server registers only those three handlers,
+so its surface is MuPDF's PDF and XPS parsers, its zip reader and the image
+decoders a comic book's pages reach, every allocation of which runs under a
+memory pool with a ceiling (`backend/pdf/pool.zig`). Only an allowlist of image types and PDF
+is ever served inline; an SVG from a tablet, shown inline, would be stored
+cross-site scripting. And because blobs are shared across the household, a
+file that is not yours answers exactly like a file that does not exist, so
+nobody can learn what others have by probing ids.
 
 ## Trade-offs
 

@@ -272,6 +272,9 @@ export const CHILDREN: Record<string, Entry[]> = {
     note("142", "Apartment lease — signed", 6, NOW - 26 * DAY, { fileType: "pdf" }),
     // Uploadable, but no viewer here: the reader's "no preview, download" state.
     note("143", "Sourdough — a field guide", 1, NOW - 27 * DAY, { fileType: "epub" }),
+    // Paged documents the PDF viewer opens too (`PAGED_DOCUMENT_TYPES`).
+    note("146", "Quince — a pocket guide", 3, NOW - 28 * DAY, { fileType: "xps" }),
+    note("147", "Harbour at dusk", 2, NOW - 29 * DAY, { fileType: "cbz" }),
     note(UNSCALED_NOTE_ID, "Field notes — unknown device", 3, NOW - 4 * DAY, {
       hasRecognizedText: true,
     }),
