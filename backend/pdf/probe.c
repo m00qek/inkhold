@@ -57,10 +57,13 @@ int ink_pdf_probe(int fd, struct ink_pdf_info *out)
     FILE *fp = fdopen(dupfd, "rb");
     if (!fp) { close(dupfd); fz_drop_context(ctx); return INK_PDF_UNOPENABLE; }
 
-    fz_document *doc = NULL;
-    fz_page *page = NULL;
-    fz_stream *stm = NULL;
-    int rc = INK_PDF_OK;
+    /* `volatile`: set inside `fz_try` and read in `fz_always` after a longjmp,
+     * where an optimised build may otherwise see their old NULLs, leaving
+     * the whole document undropped (C11 7.13.2.1). */
+    fz_document *volatile doc = NULL;
+    fz_page *volatile page = NULL;
+    fz_stream *volatile stm = NULL;
+    volatile int rc = INK_PDF_OK;
 
     fz_try(ctx) {
         stm = fz_open_file_ptr_no_close(ctx, fp);
