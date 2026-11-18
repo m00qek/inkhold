@@ -89,8 +89,9 @@ int ink_pdf_text_open(int fd, struct ink_pdf_text **out)
         return INK_PDF_UNOPENABLE;
     }
 
-    int rc = INK_PDF_OK;
-    int pages = 0;
+    /* `volatile`, as in `probe.c`: set inside `fz_try`, read after it. */
+    volatile int rc = INK_PDF_OK;
+    volatile int pages = 0;
     fz_try(t->ctx) {
         t->stm = fz_open_file_ptr_no_close(t->ctx, t->fp);
         /* A descriptor carries no extension, so name the format. */
@@ -127,7 +128,7 @@ int32_t ink_pdf_text_page(struct ink_pdf_text *t, int32_t number, const char **o
     fz_drop_buffer(t->ctx, t->buf);
     t->buf = NULL;
 
-    int32_t len = INK_PDF_PAGE_FAILED;
+    volatile int32_t len = INK_PDF_PAGE_FAILED;
     fz_try(t->ctx) {
         t->buf = fz_new_buffer_from_page_number(t->ctx, t->doc, (int)number, NULL);
         unsigned char *data = NULL;
