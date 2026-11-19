@@ -1,6 +1,7 @@
 name: Test
 
-# Docs-only changes run `docs.yaml`, not this (docs/contributor/documentation-rules.md).
+# Docs-only changes run `docs.yaml`, not this (docs/contributor/documentation-rules.md);
+# changes to contrib/nixos alone run `nixos.yaml`.
 on:
   push:
     # A push to `main` or `stable` is tested. When build.zig.zon names a
@@ -9,9 +10,9 @@ on:
     # next beta, stable a fix of the current one
     # (docs/content/contributor/release.md).
     branches: [ "main", "stable" ]
-    paths-ignore: [ "docs/**", "**/*.md" ]
+    paths-ignore: [ "docs/**", "**/*.md", "contrib/nixos/**", ".github/workflows/nixos.yaml" ]
   pull_request:
-    paths-ignore: [ "docs/**", "**/*.md" ]
+    paths-ignore: [ "docs/**", "**/*.md", "contrib/nixos/**", ".github/workflows/nixos.yaml" ]
   # To run without a change, e.g. to retry a release after a docs-only fix:
   # Actions → Test → Run workflow. "Rehearse" builds and smoke-tests
   # everything a release would, and publishes nothing.
@@ -623,3 +624,13 @@ jobs:
         run: |
           gh release edit "v$VERSION" --repo "$GITHUB_REPOSITORY" --draft=false
           gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json tagName,url,isPrerelease
+
+  # The NixOS module on the release just published, before it is promoted
+  # (nixos.yaml). It runs after publishing, so a failure here unpublishes
+  # nothing: fix the module, or don't promote.
+  nixos:
+    needs: [build, publish]
+    if: needs.build.outputs.release == 'true'
+    uses: ./.github/workflows/nixos.yaml
+    with:
+      version: ${{ needs.build.outputs.version }}

@@ -1,0 +1,55 @@
+name: NixOS
+
+# contrib/nixos: its VM test (contrib/nixos/test.nix) boots NixOS with the
+# module on and runs the server and both backups. The package is a release's
+# archive, not this commit's code, so it runs only when what it tests changes:
+# - contrib/nixos itself;
+# - a new release, called by ci.yaml once it is published: the test then runs
+#   on that release, as update.sh would point the package at it, so a release
+#   that breaks the module shows before it is promoted
+#   (docs/content/contributor/release.md).
+on:
+  push:
+    branches: [ "main" ]
+    paths: [ "contrib/nixos/**", ".github/workflows/nixos.yaml" ]
+  pull_request:
+    paths: [ "contrib/nixos/**", ".github/workflows/nixos.yaml" ]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: "A published release to test the module on, e.g. 1.0.0-beta.3"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  vm-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # KVM is on by default: the VM boots in seconds.
+      - name: Install Nix
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: Point the package at the new release
+        if: inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: contrib/nixos/update.sh "$VERSION"
+
+      - name: Boot the VM and run the test
+        working-directory: contrib/nixos
+        run: nix flake check -L
