@@ -4,6 +4,34 @@ What changed in each release of Inkhold, for the people who run it. When a
 release asks for something before you upgrade, it says so first, under
 **Upgrade notes**. Install and upgrade steps: <https://m00qek.github.io/inkhold/>.
 
+## 1.0.0-beta.3 (2026-11-19)
+
+What's new:
+
+- **XPS documents and comic books (`.cbz`)** open page by page in the
+  browser, with the handwriting you added on the tablet, as PDFs do. An XPS's
+  text is searchable; a comic book is found by its name.
+- **JPEG 2000 pictures** draw again, so comic books and PDFs made of them
+  open, as they do on the tablet.
+- **A library card shows the handwriting on page 1**, in the library and the
+  Recycle bin, and redraws when that handwriting changes.
+- **Reading a document takes at most 32 MB of the server's memory.** A PDF,
+  XPS document or comic book that needs more still opens in the browser, but
+  the server leaves its text out of search instead of straining a small
+  server.
+- **NixOS**: a flake in `contrib/nixos` with the release build and a
+  `services.inkhold` module, the nightly backup and the weekly deep check
+  included.
+
+Fixed:
+
+- A PDF whose first page fails to load no longer keeps the whole document in
+  the server's memory until it restarts.
+- Handwriting on a PDF's first pages shows in the browser; some pages were
+  missing their ink.
+- BMP images upload and preview, and the browser accepts `.azw` and `.azw3`
+  files, as the server does.
+
 ## 1.0.0-beta.2 (2026-11-14)
 
 **Upgrade notes**
