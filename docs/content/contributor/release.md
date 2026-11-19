@@ -64,7 +64,9 @@ During the beta, every version is `1.0.0-beta.N`, one more than the last.
      with provenance, creates the release with the archives, `SHA256SUMS`,
      provenance and the version's section of `CHANGELOG.md`, and publishes
      it as a pre-release, which tags the commit `v1.0.0-beta.N`.
-6. Soak it: run `:next` on the hub and use it.
+6. Soak it: run `:next` on the hub and use it. The release run's `nixos` job
+   must have passed too: after publishing, it boots the NixOS module on the
+   release (`nixos.yaml`), and a failure there unpublishes nothing.
 7. Promote it:
 
    ```sh
@@ -75,6 +77,9 @@ During the beta, every version is `1.0.0-beta.N`, one more than the last.
    the latest one, which the docs' download links follow, `stable` is reset
    to it, and the docs site's root is rebuilt from `stable`. Nothing else is
    rebuilt.
+8. Point the NixOS package at it, on `main`: `contrib/nixos/update.sh
+   1.0.0-beta.N` sets the version and the four hashes from `SHA256SUMS`.
+   Commit it as `chore(nixos): 1.0.0-beta.N`.
 
 If a job fails, nothing is published and nothing is tagged. Fix it on `main`:
 the version is still unreleased, so the next run tries again. After a
