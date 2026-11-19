@@ -1,14 +1,27 @@
 # The release build: the same static binary and browser app as every other
 # install ("Install the binary"), for the machine's architecture. A release
-# changes `version` and the four hashes: ./update.sh <version>.
+# changes `released` and the four hashes: ./update.sh <version>.
+#
+# Or a commit no release carries, from an archive built like a release's
+# (`make release-artifact TARGET=x86_64-linux-musl` at the repo's root):
+#
+#   services.inkhold.package = inkhold.packages.${system}.default.override {
+#     archive = ./inkhold-x86_64-linux-musl.tar.gz;
+#     version = "hub-abc1234";
+#   };
+#
+# Nix copies the archive into the store, so no hash is kept by hand: it is
+# the archive's own. It must be built for the machine's architecture.
 {
   lib,
   stdenvNoCC,
   fetchurl,
+  archive ? null,
+  version ? null,
 }:
 
 let
-  version = "1.0.0-beta.2";
+  released = "1.0.0-beta.2";
   builds = {
     x86_64-linux = {
       target = "x86_64-linux-musl";
@@ -34,12 +47,22 @@ let
 in
 stdenvNoCC.mkDerivation {
   pname = "inkhold";
-  inherit version;
+  version =
+    if archive == null then
+      released
+    else if version == null then
+      "local"
+    else
+      version;
 
-  src = fetchurl {
-    url = "https://github.com/m00qek/inkhold/releases/download/v${version}/inkhold-${build.target}.tar.gz";
-    inherit (build) hash;
-  };
+  src =
+    if archive != null then
+      archive
+    else
+      fetchurl {
+        url = "https://github.com/m00qek/inkhold/releases/download/v${released}/inkhold-${build.target}.tar.gz";
+        inherit (build) hash;
+      };
   sourceRoot = ".";
 
   installPhase = ''

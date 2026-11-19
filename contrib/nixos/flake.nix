@@ -4,9 +4,11 @@
 #   ...
 #   modules = [ inkhold.nixosModules.default { services.inkhold.enable = true; } ];
 #
-# Without flakes, import ./module.nix. The options are in module.nix.
+# Without flakes, import ./module.nix. The options are in module.nix; running
+# a commit no release carries, from a locally built archive, in package.nix.
 # `nix flake check` boots three VMs to run the server and both backups
-# (test.nix), and checks the config writer (zon-test.nix).
+# (test.nix), checks the config writer (zon-test.nix), and the package built
+# from a local archive (archive-test.nix).
 {
   description = "Inkhold on NixOS: the release build and a module to run it";
 
@@ -39,6 +41,7 @@
           module = self.nixosModules.default;
         };
         zon = import ./zon-test.nix { pkgs = nixpkgs.legacyPackages.x86_64-linux; };
+        archive = import ./archive-test.nix { pkgs = nixpkgs.legacyPackages.x86_64-linux; };
       };
     };
 }
