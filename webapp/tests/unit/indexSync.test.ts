@@ -4,9 +4,10 @@ import { fileURLToPath } from "node:url";
 import { createIndexSync, IndexSyncError } from "../../src/search/indexSync";
 import { entityTagValue } from "../../src/search/indexTransport";
 import type { IndexTransport, ManifestAnswer, StreamAnswer } from "../../src/search/indexTransport";
-import { openTermsStore, termsKeyOf } from "../../src/cache/termsStore";
+import { openTermsStore, termsKeyOf, weigh } from "../../src/cache/termsStore";
 import type { TermsKey, TermsStore, StoredTermsDocument } from "../../src/cache/termsStore";
 import type { TermsDocument } from "../../src/search/termsStream";
+import type { RememberedSizes } from "../../src/search/termsBudget";
 
 // The same golden manifest `manifestCodec.test.ts` decodes; position 2 has a null version.
 const MANIFEST = new Uint8Array(
@@ -27,13 +28,19 @@ function doc(md5: string, v: number, terms = "reuniao"): string {
 }
 
 /** An in-memory `TermsStore` — the real one needs an IndexedDB node does not have. */
-function memoryStore(available = true): TermsStore & { records: Map<string, StoredTermsDocument> } {
+function memoryStore(available = true, budget = Number.POSITIVE_INFINITY): TermsStore & { records: Map<string, StoredTermsDocument> } {
   const records = new Map<string, StoredTermsDocument>();
   return {
     records,
     available,
     async keys() {
       return [...records.values()].map((r) => ({ md5: r.md5, indexVersion: r.indexVersion }));
+    },
+    async sizes() {
+      return new Map([...records].map(([key, r]) => [key, weigh(r)]));
+    },
+    async budget() {
+      return budget;
     },
     async get(md5, indexVersion) {
       return records.get(termsKeyOf(md5, indexVersion)) ?? null;
@@ -43,6 +50,7 @@ function memoryStore(available = true): TermsStore & { records: Map<string, Stor
     },
     async put(d: TermsDocument) {
       records.set(termsKeyOf(d.md5, d.indexVersion), { ...d, storedAt: 1 });
+      return true;
     },
     async drop(keys: readonly TermsKey[]) {
       for (const k of keys) records.delete(termsKeyOf(k.md5, k.indexVersion));
@@ -51,6 +59,30 @@ function memoryStore(available = true): TermsStore & { records: Map<string, Stor
       records.clear();
     },
   };
+}
+
+/** Remembered sizes in memory, shared between syncs like `localStorage` would. */
+function memorySizes(): RememberedSizes {
+  const sizes = new Map<string, number>();
+  return {
+    get: (key) => sizes.get(key),
+    set(entries) {
+      for (const [key, size] of entries) sizes.set(key, size);
+    },
+  };
+}
+
+/** A memory store that records the most it ever held at once. */
+function boundedStore(budget: number) {
+  const store = memoryStore(true, budget);
+  let peak = 0;
+  const put = store.put.bind(store);
+  store.put = async (d: TermsDocument) => {
+    const ok = await put(d);
+    peak = Math.max(peak, [...(await store.sizes()).values()].reduce((a, b) => a + b, 0));
+    return ok;
+  };
+  return Object.assign(store, { peak: () => peak });
 }
 
 interface Call {
@@ -198,7 +230,7 @@ describe("createIndexSync", () => {
     expect(two.skipped).toBe(0);
   });
 
-  it("drops local rows the manifest no longer names, after the stream", async () => {
+  it("drops local rows the manifest no longer names, before the stream", async () => {
     const store = memoryStore();
     await store.put({ md5: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", indexVersion: 1, pageCount: 1, pages: [] });
     const body = ROWS.map(([, md5, v]) => doc(md5, v)).join("");
@@ -214,6 +246,203 @@ describe("createIndexSync", () => {
     const store = memoryStore();
     await createIndexSync({ store, transport }).sync();
     expect([...store.records.keys()]).toEqual([termsKeyOf(ROWS[0]![1], 99)]);
+  });
+
+  // Each test document weighs the same (`weigh`): three fit, the fourth doesn't.
+  const ONE = weigh({ md5: ROWS[0]![1], pages: [{ p: 0, t: "reuniao" }] });
+
+  it("over the budget, never stores the document kept last, and never asks for it again", async () => {
+    const body = ROWS.map(([, md5, v]) => doc(md5, v)).join("");
+    const { transport, calls } = fakeTransport([[body]]);
+    const store = boundedStore(3 * ONE);
+    const sync = createIndexSync({ store, transport, sizes: memorySizes() });
+
+    const first = await sync.sync();
+    expect(first.received).toBe(4);
+    // Position 4 is the oldest non-notebook: kept last, so refused on arrival.
+    expect(first.leftOut).toBe(1);
+    expect(first.letGo).toBe(0);
+    expect(store.records.has(termsKeyOf(ROWS[3]![1], ROWS[3]![2]))).toBe(false);
+    expect(store.peak()).toBeLessThanOrEqual(3 * ONE);
+
+    // No thrash: the next sync knows its size and asks for nothing.
+    const second = await sync.sync();
+    expect(calls).toHaveLength(1);
+    expect(second.requested).toBe(0);
+    expect(second.leftOut).toBe(1);
+    expect(second.letGo).toBe(0);
+  });
+
+  it("lets go of a held document as soon as one kept before it arrives, so the store never holds more than the budget", async () => {
+    // The oldest non-notebook is already held; the two notebooks arrive.
+    const store = boundedStore(3 * ONE);
+    const old = ROWS[3]!;
+    await store.put({ md5: old[1], indexVersion: old[2], pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const other = ROWS[2]!;
+    await store.put({ md5: other[1], indexVersion: other[2], pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const body = [ROWS[0]!, ROWS[1]!].map(([, md5, v]) => doc(md5, v)).join("");
+    const outcome = await createIndexSync({ store, transport: fakeTransport([[body]]).transport, sizes: memorySizes() }).sync();
+    expect(outcome.letGo).toBe(1);
+    expect(store.records.has(termsKeyOf(old[1], old[2]))).toBe(false);
+    expect(store.peak()).toBeLessThanOrEqual(3 * ONE);
+  });
+
+  it("lowers the budget to what it holds when a write fails, so a full disk doesn't refetch everything every sync", async () => {
+    const body = ROWS.map(([, md5, v]) => doc(md5, v)).join("");
+    const sizes = memorySizes();
+    const store = memoryStore(true, 3 * ONE);
+    // Every write fails, as when the quota runs out; the real store then lowers its budget.
+    let budget = 3 * ONE;
+    store.put = async () => {
+      budget = 0;
+      return false;
+    };
+    store.budget = async () => budget;
+    const first = await createIndexSync({ store, transport: fakeTransport([[body]]).transport, sizes }).sync();
+    expect(first.stored).toBe(0);
+    for (const [, md5, v] of ROWS) expect(sizes.get(termsKeyOf(md5, v))).toBe(ONE);
+
+    const { transport, calls } = fakeTransport([[body]]);
+    const next = await createIndexSync({ store, transport, sizes }).sync();
+    expect(calls).toHaveLength(0);
+    expect(next.leftOut).toBe(4);
+  });
+
+  it("replaces each old version as its new one arrives, so a re-derive stays within the budget", async () => {
+    const store = boundedStore(4 * ONE);
+    // Every document held at an older index version.
+    for (const [, md5] of ROWS) await store.put({ md5, indexVersion: 1, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const body = ROWS.map(([, md5, v]) => doc(md5, v)).join("");
+    const outcome = await createIndexSync({ store, transport: fakeTransport([[body]]).transport, sizes: memorySizes() }).sync();
+    expect(outcome.stored).toBe(4);
+    expect([...store.records.keys()].sort()).toEqual(ROWS.map(([, md5, v]) => termsKeyOf(md5, v)).sort());
+    expect(store.peak()).toBeLessThanOrEqual(4 * ONE);
+  });
+
+  it("keeps a document's old version until its new one arrives: a torn re-derive leaves none without either", async () => {
+    const store = boundedStore(4 * ONE);
+    for (const [, md5] of ROWS) await store.put({ md5, indexVersion: 1, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const transport: IndexTransport = {
+      ...fakeTransport([]).transport,
+      async stream(): Promise<StreamAnswer> {
+        return {
+          status: 200,
+          chunks: (async function* () {
+            // The first document is whole once the second begins; the second never ends.
+            yield doc(ROWS[0]![1], ROWS[0]![2]) + doc(ROWS[1]![1], ROWS[1]![2]);
+            throw new Error("connection reset");
+          })(),
+        };
+      },
+    };
+    await expect(createIndexSync({ store, transport, sizes: memorySizes() }).sync()).rejects.toThrow("connection reset");
+    const held = [...store.records.values()];
+    expect(held.find((r) => r.md5 === ROWS[0]![1])?.indexVersion).toBe(ROWS[0]![2]);
+    for (const [, md5] of ROWS.slice(1)) expect(held.find((r) => r.md5 === md5)?.indexVersion).toBe(1);
+    expect(held).toHaveLength(ROWS.length);
+    expect(store.peak()).toBeLessThanOrEqual(4 * ONE);
+  });
+
+  it("lets go of what no longer fits when the budget shrank, with nothing to stream", async () => {
+    const store = memoryStore(true, 4 * ONE);
+    for (const [, md5, v] of ROWS) await store.put({ md5, indexVersion: v, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    store.budget = async () => 3 * ONE;
+    const { transport, calls } = fakeTransport([[""]]);
+    const outcome = await createIndexSync({ store, transport, sizes: memorySizes() }).sync();
+    expect(calls).toHaveLength(0);
+    expect(outcome.letGo).toBe(1);
+    expect(outcome.leftOut).toBe(1);
+    expect(store.records.has(termsKeyOf(ROWS[3]![1], ROWS[3]![2]))).toBe(false);
+  });
+
+  it("plans afresh after a 412, and keeps within the budget on the retry", async () => {
+    const body = ROWS.map(([, md5, v]) => doc(md5, v)).join("");
+    const store = boundedStore(3 * ONE);
+    const { transport, calls } = fakeTransport([412, [body]]);
+    const outcome = await createIndexSync({ store, transport, sizes: memorySizes() }).sync();
+    expect(calls).toHaveLength(2);
+    expect(outcome.stored).toBe(3);
+    expect(outcome.leftOut).toBe(1);
+    expect(store.peak()).toBeLessThanOrEqual(3 * ONE);
+  });
+
+  it("stops at an abort, keeping what it weighed and what it stored", async () => {
+    const sizes = memorySizes();
+    const store = memoryStore(true, 0);
+    const abort = new AbortController();
+    const transport: IndexTransport = {
+      ...fakeTransport([]).transport,
+      async stream(): Promise<StreamAnswer> {
+        return {
+          status: 200,
+          chunks: (async function* () {
+            yield doc(ROWS[0]![1], ROWS[0]![2]) + doc(ROWS[1]![1], ROWS[1]![2]);
+            abort.abort();
+            throw new DOMException("aborted", "AbortError");
+          })(),
+        };
+      },
+    };
+    await expect(createIndexSync({ store, transport, sizes }).sync({ signal: abort.signal })).rejects.toThrow("aborted");
+    expect(sizes.get(termsKeyOf(ROWS[0]![1], ROWS[0]![2]))).toBe(ONE);
+  });
+
+  it("keeps what it weighed when the stream tears", async () => {
+    const sizes = memorySizes();
+    const store = memoryStore(true, 0);
+    const torn: IndexTransport = {
+      ...fakeTransport([]).transport,
+      async stream(): Promise<StreamAnswer> {
+        return {
+          status: 200,
+          chunks: (async function* () {
+            // A document is whole once the next one begins.
+            yield doc(ROWS[0]![1], ROWS[0]![2]) + doc(ROWS[1]![1], ROWS[1]![2]);
+            throw new Error("connection reset");
+          })(),
+        };
+      },
+    };
+    await expect(createIndexSync({ store, transport: torn, sizes }).sync()).rejects.toThrow("connection reset");
+    expect(store.records.size).toBe(0);
+    expect(sizes.get(termsKeyOf(ROWS[0]![1], ROWS[0]![2]))).toBe(ONE);
+  });
+
+  it("remembers what it let go across visits, so a new tab doesn't fetch it to drop it", async () => {
+    const body = ROWS.map(([, md5, v]) => doc(md5, v)).join("");
+    const sizes = memorySizes();
+    const store = memoryStore(true, 3 * ONE);
+    await createIndexSync({ store, transport: fakeTransport([[body]]).transport, sizes }).sync();
+
+    const { transport, calls } = fakeTransport([[body]]);
+    const next = await createIndexSync({ store, transport, sizes }).sync();
+    expect(calls).toHaveLength(0);
+    expect(next.leftOut).toBe(1);
+  });
+
+  it("keeps notebooks first: a smaller budget lets go of the other documents before any notebook", async () => {
+    const body = ROWS.map(([, md5, v]) => doc(md5, v)).join("");
+    const store = memoryStore(true, 2 * ONE);
+    const outcome = await createIndexSync({ store, transport: fakeTransport([[body]]).transport, sizes: memorySizes() }).sync();
+    // Positions 0 and 1 are the notebooks.
+    expect([...store.records.keys()].sort()).toEqual([termsKeyOf(ROWS[0]![1], ROWS[0]![2]), termsKeyOf(ROWS[1]![1], ROWS[1]![2])].sort());
+    expect(outcome.leftOut).toBe(2);
+  });
+
+  it("asks again for a document let go once room is made", async () => {
+    const body = ROWS.map(([, md5, v]) => doc(md5, v)).join("");
+    const sizes = memorySizes();
+    const small = memoryStore(true, 3 * ONE);
+    await createIndexSync({ store: small, transport: fakeTransport([[body]]).transport, sizes }).sync();
+
+    // The same records, a bigger budget (more quota, say): the one let go fits again.
+    const roomy = memoryStore(true, 4 * ONE);
+    for (const [key, r] of small.records) roomy.records.set(key, r);
+    const { transport, calls } = fakeTransport([[doc(ROWS[3]![1], ROWS[3]![2])]]);
+    const outcome = await createIndexSync({ store: roomy, transport, sizes }).sync();
+    expect(calls).toHaveLength(1);
+    expect(outcome.received).toBe(1);
+    expect(outcome.leftOut).toBe(0);
   });
 
   it("coalesces a concurrent sync into the one already in flight", async () => {
@@ -233,6 +462,8 @@ describe("createIndexSync", () => {
     const outcome = await sync.sync();
     expect(outcome.received).toBe(4);
     expect(outcome.persisted).toBe(false);
+    // Nothing kept is not "nothing fits": no budget, nothing left out or remembered.
+    expect(outcome.leftOut).toBe(0);
     await expect(sync.documents()).resolves.toEqual([]);
     expect((await sync.sync()).requested).toBe(4);
   });
@@ -281,8 +512,7 @@ describe("openTermsStore", () => {
     expect(store.available).toBe(false);
     await expect(store.keys()).resolves.toEqual([]);
     await expect(store.get("a".repeat(32), 7)).resolves.toBeNull();
-    await expect(store.put({ md5: "a".repeat(32), indexVersion: 7, pageCount: 1, pages: [] })).resolves
-      .toBeUndefined();
+    await expect(store.put({ md5: "a".repeat(32), indexVersion: 7, pageCount: 1, pages: [] })).resolves.toBe(true);
     await expect(store.drop([{ md5: "a".repeat(32), indexVersion: 7 }])).resolves.toBeUndefined();
     await expect(store.all()).resolves.toEqual([]);
     await expect(store.clear()).resolves.toBeUndefined();

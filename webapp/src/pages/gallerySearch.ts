@@ -5,7 +5,7 @@
 
 import { cardList } from "./galleryCards";
 import { el } from "../ui/dom";
-import { answerFor, coverageLine, expansionNotice, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
+import { answerFor, coverageLine, expansionNotice, leftOutLine, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
 import { crumbPath } from "./rail/railPlaces";
 import { holdsInside, insideOf } from "../search/match";
 import { namedIds } from "./nameRows";
@@ -218,9 +218,11 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       );
     }
 
+    const leftOut = leftOutLine(searchState.kind === "results" ? (searchState.leftOut ?? 0) : 0);
     if (results.length > 0) {
       const grow = resultsMayGrowLine(pending);
       if (grow) gallery.append(el("p", { class: "hits__notice", role: "status", text: grow }));
+      if (leftOut) gallery.append(el("p", { class: "hits__notice", role: "status", text: leftOut }));
     }
 
     // Folders first: a name typed to get somewhere. Their own group, like the to-dos'.
@@ -231,6 +233,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
 
     if (results.length === 0 && (more || folders.length > 0)) {
       if (more) gallery.append(more);
+      if (leftOut) gallery.append(el("p", { class: "hits__notice", role: "status", text: leftOut }));
       const cov = coverageBlock();
       if (cov) gallery.append(cov);
       return;
@@ -250,7 +253,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         // The coverage block says the rest, with numbers, once it has them.
         const cov = coverageBlock();
         const why = cov ? "" : coverageLine();
-        gallery.append(ctx.emptyState(`No matches for “${q}”`, [still, why].filter(Boolean).join(" ")));
+        gallery.append(ctx.emptyState(`No matches for “${q}”`, [still, leftOut, why].filter(Boolean).join(" ")));
         if (cov) gallery.append(cov);
       }
       return;

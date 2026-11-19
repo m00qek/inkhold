@@ -212,6 +212,26 @@ describe("createIndexSearch", () => {
     expect(loads()).toBe(1);
   });
 
+  it("says how many documents the budget left out, and takes a let-go document out of the index", async () => {
+    const { load } = spyLoader();
+    const { sync, state } = fakeSync();
+    const local = createIndexSearch({ sync, load });
+    await local.sync();
+    const first = await local.search("reuniao");
+    expect(first.documents).toHaveLength(3);
+    expect(first).not.toHaveProperty("leftOut");
+
+    // CHARLIE let go for room: still live, so only a rebuild takes its matches away.
+    state.docs = DOCS.filter((d) => d.md5 !== CHARLIE);
+    state.received = 0;
+    state.letGo = 1;
+    state.leftOut = 1;
+    await local.sync();
+    const after = await local.search("reuniao");
+    expect(after.documents.map((d) => d.md5)).not.toContain(CHARLIE);
+    expect(after.leftOut).toBe(1);
+  });
+
   it("answers a session that never synced, from the cached listing alone", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();

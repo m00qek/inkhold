@@ -4,6 +4,7 @@ import {
   createNoteSearch,
   deepLinkQuery,
   expansionNotice,
+  leftOutLine,
   noLocalSearch,
   pageSummary,
   pendingLine,
@@ -44,7 +45,7 @@ function deferredSearch() {
   };
 
   /** Settle the Nth still-pending call (in call order). */
-  const settle = async (index: number, documents: LocalHit[], expansions: Expansion[] = []): Promise<void> => {
+  const settle = async (index: number, documents: LocalHit[], expansions: Expansion[] = [], extra: Partial<LocalResults> = {}): Promise<void> => {
     const p = pending[index];
     if (!p) throw new Error(`no pending call at ${index} (have ${pending.length})`);
     p.resolve({
@@ -52,6 +53,7 @@ function deferredSearch() {
       totalPages: documents.reduce((n, d) => n + d.pages.length, 0),
       documents,
       expansions,
+      ...extra,
     });
     await Promise.resolve();
     await Promise.resolve();
@@ -85,6 +87,19 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("createNoteSearch", () => {
+  it("passes on how many documents the browser's search left out, and nothing when none were", async () => {
+    const h = harness();
+    h.controller.setQuery("whale");
+    await vi.advanceTimersByTimeAsync(DEBOUNCE);
+    await h.settle(0, [doc(1, [0])], [], { leftOut: 4 });
+    expect(h.last()).toMatchObject({ kind: "results", leftOut: 4 });
+
+    h.controller.setQuery("whales");
+    await vi.advanceTimersByTimeAsync(DEBOUNCE);
+    await h.settle(1, [doc(1, [0])]);
+    expect(h.last()).not.toHaveProperty("leftOut");
+  });
+
   describe("an answer gone stale", () => {
     it("is asked again only once marked stale, and without the debounce or a 'searching' state", async () => {
       const h = harness();
@@ -549,6 +564,22 @@ describe("pageSummary", () => {
 describe("coverageLine", () => {
   it("says the one thing it can still stand behind", () => {
     expect(coverageLine()).toBe("Only notes recognised on the device are searchable.");
+  });
+});
+
+// The terms budget (`termsBudget.ts`): what search leaves out says so, and how to reach it.
+describe("leftOutLine", () => {
+  it("names how many documents only match by name, and points at Find", () => {
+    expect(leftOutLine(3)).toBe(
+      "This browser's search has no room for the text of 3 documents: only their names are searched. Open one and use Find to search inside it.",
+    );
+    expect(leftOutLine(1)).toBe(
+      "This browser's search has no room for the text of 1 document: only its name is searched. Open it and use Find to search inside it.",
+    );
+  });
+
+  it("says nothing when everything fits", () => {
+    expect(leftOutLine(0)).toBeNull();
   });
 });
 

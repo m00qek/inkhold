@@ -1,9 +1,11 @@
 // Where the terms stream lands: one IndexedDB record per document, keyed by
 // the record's own `(md5, index_version)`. No wasm on this path; the index is
 // built on first search. Degrades to a no-op store; a partial loss self-heals
-// because the next diff asks for whatever is missing.
+// because the next diff asks for whatever is missing. What doesn't fit the
+// budget is the sync's to choose and drop (`search/termsBudget.ts`), never an
+// eviction here: by age, it would let go a notebook to keep an old book.
 
-import { budgetForQuota, planEviction, type PersistedMeta } from "./idb";
+import { budgetForQuota } from "./idb";
 import { yieldOnVersionChange } from "./idbLife";
 import type { TermsDocument, TermsPage } from "../search/termsStream";
 
@@ -13,7 +15,7 @@ export interface TermsKey {
 }
 
 export interface StoredTermsDocument extends TermsDocument {
-  /** Epoch ms; the eviction key. */
+  /** Epoch ms, when the record was written. */
   readonly storedAt: number;
 }
 
@@ -23,9 +25,18 @@ export interface TermsStore {
   readonly available: boolean;
   /** The left-hand side of the diff. */
   keys(): Promise<TermsKey[]>;
+  /** What each held record weighs, in UTF-8 bytes, by `<md5>.<index_version>`. */
+  sizes(): Promise<ReadonlyMap<string, number>>;
+  /** The most the records may weigh together: the default, lowered to fit the quota; unbounded for the no-op store. */
+  budget(): Promise<number>;
   get(md5: string, indexVersion: number): Promise<StoredTermsDocument | null>;
   all(): Promise<StoredTermsDocument[]>;
-  put(doc: TermsDocument): Promise<void>;
+  /**
+   * False when the write failed (the quota ran out, say): the budget is then
+   * lowered to what the records weigh, for this tab, so the next plan asks
+   * for no more than fits. The no-op store accepts every write.
+   */
+  put(doc: TermsDocument): Promise<boolean>;
   drop(keys: readonly TermsKey[]): Promise<void>;
   clear(): Promise<void>;
 }
@@ -60,10 +71,12 @@ const STORE = "terms";
 const VERSION = 1;
 
 /**
- * A backstop, an order of magnitude above a real library. Eviction is not
- * free: the diff refetches whatever is missing, every sync.
+ * The search index built from these records takes about four times their
+ * weight in memory (16 MB of terms: 83 MB; 40 MB: 164 MB) and rebuilds at
+ * ~80 ms a MB on a laptop. 32 MB holds about twelve books the size of Les
+ * Misérables, and keeps a phone's tab within reach.
  */
-const DEFAULT_BUDGET = 16 * 1024 * 1024;
+export const DEFAULT_TERMS_BUDGET = 32 * 1024 * 1024;
 
 interface StoredRecord {
   key: string;
@@ -81,13 +94,24 @@ function nullStore(): TermsStore {
     async keys() {
       return [];
     },
+    async sizes() {
+      return new Map();
+    },
+    // Nothing is kept, so nothing needs to fit.
+    async budget() {
+      return Number.POSITIVE_INFINITY;
+    },
     async get() {
       return null;
     },
     async all() {
       return [];
     },
-    async put() {},
+    // Accepted, and nothing kept: `available` already says so, and a refusal
+    // would lower a budget that bounds nothing.
+    async put() {
+      return true;
+    },
     async drop() {},
     async clear() {},
   };
@@ -104,10 +128,24 @@ function promisify<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
-/** Approximate weight in UTF-16 units; only compared against a generous cap. */
-function weigh(doc: TermsDocument): number {
+function utf8Length(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c < 0xdc00 && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+
+/** The record's weight in UTF-8 bytes: its terms, plus a little per page. */
+export function weigh(doc: Pick<TermsDocument, "md5" | "pages">): number {
   let size = doc.md5.length + 24;
-  for (const page of doc.pages) size += page.t.length + 8;
+  for (const page of doc.pages) size += utf8Length(page.t) + 8;
   return size;
 }
 
@@ -137,8 +175,9 @@ function stored(rec: StoredRecord): StoredTermsDocument {
 export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
   if (!idbAvailable()) return nullStore();
 
-  const desired = opts.budgetBytes ?? DEFAULT_BUDGET;
-  const metas = new Map<string, PersistedMeta>();
+  const desired = opts.budgetBytes ?? DEFAULT_TERMS_BUDGET;
+  /** Each record's weight by key: the diff and the budget read it on every sync. */
+  const sizes = new Map<string, number>();
   let budget = desired;
 
   const dbPromise: Promise<IDBDatabase | null> = (async () => {
@@ -152,13 +191,13 @@ export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
         open.onsuccess = () => resolve(yieldOnVersionChange(open.result));
         open.onerror = () => reject(open.error);
       });
-      await seedMetas(db);
+      await seedSizes(db);
       try {
         const nav = typeof navigator !== "undefined" ? navigator : undefined;
         if (nav?.storage?.estimate) {
           const est = await nav.storage.estimate();
           let ours = 0;
-          for (const m of metas.values()) ours += m.size;
+          for (const size of sizes.values()) ours += size;
           budget = budgetForQuota(est, desired, ours);
         }
       } catch {
@@ -170,7 +209,7 @@ export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
     }
   })();
 
-  async function seedMetas(db: IDBDatabase): Promise<void> {
+  async function seedSizes(db: IDBDatabase): Promise<void> {
     return new Promise((resolve) => {
       try {
         const tx = db.transaction(STORE, "readonly");
@@ -179,8 +218,9 @@ export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
           const cursor = cursorReq.result;
           if (!cursor) return resolve();
           const rec = cursor.value as StoredRecord;
-          // `storedAt` is the LRU key: the build reads every record at once.
-          metas.set(rec.key, { key: rec.key, size: rec.size, lastAccess: rec.storedAt });
+          // Weighed again, not read from `size`: a record written before the
+          // budget counted UTF-8 bytes carries its weight in UTF-16 units.
+          sizes.set(rec.key, weigh(rec));
           cursor.continue();
         };
         cursorReq.onerror = () => resolve();
@@ -208,15 +248,27 @@ export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
     available: true,
 
     async keys() {
-      // From the meta mirror: the diff runs on every sync.
+      // From the in-memory sizes: the diff runs on every sync.
       await dbPromise;
       const out: TermsKey[] = [];
-      for (const key of metas.keys()) {
+      for (const key of sizes.keys()) {
         const dot = key.lastIndexOf(".");
         const version = Number.parseInt(key.slice(dot + 1), 10);
         if (dot > 0 && Number.isInteger(version)) out.push({ md5: key.slice(0, dot), indexVersion: version });
       }
       return out;
+    },
+
+    async sizes() {
+      await dbPromise;
+      const out = new Map<string, number>();
+      for (const [key, size] of sizes) out.set(key, size);
+      return out;
+    },
+
+    async budget() {
+      await dbPromise;
+      return budget;
     },
 
     async get(md5, indexVersion) {
@@ -234,17 +286,14 @@ export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
     async put(doc) {
       const rec = record(doc, Date.now());
       const ok = await withStore("readwrite", (store) => promisify(store.put(rec)));
-      if (ok === undefined) return;
-      metas.set(rec.key, { key: rec.key, size: rec.size, lastAccess: rec.storedAt });
-
-      const toEvict = planEviction([...metas.values()], budget);
-      if (toEvict.length === 0) return;
-      await withStore("readwrite", async (store) => {
-        for (const k of toEvict) {
-          await promisify(store.delete(k));
-          metas.delete(k);
-        }
-      });
+      if (ok === undefined) {
+        let held = 0;
+        for (const size of sizes.values()) held += size;
+        budget = Math.min(budget, held);
+        return false;
+      }
+      sizes.set(rec.key, rec.size);
+      return true;
     },
 
     async drop(keys) {
@@ -253,13 +302,13 @@ export function openTermsStore(opts: TermsStoreOptions = {}): TermsStore {
         for (const { md5, indexVersion } of keys) {
           const key = termsKeyOf(md5, indexVersion);
           await promisify(store.delete(key));
-          metas.delete(key);
+          sizes.delete(key);
         }
       });
     },
 
     async clear() {
-      metas.clear();
+      sizes.clear();
       await withStore("readwrite", (store) => promisify(store.clear()));
     },
   };

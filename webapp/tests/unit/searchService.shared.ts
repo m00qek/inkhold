@@ -135,6 +135,8 @@ export function fakeSync(opts: FakeSyncOptions = {}) {
     docs: opts.docs ?? DOCS,
     rows: opts.rows ?? LIVE,
     received: opts.docs?.length ?? DOCS.length,
+    leftOut: 0,
+    letGo: 0,
     syncs: 0,
     /** Set before a call to make THAT call block; `gate` then releases it. */
     hold: false,
@@ -157,8 +159,11 @@ export function fakeSync(opts: FakeSyncOptions = {}) {
         etag: "etag-1",
         requested: state.received,
         received: state.received,
+        stored: state.received,
         skipped: 0,
         dropped: 0,
+        leftOut: state.leftOut,
+        letGo: state.letGo,
         persisted: store.available,
       };
     },
