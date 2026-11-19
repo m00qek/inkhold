@@ -1,7 +1,7 @@
 // Helpers shared by the thumbnails tests.
 
 import { vi } from "vitest";
-import { createThumbnails, type ThumbNet, type ThumbPainter, type ThumbSource } from "../../src/render/thumbnails";
+import { createThumbnails, type ThumbNet, type ThumbnailsDeps, type ThumbPainter, type ThumbSource } from "../../src/render/thumbnails";
 import type { PersistentThumbStore } from "../../src/cache/idb";
 import type { Id, PageRef, Theme } from "../../src/core/types";
 
@@ -73,6 +73,7 @@ export function build(
     coverMemo?: ReturnType<typeof fakeCoverMemo>;
     persistent?: PersistentThumbStore | null;
     pdf?: false;
+    inkCover?: ThumbnailsDeps["inkCover"];
   } = {},
 ) {
   const painter = fakePainter();
@@ -98,6 +99,7 @@ export function build(
     renderPdfPage: opts.pdf === false ? undefined : renderPdfPage,
     setDims,
     persistent: opts.persistent,
+    inkCover: opts.inkCover,
   });
   return {
     coverMemo,

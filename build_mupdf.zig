@@ -16,9 +16,12 @@ const mupdf_wasm_only = [_][]const u8{
 };
 
 // Size trim, measured: NO_CJK drops the CJK CMap tables (-881 KB, not covered by
-// TOFU_CJK), HYPHEN (-643 KB), TOFU/TOFU_CJK keep only the 14 base-35 fonts, JPX
-// (-227 KB) degrades to "unsupported image". Formats kept: PDF, EPUB, FB2, CBZ,
-// XPS.
+// TOFU_CJK), HYPHEN (-643 KB), TOFU/TOFU_CJK keep only the 14 base-35 fonts.
+// JPX (JPEG 2000) stays: the tablet opens comic books and PDFs made of it. It
+// costs +51 KB brotli in the browser and +313 KB on the Pi's server, which links
+// it too: one flag set keeps the two agreeing on a document, and the server
+// only reads JPX headers (a page's size), never decodes. Formats kept: PDF,
+// EPUB, FB2, CBZ, XPS.
 const mupdf_trim_flags = [_][]const u8{
     "-DNDEBUG",
 
@@ -26,8 +29,12 @@ const mupdf_trim_flags = [_][]const u8{
     "-DTOFU_CJK",
     "-DNO_CJK",
 
+    // `OPENJPEG_CFLAGS`: MuPDF's own `load-jpx.c` includes `<openjpeg.h>`.
+    "-DOPJ_STATIC",
+    "-DOPJ_HAVE_INTTYPES_H",
+    "-DOPJ_HAVE_STDINT_H",
+
     "-DFZ_ENABLE_JS=0",
-    "-DFZ_ENABLE_JPX=0",
     "-DFZ_ENABLE_HYPHEN=0",
     "-DFZ_ENABLE_SVG=0",
     "-DFZ_ENABLE_MD=0",
@@ -73,6 +80,13 @@ const mupdf_jbig2dec_flags = [_][]const u8{
     "-DJBIG_EXTERNAL_MEMENTO_H=\"mupdf/memento.h\"",
 };
 
+/// `OPENJPEG_BUILD_CFLAGS` from `Makelists`: no threads, which wasm lacks.
+/// MuPDF's openjpeg bridge keeps one global context, guarded through the
+/// context's lock callbacks; Inkhold's contexts install none, so only one
+/// thread may use MuPDF at a time: the browser's worker, the server's one
+/// deferred worker.
+const mupdf_openjpeg_flags = [_][]const u8{"-DMUTEX_pthread=0"};
+
 const mupdf_harfbuzz_flags = [_][]const u8{
     "-std=gnu++11",
     "-fno-exceptions",
@@ -86,11 +100,25 @@ const mupdf_harfbuzz_flags = [_][]const u8{
     "-DHAVE_UCDN",
     "-DHB_NO_MT",
     "-DHB_NO_PRAGMA_GCC_DIAGNOSTIC",
-    // HarfBuzz allocates through MuPDF's allocator, so the store cap bounds shaping too.
+};
+
+/// The browser's HarfBuzz allocates through MuPDF's allocator, as MuPDF ships it.
+const mupdf_harfbuzz_alloc_wasm = [_][]const u8{
     "-Dhb_malloc_impl=fz_hb_malloc",
     "-Dhb_calloc_impl=fz_hb_calloc",
     "-Dhb_free_impl=fz_hb_free",
     "-Dhb_realloc_impl=fz_hb_realloc",
+};
+
+/// The server's through `backend/pdf/budget.c`: counted against the open
+/// document's ceiling, but from `malloc`, not the document's pool. HarfBuzz
+/// keeps a few blocks in statics for the life of the process; a pool unmapped
+/// under them is a crash on the next document that shapes text.
+const mupdf_harfbuzz_alloc_native = [_][]const u8{
+    "-Dhb_malloc_impl=ink_hb_malloc",
+    "-Dhb_calloc_impl=ink_hb_calloc",
+    "-Dhb_free_impl=ink_hb_free",
+    "-Dhb_realloc_impl=ink_hb_realloc",
 };
 
 /// MuPDF sources we skip. `office.c`/`mobi.c` are not guarded internally, so the
@@ -102,11 +130,7 @@ const mupdf_excluded_sources = [_][]const u8{
     "office.c", // FZ_ENABLE_OFFICE=0, but the file itself is unguarded
     "mobi.c", // FZ_ENABLE_MOBI=0, ditto
     "md.c", // FZ_ENABLE_MD=0 — guarded, but would want cmark-gfm's headers
-    // Upstream bug: includes `<openjpeg.h>` above its `FZ_ENABLE_JPX` guard.
-    "encode-jpx.c",
-    // Upstream bug: its disabled stub has the wrong signature, which `wasm-ld`
-    // turns into a trapping call. `pdf_shim.c` provides correct stubs.
-    "load-jpx.c",
+    "encode-jpx.c", // JPEG 2000 is only read, never written
 };
 
 /// Read a `*_SRC += path` list out of MuPDF's own `Makelists`. Thirdparty trees
@@ -194,6 +218,7 @@ const mupdf_includes = [_][]const u8{
     "thirdparty/lcms2/include",
     "thirdparty/zlib",
     "thirdparty/jbig2dec",
+    "thirdparty/openjpeg/src/lib/openjp2",
     "include/mupdf",
 };
 
@@ -217,6 +242,7 @@ const mupdf_third_groups = [_]MupdfGroup{
     .{ .name = "LCMS2", .extra = &.{} },
     .{ .name = "ZLIB", .extra = &mupdf_zlib_flags },
     .{ .name = "JBIG2DEC", .extra = &mupdf_jbig2dec_flags },
+    .{ .name = "OPENJPEG", .extra = &mupdf_openjpeg_flags },
 };
 
 /// Adds MuPDF's own sources, fonts and thirdparty tree to `mod`, for both targets.
@@ -225,6 +251,7 @@ fn addMupdfSources(
     dep: *std.Build.Dependency,
     mod: *std.Build.Module,
     flags: []const []const u8,
+    harfbuzz_alloc: []const []const u8,
 ) void {
     for (&mupdf_includes) |inc| mod.addIncludePath(dep.path(inc));
 
@@ -254,11 +281,12 @@ fn addMupdfSources(
     mod.addCSourceFiles(.{
         .root = dep.path(""),
         .files = mupdfListedSources(b, dep, &.{"HARFBUZZ"}),
-        .flags = concatFlags(b, vflags, &mupdf_harfbuzz_flags),
+        .flags = concatFlags(b, concatFlags(b, vflags, &mupdf_harfbuzz_flags), harfbuzz_alloc),
     });
 }
 
-/// MuPDF for the server (`backend/pdf/probe.c`, `backend/pdf/text.c`).
+/// MuPDF for the server (`backend/pdf/probe.c`, `backend/pdf/text.c`), every
+/// context under `backend/pdf/budget.c`'s memory ceiling.
 pub fn buildMupdfNative(
     b: *std.Build,
     dep: *std.Build.Dependency,
@@ -268,7 +296,7 @@ pub fn buildMupdfNative(
     const mod = b.createModule(.{ .target = target, .optimize = optimize });
     mod.link_libc = true;
     mod.link_libcpp = true; // HarfBuzz is C++
-    addMupdfSources(b, dep, mod, &mupdf_native_flags);
+    addMupdfSources(b, dep, mod, &mupdf_native_flags, &mupdf_harfbuzz_alloc_native);
     mod.addCSourceFile(.{
         .file = b.path("backend/pdf/probe.c"),
         .flags = &mupdf_native_flags,
@@ -277,6 +305,11 @@ pub fn buildMupdfNative(
     // probe runs at the default.
     mod.addCSourceFile(.{
         .file = b.path("backend/pdf/text.c"),
+        .flags = &mupdf_native_flags,
+    });
+    // The memory ceiling both contexts allocate through.
+    mod.addCSourceFile(.{
+        .file = b.path("backend/pdf/budget.c"),
         .flags = &mupdf_native_flags,
     });
     return b.addLibrary(.{ .name = "mupdf-native", .root_module = mod, .linkage = .static });
@@ -297,7 +330,7 @@ pub fn buildMupdfWasm(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step
     mod.link_libc = true;
     mod.link_libcpp = true;
 
-    addMupdfSources(b, dep, mod, &mupdf_wasm_flags);
+    addMupdfSources(b, dep, mod, &mupdf_wasm_flags, &mupdf_harfbuzz_alloc_wasm);
 
     for ([_][]const u8{ "pdf_shim.c", "pdf_shim_links.c", "pdf_shim_text.c", "pdf_shim_export.c" }) |shim| {
         mod.addCSourceFile(.{

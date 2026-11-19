@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fileKind, formatBytes, rawFileUrl, historyFileUrl, canPreviewHistory, PREVIEWABLE_IMAGE_TYPES, fileTypeLabel } from "../../src/core/fileKind";
+import { fileKind, formatBytes, rawFileUrl, historyFileUrl, canPreviewHistory, PREVIEWABLE_IMAGE_TYPES, fileTypeLabel, hasDedicatedViewer, isPagedDocument, pagedDocument } from "../../src/core/fileKind";
 
 describe("fileKind", () => {
   it("classifies a verified note as a note", () => {
@@ -134,5 +134,24 @@ describe("formatBytes", () => {
   it("does not pretend to know a size it wasn't given", () => {
     expect(formatBytes(Number.NaN)).toBe("—");
     expect(formatBytes(-1)).toBe("—");
+  });
+});
+
+describe("paged documents", () => {
+  it("are the fixed-page formats MuPDF opens alike, never the ones that reflow", () => {
+    for (const t of ["pdf", "XPS", " cbz "]) expect(isPagedDocument(t)).toBe(true);
+    for (const t of ["epub", "fb2", "docx", "mobi", "", null, undefined]) expect(isPagedDocument(t)).toBe(false);
+  });
+
+  it("each has a viewer", () => {
+    for (const t of ["pdf", "xps", "cbz"]) expect(hasDedicatedViewer(t)).toBe(true);
+    expect(hasDedicatedViewer("epub")).toBe(false);
+  });
+
+  it("are named by what they are, and say whether there is text to find", () => {
+    expect(pagedDocument("pdf")).toMatchObject({ title: "PDF", noun: "PDF", download: "PDF document", hasText: true });
+    expect(pagedDocument("xps")).toMatchObject({ noun: "XPS document", hasText: true });
+    expect(pagedDocument(" CBZ ")).toMatchObject({ title: "Comic book", noun: "comic book", badge: "CBZ", hasText: false });
+    expect(pagedDocument(null).noun).toBe("PDF");
   });
 });

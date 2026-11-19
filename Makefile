@@ -339,10 +339,10 @@ commit-hook:
 	ln -sf ../../scripts/commit-titles.sh .git/hooks/commit-msg
 
 fmt:
-	zig fmt --check backend webapp/wasm parsers build.zig
+	zig fmt --check backend webapp/wasm parsers build.zig build_mupdf.zig
 
 fmt-fix:
-	zig fmt backend webapp/wasm parsers build.zig
+	zig fmt backend webapp/wasm parsers build.zig build_mupdf.zig
 
 lan-ip:
 	@echo "This machine's LAN IP(s): $$(hostname -I 2>/dev/null || ip -4 addr show scope global | awk '/inet /{print $$2}' | cut -d/ -f1 | tr '\n' ' ')"

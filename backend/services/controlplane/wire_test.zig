@@ -197,6 +197,154 @@ test "wire contract: EntryVO — a note row, and a PDF row naming its mark" {
     try expectWireFixture("entry-annotated-pdf.json", pinEntryTime(doc));
 }
 
+test "a listing row names an XPS's or a comic book's mark as noteMeta does; an EPUB's, neither" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    const mark = try wireMarkBytes(gpa);
+    defer gpa.free(mark);
+
+    var ids: [3]u64 = undefined;
+    inline for (.{ "guide.xps", "comic.cbz", "book.epub" }, 0..) |name, i| {
+        ids[i] = try seedBytes(&f, null, name, "PK\x03\x04 a zip");
+        _ = try seedBytes(&f, null, name ++ ".mark", mark);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var svc = ControlPlaneService.init(&f.files);
+    const root = try svc.listing(a, 1, null);
+
+    inline for (.{ "guide.xps", "comic.cbz", "book.epub" }, 0..) |name, i| {
+        const row = try entryNamed(root, name);
+        const meta = (try svc.noteMeta(a, 1, ids[i])).?;
+        if (i < 2) {
+            try testing.expect(row.annotationsId != null);
+            try testing.expectEqualStrings(meta.annotationsId.?, row.annotationsId.?);
+        } else {
+            try testing.expect(row.annotationsId == null and meta.annotationsId == null);
+        }
+    }
+    // Paired, so the marks themselves list as no rows of their own.
+    for (root.entries) |e| try testing.expect(!std.mem.endsWith(u8, e.name, ".mark"));
+}
+
+/// A `.mark` whose pages are numbered as given, each one layer of `ink`.
+fn markOn(gpa: std.mem.Allocator, pages: []const struct { number: u32, ink: []const u8 }) ![]u8 {
+    // The layers live here, not in a literal inside the loop, whose storage
+    // each iteration would reuse.
+    var layers: [4][1]nb.LayerSpec = undefined;
+    var built: [4]nb.PageSpec = undefined;
+    for (pages, 0..) |pg, i| {
+        layers[i] = .{.{ .slot = .main, .bitmap = pg.ink }};
+        built[i] = .{ .number = pg.number, .layers = &layers[i] };
+    }
+    return nb.serialize(gpa, .{ .filetype = "mark", .pages = built[0..pages.len] });
+}
+
+fn coverOf(svc: *ControlPlaneService, arena: std.mem.Allocator, name: []const u8) !?[]const u8 {
+    const root = try svc.listing(arena, 1, null);
+    return (try entryNamed(root, name)).coverInkHash;
+}
+
+const ink_a = [_]u8{ 0x62, 0xFF, 0x61, 0x20, 0x62, 0xFF };
+const ink_b = [_]u8{ 0x62, 0xFF, 0x61, 0x40, 0x62, 0xFF };
+const no_ink = [_]u8{ 0x62, 0xFF, 0x62, 0xFF };
+const idStr = cp.idStr;
+
+test "a listing row's coverInkHash moves when its mark's page 1 is written again, not when page 2 is" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var svc = ControlPlaneService.init(&f.files);
+
+    _ = try seedBytes(&f, null, "a.pdf", "%PDF-1.7\n%%EOF\n");
+    const v1 = try markOn(gpa, &.{ .{ .number = 1, .ink = &ink_a }, .{ .number = 2, .ink = &ink_a } });
+    defer gpa.free(v1);
+    _ = try seedBytes(&f, null, "a.pdf.mark", v1);
+    const first = (try coverOf(&svc, arena.allocator(), "a.pdf")) orelse return error.TestExpectedCoverInk;
+
+    // The same mark, page 2 written again: page 1's ink, and the tile, unchanged.
+    const v2 = try markOn(gpa, &.{ .{ .number = 1, .ink = &ink_a }, .{ .number = 2, .ink = &ink_b } });
+    defer gpa.free(v2);
+    _ = try seedBytes(&f, null, "a.pdf.mark", v2);
+    try testing.expectEqualStrings(first, (try coverOf(&svc, arena.allocator(), "a.pdf")).?);
+
+    // Page 1 written again: a new hash, so a new tile.
+    const v3 = try markOn(gpa, &.{ .{ .number = 1, .ink = &ink_b }, .{ .number = 2, .ink = &ink_b } });
+    defer gpa.free(v3);
+    _ = try seedBytes(&f, null, "a.pdf.mark", v3);
+    const third = (try coverOf(&svc, arena.allocator(), "a.pdf")) orelse return error.TestExpectedCoverInk;
+    try testing.expect(!std.mem.eql(u8, first, third));
+
+    // Page 1 rubbed out: no ink, no hash.
+    const v4 = try markOn(gpa, &.{.{ .number = 1, .ink = &no_ink }});
+    defer gpa.free(v4);
+    _ = try seedBytes(&f, null, "a.pdf.mark", v4);
+    try testing.expect((try coverOf(&svc, arena.allocator(), "a.pdf")) == null);
+}
+
+test "coverInkHash picks page 1 by the viewer's rule: unnumbered at index 0, and the last of two" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var svc = ControlPlaneService.init(&f.files);
+
+    _ = try seedBytes(&f, null, "two.xps", "PK\x03\x04 a paged document");
+    const two = try markOn(gpa, &.{ .{ .number = 1, .ink = &ink_a }, .{ .number = 1, .ink = &ink_b } });
+    defer gpa.free(two);
+    const two_id = try seedBytes(&f, null, "two.xps.mark", two);
+    const meta = (try svc.noteMeta(arena.allocator(), 1, two_id)).?;
+    // The viewer keeps the last page it maps to page 1.
+    try testing.expectEqualStrings(meta.pages[1].hash, (try coverOf(&svc, arena.allocator(), "two.xps")).?);
+
+    // The later of two blank: the viewer shows the blank one, so the tile has no ink.
+    _ = try seedBytes(&f, null, "blank.xps", "PK\x03\x04 a paged document");
+    const blank = try markOn(gpa, &.{ .{ .number = 1, .ink = &ink_a }, .{ .number = 1, .ink = &no_ink } });
+    defer gpa.free(blank);
+    _ = try seedBytes(&f, null, "blank.xps.mark", blank);
+    try testing.expect((try coverOf(&svc, arena.allocator(), "blank.xps")) == null);
+
+    // An unnumbered page (pre-v7 rows) at index 0 is page 1 to the viewer.
+    _ = try seedBytes(&f, null, "old.cbz", "PK\x03\x04 a paged document");
+    const old = try markOn(gpa, &.{.{ .number = 3, .ink = &ink_a }});
+    defer gpa.free(old);
+    _ = try seedBytes(&f, null, "old.cbz.mark", old);
+    try f.db.exec("UPDATE note_page_index SET source_page = 0 WHERE source_page = 3;");
+    try testing.expect((try coverOf(&svc, arena.allocator(), "old.cbz")) != null);
+}
+
+test "a bin row carries its trashed mark and page-1 ink, as a listing row does" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const gpa = testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var svc = ControlPlaneService.init(&f.files);
+
+    const doc = try seedBytes(&f, null, "gone.pdf", "%PDF-1.7\n%%EOF\n");
+    const ink = try markOn(gpa, &.{.{ .number = 1, .ink = &ink_a }});
+    defer gpa.free(ink);
+    const mark = try seedBytes(&f, null, "gone.pdf.mark", ink);
+    const live = (try coverOf(&svc, arena.allocator(), "gone.pdf")).?;
+
+    try f.files.trash(1, doc);
+    const bin = try svc.bin(arena.allocator(), 1);
+    var row: ?cp.BinEntryVO = null;
+    for (bin.entries) |e| {
+        try testing.expect(!std.mem.endsWith(u8, e.name, ".mark")); // the pair is one row there too
+        if (std.mem.eql(u8, e.name, "gone.pdf")) row = e;
+    }
+    const r = row orelse return error.TestExpectedBinRow;
+    try testing.expectEqualStrings(try idStr(arena.allocator(), mark), r.annotationsId.?);
+    try testing.expectEqualStrings(live, r.coverInkHash.?);
+}
+
 test "wire contract: ListingVO — a subfolder listing, breadcrumb and all" {
     var f = try Fixture.init();
     defer f.deinit();

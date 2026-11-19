@@ -60,6 +60,28 @@ function loadDecoder(): DecoderExports {
 
 // --- enumerateSnpg (wasm-backed record enumeration) --------------------------
 
+describe("enumerateSnpg, when the module cannot answer", () => {
+  // Not an answer about the page, so a caller that caches "no ink" must not.
+  const fake = (over: Partial<DecoderExports>) => ({ ...over }) as unknown as DecoderExports;
+  const enumerator = {
+    snpg_enumerate: () => 0,
+    snpg_width: () => 0,
+    snpg_height: () => 0,
+    snpg_record_slot: () => 0,
+    snpg_record_flags: () => 0,
+    snpg_record_hash_ptr: () => 0,
+    snpg_record_hash_len: () => 0,
+  } as unknown as Partial<DecoderExports>;
+
+  it("throws for an older cached module without the enumerator", () => {
+    expect(() => enumerateSnpg(fake({}), new Uint8Array(8))).toThrow(/older cached module/);
+  });
+
+  it("throws when the module is out of memory", () => {
+    expect(() => enumerateSnpg(fake({ ...enumerator, alloc: () => 0 }), new Uint8Array(8))).toThrow(/out of memory/);
+  });
+});
+
 wasmSuite("enumerateSnpg (real module)", () => {
   it("walks a v2 payload into slot + hidden + dims, wire order", () => {
     const en = enumerateSnpg(loadDecoder(), payload(TWO_RECORDS));

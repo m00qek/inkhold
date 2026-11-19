@@ -3,6 +3,7 @@
  * view, whole document) and the composition of a PDF page with its `.mark` ink,
  * which unlike a `.note`'s layers do not share one grid.
  */
+import { PAGED_DOCUMENT_TYPES, pagedDocument } from "../../core/fileKind";
 import { el } from "../../ui/dom";
 import { download } from "../../export/exporter";
 import {
@@ -138,6 +139,8 @@ export interface PdfExportState {
   pageVisible: boolean;
   /** Inked pages in the whole document; zero hides the annotated export (it would equal the raw file). */
   markedPages: number;
+  /** The open file's type. Only a PDF can be grafted into a new PDF; the raw row names the type. */
+  fileType: string;
 }
 
 export interface PdfExports {
@@ -270,6 +273,7 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
    * with selectable text). The current one hides when the Document row is off.
    */
   const currentPdf = menu.item("PDF document", ".pdf", () => savePdf("current"));
+  const originalPdf = menu.item("PDF document", ".pdf", () => savePdf("original"));
 
   const currentGroup = el(
     "div",
@@ -288,19 +292,20 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
     el("div", { class: "menu__head", text: "This page — Original view" }),
     menu.item("Flattened image", ".png", () => save("original", "png")),
     originalOra,
-    menu.item("PDF document", ".pdf", () => savePdf("original")),
+    originalPdf,
   );
 
   // Whole document: the raw file, and the same bytes with the ink appended.
   const annotatedPdf = menu.item("PDF with annotations", ".pdf", saveDocumentPdf);
-  const rawItem = menu.rawItem("PDF document", ".pdf");
+  // One raw row per paged type, the open file's shown: its label names what downloads.
+  const rawItems = new Map(PAGED_DOCUMENT_TYPES.map((t) => [t, menu.rawItem(pagedDocument(t).download, `.${t}`)]));
   const wholeGroup = el(
     "div",
     {},
     el("div", { class: "menu__sep" }),
     el("div", { class: "menu__head", text: "Whole document" }),
     annotatedPdf,
-    rawItem.el,
+    ...[...rawItems.values()].map((r) => r.el),
   );
 
   menu.pop.append(currentGroup, originalGroup, wholeGroup);
@@ -308,14 +313,22 @@ export function createPdfExports(deps: PdfExportsDeps): PdfExports {
   return {
     refreshGroups(): void {
       const st = deps.state();
+      // `fileType` is a paged one: only they open in this viewer.
+      const type = st.fileType;
+      // Grafting copies a PDF's own page objects: an XPS or a CBZ has none.
+      const isPdf = type === "pdf";
       currentOra.hidden = !st.hasInk;
       originalOra.hidden = !st.hasInk;
       // Hidden, not disabled: the house rule for a row meaningless on this page.
-      currentPdf.hidden = !st.pageVisible;
-      annotatedPdf.hidden = st.markedPages === 0;
+      currentPdf.hidden = !isPdf || !st.pageVisible;
+      originalPdf.hidden = !isPdf;
+      annotatedPdf.hidden = !isPdf || st.markedPages === 0;
+      for (const [t, r] of rawItems) r.el.hidden = t !== type;
       // `tuned` includes the Document row.
       originalGroup.hidden = !st.tuned;
     },
-    setRawHref: (url) => rawItem.setHref(url),
+    setRawHref: (url) => {
+      for (const r of rawItems.values()) r.setHref(url);
+    },
   };
 }

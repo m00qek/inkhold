@@ -33,12 +33,13 @@ export interface ViewerBody {
 }
 
 /** The loading/error placeholder body shared by the `.spd` and `.txt` viewers. */
-export function createViewerBody(opts: { mark: string }): ViewerBody {
+/** `mark` is the placeholder's badge; a function for a viewer that shows several kinds of file. */
+export function createViewerBody(opts: { mark: string | (() => string) }): ViewerBody {
   const placeholder = el("div", { class: "viewer__placeholder" });
   const main = el("div", { class: "viewer__main" }, placeholder);
   function showPlaceholder(title: string, body: string): void {
     placeholder.replaceChildren(
-      el("div", { class: "viewer__mark", text: opts.mark }),
+      el("div", { class: "viewer__mark", text: typeof opts.mark === "string" ? opts.mark : opts.mark() }),
       el("h2", { text: title }),
       el("p", { text: body }),
     );

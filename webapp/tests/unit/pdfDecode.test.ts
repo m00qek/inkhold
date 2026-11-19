@@ -187,6 +187,20 @@ describe("AsyncPdfDocument, whole-file", () => {
     }
   });
 
+  it("draws a JPEG 2000 image: JPX is built in, as the tablet's reader has it", async () => {
+    // One black 64x64 JPX image filling a 100x100 page. Without JPX the page
+    // still opens, but the image is skipped and the page stays white.
+    const jpx = readFileSync(join(here, "../../wasm/tests/fixtures/jpx-image.pdf"));
+    const doc = await AsyncPdfDocument.openWhole(exports, syncCalls(exports), new Uint8Array(jpx));
+    try {
+      const bmp = await doc.render(0, 1);
+      const centre = ((bmp.height >> 1) * bmp.width + (bmp.width >> 1)) * 4;
+      expect(bmp.rgba[centre]).toBeLessThan(40);
+    } finally {
+      doc.close();
+    }
+  });
+
   it("refuses garbage, and says what MuPDF said", async () => {
     await expect(
       AsyncPdfDocument.openWhole(exports, syncCalls(exports), new TextEncoder().encode("not a pdf at all")),

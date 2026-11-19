@@ -1,6 +1,6 @@
 // The fake API's fixture tree: folders, notes, pages, text, links, versions and sizes.
 
-import type { PdfLink, Entry, FileVersion, Folder, Id, NoteSummary, PageRef, WordBox } from "../core/types";
+import type { PdfLink, Entry, FileVersion, Folder, Hash, Id, NoteSummary, PageRef, WordBox } from "../core/types";
 import { BIN_SEED_NOTES } from "./binFake";
 import { LAYERED_NOTE_ID, withLayeredPageLayers } from "./layeredFixture";
 import { canPreviewHistory } from "../core/fileKind";
@@ -14,6 +14,22 @@ import { fakeFileHash, fakeHash } from "./fakeHash";
 export const MARKED_PDF_ID = "178";
 export const PDF_MARK_ID = "179";
 export const PDF_MARK_SOURCE_PAGE = 2;
+
+/**
+ * The `.mark` on XPS `146`, the tablet's ink on its page 1. Sent as the server
+ * sends it: no `sourcePage`, since it is the page's `index + 1`.
+ */
+export const MARKED_XPS_ID = "146";
+export const XPS_MARK_ID = "148";
+
+/** Every fake mark's one page, by content hash (`markMeta`). */
+export const FAKE_MARK_PAGE_HASH = "m".repeat(32) as Hash;
+
+/** Each fake mark: the document it annotates and that document's name. */
+export const FAKE_MARKS: Readonly<Record<Id, { on: Id; name: string; sourcePage: number | null }>> = {
+  [PDF_MARK_ID]: { on: MARKED_PDF_ID, name: "Appliance manual.pdf.mark", sourcePage: PDF_MARK_SOURCE_PAGE },
+  [XPS_MARK_ID]: { on: MARKED_XPS_ID, name: "Quince — a pocket guide.xps.mark", sourcePage: null },
+};
 
 /** Notes whose recognition starts after page 1; `getNoteMeta` must rebuild the summary's per-page pattern. */
 export const RECOGNIZED_FROM: Record<string, number> = {};
@@ -102,6 +118,8 @@ interface NoteOpts {
   /** Explicit preview dims: a `.note`'s cover, or a `.spd`'s embedded thumbnail. */
   thumbAspect?: { w: number; h: number };
   annotationsId?: Id;
+  /** The ink on page 1, as the server's `coverInkHash`. */
+  coverInkHash?: Hash;
 }
 export function note(id: Id, name: string, pageCount: number, updatedAt: number, opts: NoteOpts = {}): NoteSummary {
   const fileType = opts.fileType ?? "note";
@@ -125,6 +143,7 @@ export function note(id: Id, name: string, pageCount: number, updatedAt: number,
       opts.thumbAspect ?? (fileType === "note" && first ? { w: first.width, h: first.height } : undefined),
     // The server folds the mark out of the listing; this is the row's only pairing signal.
     annotationsId: opts.annotationsId ?? null,
+    coverInkHash: opts.coverInkHash ?? null,
   };
 }
 
@@ -272,6 +291,14 @@ export const CHILDREN: Record<string, Entry[]> = {
     note("142", "Apartment lease — signed", 6, NOW - 26 * DAY, { fileType: "pdf" }),
     // Uploadable, but no viewer here: the reader's "no preview, download" state.
     note("143", "Sourdough — a field guide", 1, NOW - 27 * DAY, { fileType: "epub" }),
+    // Paged documents the PDF viewer opens too (`PAGED_DOCUMENT_TYPES`).
+    // Its mark's one page is on page 1, so the card's tile carries that ink.
+    note(MARKED_XPS_ID, "Quince — a pocket guide", 3, NOW - 28 * DAY, {
+      fileType: "xps",
+      annotationsId: XPS_MARK_ID,
+      coverInkHash: FAKE_MARK_PAGE_HASH,
+    }),
+    note("147", "Harbour at dusk", 2, NOW - 29 * DAY, { fileType: "cbz" }),
     note(UNSCALED_NOTE_ID, "Field notes — unknown device", 3, NOW - 4 * DAY, {
       hasRecognizedText: true,
     }),
@@ -332,13 +359,14 @@ for (const s of BIN_SEED_NOTES) {
  * The paired `.mark`, outside `CHILDREN` and `ALL_NOTES` because the server
  * folds a live mark out of every listing; registered so its history resolves.
  */
-const PDF_MARK_SUMMARY: NoteSummary = note(PDF_MARK_ID, "Appliance manual.pdf.mark", 1, NOW - 8 * DAY, {
-  fileType: "mark",
-});
+function markSummary(id: Id): NoteSummary | undefined {
+  const m = FAKE_MARKS[id];
+  return m ? note(id, m.name, 1, NOW - 8 * DAY, { fileType: "mark" }) : undefined;
+}
 
-/** Live library, then bin, then the paired mark. Library-wide walks use `ALL_NOTES` only. */
+/** Live library, then bin, then the paired marks. Library-wide walks use `ALL_NOTES` only. */
 export function noteSummary(id: Id): NoteSummary | undefined {
-  return ALL_NOTES[id] ?? BIN_NOTES[id] ?? (id === PDF_MARK_ID ? PDF_MARK_SUMMARY : undefined);
+  return ALL_NOTES[id] ?? BIN_NOTES[id] ?? markSummary(id);
 }
 
 // Parent of each folder (null = root), so listFolder can return the ancestor path.

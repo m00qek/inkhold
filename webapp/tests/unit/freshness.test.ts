@@ -33,6 +33,15 @@ describe("classify", () => {
 });
 
 describe("sameEntry", () => {
+  it("distinguishes new ink on page 1, a first mark, or a new file, though nothing else moved", () => {
+    const base = { ...note("a", 1), fileHash: "f1", annotationsId: "m1", coverInkHash: "i1" } as NoteSummary;
+    expect(sameEntry(base, { ...base })).toBe(true);
+    expect(sameEntry(base, { ...base, coverInkHash: "i2" })).toBe(false);
+    expect(sameEntry(base, { ...base, coverInkHash: null })).toBe(false);
+    expect(sameEntry({ ...base, annotationsId: null, coverInkHash: null }, base)).toBe(false);
+    expect(sameEntry(base, { ...base, fileHash: "f2" })).toBe(false);
+  });
+
   it("distinguishes a changed page hash (an edit to the first page)", () => {
     expect(sameEntry(note("a", 1, "h1"), note("a", 1, "h2"))).toBe(false);
   });
@@ -66,6 +75,17 @@ describe("reconcile", () => {
     const r = reconcile(prev, next);
     expect(r.changed).toBe(false);
     expect(r.listing).toBe(prev);
+  });
+
+  // Regression: a scribble on page 1 changes only the `.mark`; the stale row
+  // (old `coverInkHash`) was kept, so the tile never redrew until a reload.
+  it("hands over the new row when only the ink on page 1 moved", () => {
+    const row = (ink: string) => ({ ...note("a", 10), annotationsId: "m1", coverInkHash: ink }) as NoteSummary;
+    const prev = listing([row("i1")], 1);
+    const next = listing([row("i2")], 2);
+    const r = reconcile(prev, next);
+    expect(r.changed).toBe(true);
+    expect((r.listing.entries[0] as NoteSummary).coverInkHash).toBe("i2");
   });
 
   it("still returns a new listing when something did change", () => {

@@ -142,8 +142,9 @@ fn writeTxtFiles(job: Job, d: txtindex.Derived) !void {
     );
 }
 
-/// A `.pdf`'s shape, then its text. After `.txt`: least urgent, most costly.
-/// One tenant with two questions (see `pdf_index.pending_from_where`).
+/// A paged document's shape, then its text (a PDF, an XPS; a CBZ has none).
+/// After `.txt`: least urgent, most costly. One tenant with two questions (see
+/// `pdf_index.pending_from_where`).
 const pdf_tenant: Tenant = .{
     .name = "pdf",
     .priority = 2,
@@ -162,7 +163,7 @@ fn runPdfProbe(job: Job) anyerror!void {
 
     const file = job.blobs.open(job.md5) catch return; // blob gone: nothing to record
     defer file.close(job.io);
-    const shape: ?pdfprobe.Shape = pdfprobe.probeFile(file) catch |e| blk: {
+    const shape: ?pdfprobe.Shape = probe(job, file) catch |e| blk: {
         const v = pdfindex.Verdict.of(e) orelse return; // transient — try again later
         // A broken PDF is a verdict, recorded so it is never offered again.
         job.lock.lockUncancelable(job.io);
@@ -185,9 +186,18 @@ fn runPdfProbe(job: Job) anyerror!void {
     }
 }
 
+/// The probe, unless the gate says the file must not be opened (`pdf_index.gate`).
+fn probe(job: Job, file: std.Io.File) pdfprobe.Error!pdfprobe.Shape {
+    return switch (pdfindex.gate(job.io, file, job.name)) {
+        .open => pdfprobe.probeFile(file),
+        .refuse => pdfprobe.Error.Unopenable,
+    };
+}
+
 /// The text pass. Every early return leaves `pdf_text` NULL, so it is redone.
 fn runPdfText(job: Job) anyerror!void {
     if (!try job.pdfNeedsText()) return;
+    if (!pdfindex.hasText(job.name)) return runTextless(job);
 
     const file = job.blobs.open(job.md5) catch return; // blob gone: nothing to record
     defer file.close(job.io);
@@ -224,8 +234,52 @@ fn runPdfText(job: Job) anyerror!void {
     if (!try pdftext.needsText(job.db, job.md5)) return;
     try job.db.exec("BEGIN IMMEDIATE;");
     errdefer job.db.exec("ROLLBACK;") catch {};
-    try pdftext.finish(job.db, job.md5, to_index, pdftext.verdictFor(doc_pages, to_index, src.any_text));
+    try pdftext.finish(job.db, job.md5, to_index, pdftext.verdictFor(doc_pages, to_index, src.any_text, ex.too_large_pages));
     try job.db.exec("COMMIT;");
+}
+
+/// A CBZ's text pass without reading it: its pages are images, so its search
+/// files are the header alone and its verdict is "no text", as a scan's.
+fn runTextless(job: Job) anyerror!void {
+    const pages = try lockedPageCount(job);
+    writeTextlessFiles(job, pages) catch |e| {
+        log.warn("derived files failed for {s}: {t}", .{ job.md5, e });
+    };
+    job.lock.lockUncancelable(job.io);
+    defer job.lock.unlock(job.io);
+    if (!try pdftext.needsText(job.db, job.md5)) return;
+    try job.db.exec("BEGIN IMMEDIATE;");
+    errdefer job.db.exec("ROLLBACK;") catch {};
+    try pdftext.finish(job.db, job.md5, pages, .no_text);
+    try job.db.exec("COMMIT;");
+}
+
+/// `pdf_index.probedOk`, read under the lock.
+fn lockedProbedOk(job: Job) !bool {
+    job.lock.lockUncancelable(job.io);
+    defer job.lock.unlock(job.io);
+    return pdfindex.probedOk(job.db, job.md5);
+}
+
+/// The probe's page count, read under the lock as every tenant reads.
+fn lockedPageCount(job: Job) !u32 {
+    job.lock.lockUncancelable(job.io);
+    defer job.lock.unlock(job.io);
+    return pdftext.pageCount(job.db, job.md5);
+}
+
+/// A page source with no pages: the derived pair is its header alone.
+const NoPages = struct {
+    pub fn next(_: *NoPages) !?derivesearch.Page {
+        return null;
+    }
+};
+
+fn writeTextlessFiles(job: Job, pages: u32) !void {
+    const terms_store = job.terms orelse return;
+    const text_store = job.text orelse return;
+    var none: NoPages = .{};
+    try derivesearch.writeDerived(job.gpa, terms_store, text_store, job.md5, pages, &none);
 }
 
 /// Walks the caller's page source once (a second walk is ~0.1 s/page on the
@@ -308,7 +362,8 @@ pub const reconcile_sql =
     \\   AND ni.index_version = ?1
     \\   AND (ni.indexable = 1
     \\        OR LOWER(f.name) LIKE '%_.txt'
-    \\        OR LOWER(f.name) LIKE '%_.pdf')
+    \\        OR
+++ " " ++ pdfindex.nameLike("f.name") ++ ")\n" ++
     \\   AND f.md5 > ?2
     \\ ORDER BY f.md5 ASC
     \\ LIMIT 1;
@@ -342,8 +397,13 @@ fn deriveTxt(job: Job) !void {
 }
 
 fn derivePdf(job: Job) !void {
+    // Only what the probe opened and passed: a file it refused (`too_large`)
+    // has no derived files, and must not be opened here to make them.
+    if (!try lockedProbedOk(job)) return;
+    if (!pdfindex.hasText(job.name)) return writeTextlessFiles(job, try lockedPageCount(job));
     const file = job.blobs.open(job.md5) catch return; // blob gone: nothing to derive
     defer file.close(job.io);
+    if (pdfindex.gate(job.io, file, job.name) != .open) return; // as the probe
     var ex = pdftextpass.Extractor.open(file) catch return;
     defer ex.close();
     var src = pdftext.Pages.init(job.gpa, &ex);
@@ -448,9 +508,16 @@ test "RECONCILE: the SQL compiles, and carries NO index state" {
     s.finalize();
 
     try testing.expect(std.mem.indexOf(u8, reconcile_sql, "LIKE '%_.txt'") != null);
-    try testing.expect(std.mem.indexOf(u8, reconcile_sql, "LIKE '%_.pdf'") != null);
-    try testing.expect(txtindex.wants("a.txt") and pdfindex.wants("a.pdf"));
-    try testing.expect(!txtindex.wants(".txt") and !pdfindex.wants(".pdf"));
+    try testing.expect(txtindex.wants("a.txt"));
+    try testing.expect(!txtindex.wants(".txt"));
+    // Every paged format, in both the tenant's query and reconcile's.
+    inline for (pdfindex.extensions) |ext| {
+        const like = "LIKE '%_." ++ ext ++ "'";
+        try testing.expect(std.mem.indexOf(u8, reconcile_sql, like) != null);
+        try testing.expect(std.mem.indexOf(u8, pdfindex.pending_from_where, like) != null);
+        try testing.expect(pdfindex.wants("a." ++ ext));
+        try testing.expect(!pdfindex.wants("." ++ ext));
+    }
     for ([_][]const u8{ "txt_index", "pdf_probe", "pdf_text" }) |column| {
         try testing.expect(std.mem.indexOf(u8, reconcile_sql, column) == null);
     }

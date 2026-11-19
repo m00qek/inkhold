@@ -85,6 +85,7 @@ export function createPdfViewerExports(opts: PdfViewerExportsOptions): PdfViewer
       tuned:
         canvas.style.visibility === "hidden" ||
         (ink?.views.some((v) => v.visible !== v.authoredVisible) ?? false),
+      fileType: (state.meta()?.fileType ?? "pdf").toLowerCase(),
     };
   }
 
@@ -196,11 +197,16 @@ export function createPdfViewerExports(opts: PdfViewerExportsOptions): PdfViewer
     // Same space as the per-page rows, so both exports place ink identically.
     const space = markExportSpace({ width: ref.width, height: ref.height }, pagePt);
     if (space.width <= 0 || space.height <= 0) return null;
-    const panel = await markCtl.inkRaster(await deps.api.getPageBytes(id, ref), {
+    const bytes = await deps.api.getPageBytes(id, ref);
+    let panel: HTMLCanvasElement | null;
+    try {
       // 1:1 with the device panel, so strokes are never resampled.
-      width: ref.width,
-      height: ref.height,
-    });
+      panel = await markCtl.inkRaster(bytes, { width: ref.width, height: ref.height });
+    } catch (err) {
+      // A page that will not decode is skipped, not the export (see the loop).
+      console.warn("[pdf] skipped an annotated page that would not decode:", (err as Error).message ?? err);
+      return null;
+    }
     if (!panel) return null;
     let model: LayeredExportModel | null = null;
     try {

@@ -4,6 +4,7 @@
 // the file's md5 and the page. Only the open digest's is drawn, and one per
 // source on the sources' page, never a list's worth: a PDF page costs a MuPDF render.
 
+import { isPagedDocument } from "../../core/fileKind";
 import { el } from "../../ui/dom";
 import { currentTheme } from "../../ui/theme";
 import type { Api } from "../../api/types";
@@ -77,7 +78,7 @@ export function createDigestThumbs(deps: DigestThumbsDeps): DigestThumbs {
       m.fileType === "note" && notePage
         ? // Not the cover: the page the digest is on.
           await deps.thumbnails.getThumbnail({ fileHash: null, noteId: fileId, page: notePage }, "note")
-        : m.fileType === "pdf"
+        : isPagedDocument(m.fileType)
           ? await deps.thumbnails.getThumbnail({ fileHash: m.fileHash, fileId, pdfPage: page }, "pdf")
           : null;
     return blob ? URL.createObjectURL(blob) : null;

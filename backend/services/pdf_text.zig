@@ -1,4 +1,4 @@
-//! The `.pdf` text pass: extracts pages in bounded chunks and hands them to
+//! The paged text pass (a PDF's, an XPS's): extracts pages in bounded chunks and hands them to
 //! `derive_search.writeDerived`. A document past `max_pages` is indexed to the
 //! cap and recorded as truncated; one with no text anywhere is a scan verdict.
 
@@ -34,6 +34,9 @@ pub const Verdict = enum(i64) {
     truncated = 2,
     /// The text pass could not open a file the probe could.
     unopenable = 3,
+    /// Opening it for its text, or a page's text, needed more than MuPDF's
+    /// memory ceiling. The pages that fitted are searchable; the rest are not.
+    too_large = 4,
 
     /// Null when the failure is ours (`NoContext`), not the file's.
     pub fn of(e: pdftext.Error) ?Verdict {
@@ -41,12 +44,24 @@ pub const Verdict = enum(i64) {
             pdftext.Error.NoContext => null,
             // The probe already said this file is readable; retrying won't help.
             pdftext.Error.Unopenable, pdftext.Error.Encrypted, pdftext.Error.NoPages => .unopenable,
+            pdftext.Error.TooLarge => .too_large,
         };
     }
 };
 
 /// Shared with the probe so the two halves of the tenant agree.
 pub const wants = pdfindex.wants;
+
+/// The page count the probe recorded for the current index; 0 when there is
+/// no such row. Read under the DB lock.
+pub fn pageCount(db: sqlite.Db, blob_md5: []const u8) !u32 {
+    var r = (try db.row(
+        "SELECT page_count FROM note_index WHERE blob_md5 = ?1 AND index_version = ?2;",
+        &.{ .{ .text = blob_md5 }, .{ .int = noteindex.index_version } },
+    )) orelse return 0;
+    defer r.finalize();
+    return @intCast(@max(r.int(0), 0));
+}
 
 /// Whether this blob still needs its text extracted. False once any verdict is
 /// recorded, and false until the probe has said `ok`.
@@ -240,10 +255,16 @@ pub fn finish(
     if (v == .truncated) {
         log.warn("derived the first {d} pages of {s}; the rest of the document is not searchable", .{ page_count, blob_md5 });
     }
+    if (v == .too_large) {
+        log.warn("some pages of {s} needed more memory than the server gives a document; they are not searchable", .{blob_md5});
+    }
     try storeVerdict(db, blob_md5, v);
 }
 
-pub fn verdictFor(doc_pages: u32, indexed_pages: u32, any_text: bool) Verdict {
+/// `too_large_pages`: pages whose text needed more than the memory ceiling. Any
+/// makes the record incomplete for a reason worth saying, ahead of "a scan".
+pub fn verdictFor(doc_pages: u32, indexed_pages: u32, any_text: bool, too_large_pages: u32) Verdict {
+    if (too_large_pages > 0) return .too_large;
     if (!any_text) return .no_text;
     return if (indexed_pages < doc_pages) .truncated else .ok;
 }

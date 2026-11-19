@@ -39,6 +39,10 @@ export interface BinEntry {
   firstPage: PageRef | null;
   /** As `NoteSummary.thumbAspect`; trashing doesn't change a blob's shape. */
   thumbAspect?: { w: number; h: number };
+  /** The trashed `.mark` that went with it, as `NoteSummary.annotationsId`. */
+  annotationsId?: Id | null;
+  /** As `NoteSummary.coverInkHash`: a bin tile is page 1 with its ink too. */
+  coverInkHash?: Hash | null;
 }
 
 /** `GET /api/controlplane/bin`. */

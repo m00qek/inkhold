@@ -1,6 +1,6 @@
 // Reflow-free tile shaping shared by the library gallery and the recycle bin.
 
-import { fileKind } from "../core/fileKind";
+import { fileKind, isPagedDocument } from "../core/fileKind";
 
 /**
  * The row tile's width cap (× its fixed height). Row aspects are pre-clamped so
@@ -23,14 +23,14 @@ const A4_ASPECT = 210 / 297;
  */
 export function learnsAspect(fileType: string): boolean {
   const t = (fileType || "").trim().toLowerCase();
-  return fileKind(t) === "image" || t === "pdf";
+  return fileKind(t) === "image" || isPagedDocument(t);
 }
 
 /**
  * The shape a learning tile reserves before it knows, or null for the CSS floor.
- * Only `.pdf`: a src-less `<img>` would otherwise lay out square.
+ * Only paged documents: a src-less `<img>` would otherwise lay out square.
  */
 
 export function provisionalAspect(fileType: string): number | null {
-  return (fileType || "").trim().toLowerCase() === "pdf" ? A4_ASPECT : null;
+  return isPagedDocument(fileType) ? A4_ASPECT : null;
 }

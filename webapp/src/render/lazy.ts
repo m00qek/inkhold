@@ -32,7 +32,14 @@ export interface LazySlotInput {
    * What this tile is, for the facade. Absent: a note page with no hash (no
    * cover probe). `bin` selects the bin-scoped raw-file routes.
    */
-  thumb?: { fileType: string; fileHash: Hash | null; bin?: boolean; aspect?: { w: number; h: number } };
+  thumb?: {
+    fileType: string;
+    fileHash: Hash | null;
+    bin?: boolean;
+    aspect?: { w: number; h: number };
+    /** A paged document's ink on page 1, drawn on its tile (`ThumbSource.coverInk`). */
+    coverInk?: { markId: Id; hash: Hash };
+  };
 }
 
 export interface ObserverLike {
@@ -297,6 +304,7 @@ export function createLazyEngine(deps: LazyEngineDeps): LazyEngine {
       page: slot.page,
       bin: slot.thumb?.bin,
       aspect: slot.thumb?.aspect,
+      coverInk: slot.thumb?.coverInk,
     };
   }
 

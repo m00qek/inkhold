@@ -69,7 +69,9 @@ function outputWidth(size: RenderSize): number {
   if (size === "thumb") return thumbTargetWidth();
   return size === "full" ? 1080 : 4096;
 }
-const DEFAULT_WASM_URL = "/note-decode.wasm";
+/** Where the note decoder is served (`public/note-decode.wasm`). */
+export const NOTE_DECODE_WASM_URL = "/note-decode.wasm";
+const DEFAULT_WASM_URL = NOTE_DECODE_WASM_URL;
 
 const DECODE_ERRORS: Record<number, string> = {
   [-1]: "bad or unsupported page payload",

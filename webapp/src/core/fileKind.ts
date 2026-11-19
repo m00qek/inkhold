@@ -20,6 +20,42 @@ export const PREVIEWABLE_IMAGE_TYPES: readonly string[] = ["png", "jpg", "jpeg",
  */
 const NOTE_STAGE_TYPES: readonly string[] = ["note", "mark"];
 
+/** How the document viewer speaks of one paged type. */
+export interface PagedDocument {
+  /** Its own name, for labels: "PDF viewer", "Comic book controls". */
+  title: string;
+  /** In a sentence: "Couldn't load this comic book." */
+  noun: string;
+  /** The download row for the file itself. */
+  download: string;
+  /** The placeholder's badge. */
+  badge: string;
+  /** A CBZ's pages are images: nothing to find, and the server reads none. */
+  hasText: boolean;
+}
+
+/**
+ * Paged documents: fixed pages that MuPDF opens alike, so the one document
+ * viewer shows them all. Only a PDF can be grafted into a new PDF. Never EPUB
+ * or FB2: they reflow. The server's `pdf_index.extensions` matches.
+ */
+const PAGED_DOCUMENTS: Readonly<Record<string, PagedDocument>> = {
+  pdf: { title: "PDF", noun: "PDF", download: "PDF document", badge: "PDF", hasText: true },
+  xps: { title: "XPS document", noun: "XPS document", download: "XPS document", badge: "XPS", hasText: true },
+  cbz: { title: "Comic book", noun: "comic book", download: "Comic book", badge: "CBZ", hasText: false },
+};
+
+export const PAGED_DOCUMENT_TYPES: readonly string[] = Object.keys(PAGED_DOCUMENTS);
+
+export function isPagedDocument(fileType: string | null | undefined): boolean {
+  return PAGED_DOCUMENT_TYPES.includes((fileType || "").trim().toLowerCase());
+}
+
+/** The paged type's words; a PDF's for anything else (the viewer opens as one). */
+export function pagedDocument(fileType: string | null | undefined): PagedDocument {
+  return PAGED_DOCUMENTS[(fileType || "").trim().toLowerCase()] ?? PAGED_DOCUMENTS["pdf"]!;
+}
+
 /** Classify a server-verified `fileType` (lowercase, no dot). */
 /** What the server calls a file with no extension (`controlplane.zig` `no_extension`). */
 const NO_EXTENSION = "file";
@@ -50,13 +86,13 @@ export function canPreviewHistory(fileType: string): boolean {
 }
 
 /**
- * Whether this type has a viewer of its own: the set `library.viewerFor`
+ * Whether this type has a viewer of its own: the set `viewerSet.viewerFor`
  * dispatches on and the bin's gate between opening a viewer and its in-bin
  * preview. Images are left to the bin's preview.
  */
 export function hasDedicatedViewer(fileType: string): boolean {
   const t = (fileType || "").trim().toLowerCase();
-  return fileKind(t) === "note" || t === "spd" || t === "txt" || t === "pdf";
+  return fileKind(t) === "note" || t === "spd" || t === "txt" || isPagedDocument(t);
 }
 
 // --- upload (web → cloud → device) ---

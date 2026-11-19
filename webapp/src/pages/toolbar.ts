@@ -61,6 +61,8 @@ export interface ToolbarSpec {
 export interface Toolbar {
   el: HTMLElement;
   control(key: string): HTMLElement | undefined;
+  /** New names for the bar and its view zone, for a viewer that shows several kinds of file. */
+  relabel(label: string, viewLabel: string): void;
 }
 
 const ROVING_KEYS = new Set(["ArrowRight", "ArrowLeft", "Home", "End"]);
@@ -239,5 +241,9 @@ export function createToolbar(spec: ToolbarSpec): Toolbar {
   return {
     el: root,
     control: (key) => controls.get(key),
+    relabel(label, viewLabel) {
+      root.setAttribute("aria-label", label);
+      viewZone.setAttribute("aria-label", viewLabel);
+    },
   };
 }

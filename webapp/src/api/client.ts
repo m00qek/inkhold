@@ -229,6 +229,8 @@ export function createHttpApi(): Api {
           fileHash?: string;
           firstPage?: PageRef;
           thumbAspect?: { w?: number; h?: number };
+          annotationsId?: string;
+          coverInkHash?: string;
         }[];
         totalBytes?: number;
         retentionDays?: number;
@@ -250,6 +252,8 @@ export function createHttpApi(): Api {
           // Omitted means nothing renderable; the row draws its doc glyph.
           firstPage: e.firstPage ? normalizePage(e.firstPage) : null,
           thumbAspect: normalizeAspect(e.thumbAspect),
+          annotationsId: typeof e.annotationsId === "string" && e.annotationsId !== "" ? e.annotationsId : null,
+          coverInkHash: typeof e.coverInkHash === "string" && e.coverInkHash !== "" ? e.coverInkHash : null,
         })),
         totalBytes: typeof r.totalBytes === "number" ? r.totalBytes : 0,
           // A floor only; the number is the server's and quoted verbatim.
@@ -262,7 +266,8 @@ export function createHttpApi(): Api {
       // Same `NoteMetaVO` as `getNoteMeta`, so the same normalization (null `pxPerMm` = no text layer).
       const r = await request<NoteMeta>("GET", `/api/controlplane/bin/file/metadata/${encodeURIComponent(id)}`);
       return {
-        // Trashing a PDF does not trash its mark, so the bin never pairs.
+        // A trashed document's own metadata shows it alone; its bin row
+        // carries the mark that went to the bin with it, for the tile.
         annotationsId: null,
         id: r.id,
         name: r.name,

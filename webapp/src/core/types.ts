@@ -169,6 +169,11 @@ export interface NoteSummary {
    * marks out of listings, so this is the only way to reach them from a card.
    */
   annotationsId: Id | null;
+  /**
+   * The ink on page 1 (its mark page's content hash), or `null` when page 1 has
+   * none. The tile is page 1 as the person sees it, so it redraws when this moves.
+   */
+  coverInkHash?: Hash | null;
 }
 
 /** A single row in a folder listing: either a subfolder or a note. */
@@ -203,9 +208,10 @@ export interface NoteMeta {
   size: number;
   /**
   /**
-   * The `.mark` annotating this `.pdf` (`foo.pdf.mark`, same folder), or
-   * `null`. Resolved by the server since deep links have no listing. Always
-   * `null` in the bin: trashing a PDF does not trash its mark.
+   * The `.mark` annotating this paged document (`foo.pdf.mark`, same folder),
+   * or `null`. Resolved by the server since deep links have no listing. Always
+   * `null` for a trashed document's own metadata: the bin's viewer shows the
+   * document alone (its bin row carries the mark, for the tile).
    */
   annotationsId: Id | null;
   /**

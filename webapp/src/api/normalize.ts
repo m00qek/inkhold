@@ -93,6 +93,7 @@ export function normalizeEntry(e: Entry): Entry {
         // Absent or unusable reads as `null`.
         annotationsId:
           typeof e.annotationsId === "string" && e.annotationsId !== "" ? e.annotationsId : null,
+        coverInkHash: typeof e.coverInkHash === "string" && e.coverInkHash !== "" ? e.coverInkHash : null,
       }
     : {
         ...e,

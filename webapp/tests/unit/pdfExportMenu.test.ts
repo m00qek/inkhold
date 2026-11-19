@@ -84,6 +84,7 @@ const PAGE: PdfExportState = {
   tuned: false,
   pageVisible: true,
   markedPages: 0,
+  fileType: "pdf",
 };
 
 describe("the PDF export menu", () => {
@@ -147,7 +148,7 @@ describe("the PDF export menu", () => {
 
   it("drops the CURRENT-view PDF row when the document itself is turned off", () => {
     // A row that cannot mean anything for the current page is hidden, not disabled.
-    const m = mount({ hasInk: true, tuned: true, pageVisible: false, markedPages: 0 });
+    const m = mount({ ...PAGE, hasInk: true, tuned: true, pageVisible: false });
     expect(m.visibleRows()).toEqual([
       "Flattened image",
       "Layered image",
@@ -352,6 +353,22 @@ describe("the whole-document PDF export", () => {
       "PDF with annotations",
       "PDF document",
     ]);
+  });
+
+  it("offers an XPS or a comic book as itself, and no row that grafts a PDF page", () => {
+    for (const [fileType, raw] of [
+      ["xps", "XPS document"],
+      ["cbz", "Comic book"],
+    ] as const) {
+      const m = mount({ ...PAGE, hasInk: true, tuned: true, markedPages: 2, fileType });
+      expect(m.row("Whole document", raw).hidden).toBe(false);
+      expect(m.row("Whole document", "PDF document").hidden).toBe(true);
+      expect(m.row("Whole document", "PDF with annotations").hidden).toBe(true);
+      expect(m.row("This page — Current view", "PDF document").hidden).toBe(true);
+      expect(m.row("This page — Original view", "PDF document").hidden).toBe(true);
+      // Pictures of the page are any paged document's.
+      expect(m.row("This page — Current view", "Flattened image").hidden).toBe(false);
+    }
   });
 
   it("re-reads `markedPages` on refresh, so a late `.mark` reveals the row", () => {

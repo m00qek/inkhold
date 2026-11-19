@@ -9,6 +9,9 @@ import type { LibraryCtx } from "./libraryContext";
 import { createSearchItems } from "./searchItems";
 import { nameRows } from "../nameRows";
 import { openItemStore } from "../../cache/itemStore";
+import { createInkRasterizer } from "../noteLayers";
+import { createInkCover } from "../../render/inkCover";
+import { NOTE_DECODE_WASM_URL, browserLoader } from "../../render/wasm";
 
 /** Builds the thumbnail facade, the lazy engine, native image lazy-loading and library search onto `ctx`. */
 export function installLibraryEngines(ctx: LibraryCtx): void {
@@ -19,6 +22,7 @@ export function installLibraryEngines(ctx: LibraryCtx): void {
     painter: createCanvasThumbPainter(),
     renderNote: (noteId, page, theme) => renderPage({ api: ctx.api, renderer: ctx.renderer, cache: ctx.cache, theme }, noteId, page, "thumb"),
     renderPdfPage: ctx.pdfThumbs.renderPdfPage,
+    inkCover: createInkCover(ctx.api, createInkRasterizer(browserLoader(NOTE_DECODE_WASM_URL))),
     persistent: ctx.deps.persistentThumbs,
   });
 

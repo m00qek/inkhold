@@ -3,11 +3,10 @@
 // painting is gated on the row being in the strip's window and on screen.
 // Viewer state arrives as getters because it moves under in-flight paints.
 
-import { el } from "../../ui/dom";
 import type { Hash, Id, PageRef, Theme } from "../../core/types";
 import type { RenderCache, RenderKey } from "../../cache/types";
 import { createPageIndex, type PageIndex, type PageIndexRow } from "../pageIndex";
-import { placePanelOverPage } from "../../render/markGeometry";
+import { compositeInk as compositeInkOver, type InkRaster } from "../../render/inkComposite";
 import type { PdfSession } from "../../render/pdfClient";
 import { exposeForTests } from "../../ui/testSeams";
 
@@ -64,10 +63,7 @@ export interface PdfThumbStripOptions {
   };
   state: PdfThumbStripState;
   /** A `.mark` page's ink reduced into a canvas of this size; touches no viewer overlay state. */
-  inkRaster(
-    bytes: ArrayBuffer,
-    dst: { width: number; height: number },
-  ): Promise<HTMLCanvasElement | null>;
+  inkRaster: InkRaster;
   onPick(index: number): void;
   onClose?: () => void;
 }
@@ -181,42 +177,17 @@ export function createPdfThumbStrip(opts: PdfThumbStripOptions): PdfThumbStrip {
    */
   async function compositeInk(page: ImageBitmap, ref: PageRef): Promise<ImageBitmap | null> {
     const id = state.markId();
-    if (!id || page.width <= 0 || page.height <= 0) return null;
-    // Same placement as on screen (`render/markGeometry.ts`): ink is in panel
-    // pixels and the page is a letterboxed sub-rect. Raster pixels can stand in
-    // for page points because the fit is scale-invariant, saving a `pageSize` call.
-    const place = placePanelOverPage(
-      { width: ref.width, height: ref.height },
-      { width: page.width, height: page.height },
-      { width: page.width, height: page.height },
-    );
-    if (place.width < 1 || place.height < 1) return null;
+    if (!id) return null;
     let bytes: ArrayBuffer;
     try {
       bytes = await deps.api.getPageBytes(id, ref);
     } catch {
       return null;
     }
-    const ink = await inkRaster(bytes, place);
-    if (!ink) return null;
     try {
-      const sheet = el("canvas") as HTMLCanvasElement;
-      sheet.width = page.width;
-      sheet.height = page.height;
-      const ctx = sheet.getContext("2d");
-      if (!ctx) return null;
-      ctx.drawImage(page, 0, 0);
-      // Whole pixels: a fractional offset smears a one-pixel stroke.
-      ctx.drawImage(ink, Math.round(place.left), Math.round(place.top));
-      const out = await createImageBitmap(sheet);
-      sheet.width = 0;
-      sheet.height = 0;
-      return out;
+      return await compositeInkOver(page, { width: ref.width, height: ref.height }, bytes, inkRaster);
     } catch {
-      return null;
-    } finally {
-      ink.width = 0;
-      ink.height = 0;
+      return null; // the row keeps the bare page under the bare key, as before
     }
   }
 

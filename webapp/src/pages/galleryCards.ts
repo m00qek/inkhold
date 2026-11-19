@@ -8,7 +8,7 @@ import { insideMarks, insideOf, typedMarks } from "../search/match";
 import { el } from "../ui/dom";
 import { learnsAspect, pinAspect, provisionalAspect } from "../ui/tileAspect";
 import { ICONS, svg, type IconName } from "../ui/icons";
-import { fileKind, rawFileUrl } from "../core/fileKind";
+import { fileKind, PAGED_DOCUMENT_TYPES, rawFileUrl } from "../core/fileKind";
 import { getDims } from "../cache/dimsMemo";
 import { go, folderHref, noteHref, notePageHref } from "../router";
 import { pageSummary, deepLinkQuery } from "./noteSearch";
@@ -17,12 +17,17 @@ import type { Entry, Folder, Hash, Id, NoteSummary } from "../core/types";
 import type { Category } from "./rail/railPlaces";
 import type { LazyEngine } from "../render/lazy";
 
+/** A paged document's page-1 ink, when it has any: its tile is drawn with it. */
+function coverInkOf(note: NoteSummary): { markId: Id; hash: Hash } | undefined {
+  return note.annotationsId && note.coverInkHash ? { markId: note.annotationsId, hash: note.coverInkHash } : undefined;
+}
+
 /**
 * Types previewed through the thumbnail facade (`.spd` embedded thumb, `.txt`
-* snippet, `.pdf` page 0 via MuPDF) instead of a glyph tile. Must agree with
+* snippet, a paged document's page 0 via MuPDF) instead of a glyph tile. Must agree with
 * `strategyFor`; `thumbnails.test.ts` checks the pair. Also read by `bin.ts`.
 */
-export const FACADE_THUMB_TYPES: ReadonlySet<string> = new Set(["spd", "txt", "pdf"]);
+export const FACADE_THUMB_TYPES: ReadonlySet<string> = new Set(["spd", "txt", ...PAGED_DOCUMENT_TYPES]);
 
 /** Client-side: the facade rasterises `.txt` snippets at 3:4 itself. */
 const TXT_ASPECT = 3 / 4;
@@ -174,7 +179,12 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
     target: HTMLImageElement | null;
     thumbClass: string;
     /** `aspect` lets the facade crop a `.spd`'s letterboxed preview at transcode. */
-    thumb?: { fileType: string; fileHash: Hash | null; aspect?: { w: number; h: number } };
+    thumb?: {
+      fileType: string;
+      fileHash: Hash | null;
+      aspect?: { w: number; h: number };
+      coverInk?: { markId: Id; hash: Hash };
+    };
     alt?: string;
   } {
     const kind = fileKind(note.fileType);
@@ -205,7 +215,7 @@ export function createGalleryCards(ctx: GalleryCardsCtx): GalleryCards {
           node: img,
           target: img,
           thumbClass: "thumb",
-          thumb: { fileType: t, fileHash: note.fileHash, aspect: note.thumbAspect },
+          thumb: { fileType: t, fileHash: note.fileHash, aspect: note.thumbAspect, coverInk: coverInkOf(note) },
           alt: note.name,
         };
       }

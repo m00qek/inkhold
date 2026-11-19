@@ -8,6 +8,7 @@
 
 import { el } from "../../ui/dom";
 import type { PageRef } from "../../core/types";
+import { pagedDocument } from "../../core/fileKind";
 import { createToolbar } from "../toolbar";
 import { svg, VIEWER_IC } from "../viewer/viewerIcons";
 import { applyPinch, contextualOpener, createPager, createZoomStepper, FIT_PAGE } from "../viewer/viewerControls";
@@ -54,6 +55,9 @@ export interface PdfSeam {
 function defaultPdfSeam(): PdfSeam {
   return { createSession: createPdfSession, supported: supportsWasmExceptions };
 }
+
+/** Find's name; a document with no text keeps it, dimmed with the reason. */
+const FIND_LABEL = "Find in this file";
 
 export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam()): Viewer {
   // ---- state ----
@@ -111,7 +115,9 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     markCtl.el,
     linkLayer.el,
   );
-  const body = createViewerBody({ mark: "PDF" });
+  // Every paged document opens here; `nameFor` says which kind is open.
+  let kind = pagedDocument("pdf");
+  const body = createViewerBody({ mark: () => kind.badge });
 
   const zoomStepper = createZoomStepper<Zoom>({
     readoutClass: "pdf-zoom",
@@ -298,16 +304,16 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
   const copy = createCopyControl(() => selectLayer.text());
 
   // ---- find ----
-  // Enabled for every PDF: there is no "unrecognised" state as for notes.
+  // Every PDF and XPS has it (no "unrecognised" state as for notes); a comic book's pages are images.
   const findToggle = el("button", {
     class: "btn",
     type: "button",
     "aria-pressed": "false",
-    "aria-label": "Find in this file",
-    title: "Find in this file (Ctrl+F)",
+    "aria-label": FIND_LABEL,
+    title: `${FIND_LABEL} (Ctrl+F)`,
     html: svg(VIEWER_IC.find, 1.8),
   }) as HTMLButtonElement;
-  const findBar = createFindBar({ block: "pdfbar", label: "Find in this file" });
+  const findBar = createFindBar({ block: "pdfbar", label: FIND_LABEL });
 
   const toolbar = createToolbar({
     label: "PDF viewer",
@@ -448,6 +454,17 @@ export function createPdfViewer(deps: ViewerDeps, seam: PdfSeam = defaultPdfSeam
     root,
     renderer,
     exportDriver,
+    nameFor(fileType) {
+      kind = pagedDocument(fileType);
+      root.setAttribute("aria-label", `${kind.title} viewer`);
+      toolbar.relabel(`${kind.title} viewer`, `${kind.title} controls`);
+      // As Outline and Digests: in its place, dimmed with the reason, so the bar keeps its shape.
+      const findName = kind.hasText ? FIND_LABEL : `${FIND_LABEL} — this ${kind.noun}'s pages are pictures`;
+      findToggle.disabled = !kind.hasText;
+      findToggle.setAttribute("aria-label", findName);
+      findToggle.title = kind.hasText ? `${FIND_LABEL} (Ctrl+F)` : findName;
+      if (!kind.hasText) ctx.find.close();
+    },
     setVersionsAvailable: versionsOpener.setAvailable,
     setOutlineAvailable(has) {
       outlineOpener.setAvailable(has);

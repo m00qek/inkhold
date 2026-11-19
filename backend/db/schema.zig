@@ -172,7 +172,7 @@ test "v15: only the DERIVED PDFs are re-asked, and a failure verdict is left alo
         \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('trunc', 10, 1, 0);
         \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('shut', 10, 1, 0);
         \\INSERT INTO blobs(md5, size, refcount, created_at) VALUES('txt', 10, 1, 0);
-        \\-- pdf_text: 0 ok, 1 no_text, 2 truncated, 3 unopenable (pdf_text.Verdict).
+        \\-- pdf_text: 0 ok, 1 no_text, 2 truncated, 3 unopenable, 4 too_large (pdf_text.Verdict).
         \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at, pdf_probe, pdf_text)
         \\  VALUES('ok', 15, 0, 0, 0, 0, 0);
         \\INSERT INTO note_index(blob_md5, index_version, indexable, page_count, indexed_at, pdf_probe, pdf_text)

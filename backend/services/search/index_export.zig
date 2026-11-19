@@ -97,7 +97,7 @@ fn hasRecognisedText(comptime a: []const u8) []const u8 {
 /// relational `.mark` pairing rule, so an annotated format of any kind counts.
 pub fn tierExpr(comptime a: []const u8) []const u8 {
     return "CASE WHEN " ++ isNote(a) ++ " THEN 1" ++
-        " WHEN " ++ markpair.pairedMarkId(a) ++ " IS NOT NULL THEN 2" ++
+        " WHEN " ++ markpair.pairedMarkId(a, "0") ++ " IS NOT NULL THEN 2" ++
         " ELSE 3 END";
 }
 

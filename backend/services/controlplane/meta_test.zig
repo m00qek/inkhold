@@ -267,6 +267,17 @@ test "noteMeta: a PDF finds the .mark beside it, by full name and same folder" {
 
     try testing.expect((try svc.noteMeta(a, 1, mark_id)).?.annotationsId == null);
 
+    // An XPS and a CBZ take ink too: the tablet writes `.xps.mark` and `.cbz.mark`.
+    inline for (.{ "guide.xps", "comic.cbz" }) |name| {
+        const doc = try seedBytes(&f, folder.id, name, "PK\x03\x04 a paged document");
+        const ink = try seedBytes(&f, folder.id, name ++ ".mark", mark_bytes);
+        try testing.expectEqualStrings(try idStr(a, ink), (try svc.noteMeta(a, 1, doc)).?.annotationsId.?);
+    }
+    // An EPUB's ink is paired (hidden in listings) but not offered: no viewer draws it yet.
+    const epub = try seedBytes(&f, folder.id, "book.epub", "PK\x03\x04 a book");
+    _ = try seedBytes(&f, folder.id, "book.epub.mark", mark_bytes);
+    try testing.expect((try svc.noteMeta(a, 1, epub)).?.annotationsId == null);
+
     // A `.note` named `sneaky.pdf` is a note and gets no annotations.
     const book = try nb.serialize(gpa, .{ .pages = &.{.{ .layers = &.{.{ .slot = .main, .bitmap = &bmp }} }} });
     defer gpa.free(book);

@@ -91,6 +91,8 @@ export interface PdfViewerCtx {
   lifecycle: PdfLifecycle;
 
   // ---- small helpers ----
+  /** Names the viewer for the open file's type (`pagedDocument`) and offers Find only where there is text. */
+  nameFor(fileType: string | null | undefined): void;
   setVersionsAvailable(has: boolean): void;
   /** Also closes the outline dock when a document has none. */
   setOutlineAvailable(has: boolean): void;

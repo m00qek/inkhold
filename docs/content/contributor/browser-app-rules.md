@@ -46,10 +46,12 @@ Four viewers share one `Viewer` interface of four methods (`el`, `open`,
 the side panel, the page index, the layers panel, thumbnails, the virtual list)
 rather than inheriting. Reach for those before writing a private copy.
 
-A PDF is its own viewer. Its pages share resources through the file's xref, so
-the document is opened once in a worker (MuPDF, about 5 MB of wasm, one session
-for the viewer's life) and read by Range requests through a 32 KB block cache.
-A PDF has no version history of its own; its `.mark` does.
+A PDF is its own viewer, and an XPS's or a comic book's too
+(`PAGED_DOCUMENT_TYPES`): MuPDF opens all three alike. A PDF's pages share
+resources through its xref, so the document is opened once in a worker (MuPDF,
+about 5 MB of wasm, one session for the viewer's life) and read by Range
+requests through a 32 KB block cache. A PDF has no version history of its own;
+its `.mark` does.
 
 ## Caches
 
@@ -101,4 +103,4 @@ A PDF has no version history of its own; its `.mark` does.
   browser floor at about Chrome 95, Firefox 131 and Safari 18.4. Every export
   that can suspend on `ink.host_read` must be wrapped for JSPI.
 - MuPDF is a pinned, unpatched dependency. An upstream bug is worked around by
-  excluding sources and supplying stubs (`load-jpx.c`), never by patching.
+  excluding sources and supplying stubs, never by patching.

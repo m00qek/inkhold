@@ -1,5 +1,6 @@
 // The shell's viewers, mounted once beside each other; exactly one paints at a time.
 
+import { isPagedDocument } from "../../core/fileKind";
 import { createReader, type Reader } from "../reader/reader";
 import { createSpdViewer } from "../spd/spdViewer";
 import { createTxtViewer } from "../txt/txtViewer";
@@ -38,9 +39,9 @@ export function createViewerSet(deps: ViewerDeps, content: HTMLElement, gallery:
         case "txt":
           return txt;
         // A `.mark` doesn't come here: it parses as a note and the reader paints it.
-        case "pdf":
-          return pdf;
         default:
+          // Every paged document (PDF, XPS, CBZ) has the one document viewer.
+          if (isPagedDocument(fileType)) return pdf;
           return reader; // note, image, and every other kind
       }
     },

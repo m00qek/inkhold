@@ -1,6 +1,6 @@
 ---
 title: "Find a note"
-description: "Search names, handwriting, PDFs, text files, to-dos and digests, and see which notes can't be searched."
+description: "Search names, handwriting, documents, to-dos and digests, and see which notes can't be searched."
 weight: 2120
 extra:
   reader: household
@@ -10,7 +10,7 @@ extra:
 # Find a note
 
 Search everything at once: notebook and file names, your handwriting, the text
-of PDFs and text files, your to-dos and your digests.
+of PDFs, XPS documents and text files, your to-dos and your digests.
 
 1. Type in the search box at the top of the library. On a phone, choose
    **Search** in the bar at the bottom.
@@ -29,7 +29,8 @@ of PDFs and text files, your to-dos and your digests.
   says how much is covered, and **Which notes** lists the ones that aren't.
 - **Typed text**, from a notebook's text boxes, whether or not the tablet
   recognises the notebook.
-- **PDFs and text files**, from their own text. Handwriting on a PDF is not
+- **PDFs, XPS documents and text files**, from their own text. A comic book's
+  pages are pictures, so it is found by its name. Handwriting on a PDF is not
   searchable: see [What doesn't work yet](@/manual/limits.md).
 - **Digests**, by the passage, your comment, the category and the document
   it came from, all together: "whale obsession" finds the passage about the

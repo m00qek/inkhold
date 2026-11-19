@@ -25,7 +25,12 @@ export function sameEntry(a: Entry, b: Entry): boolean {
       a.name === b.name &&
       a.pageCount === b.pageCount &&
       a.updatedAt === b.updatedAt &&
-      a.firstPage.hash === b.firstPage.hash
+      a.firstPage.hash === b.firstPage.hash &&
+      a.fileHash === b.fileHash &&
+      // The tile is page 1 with its ink: a scribble changes only the `.mark`,
+      // never the document's own row, so these are how the tile learns of it.
+      (a.annotationsId ?? null) === (b.annotationsId ?? null) &&
+      (a.coverInkHash ?? null) === (b.coverInkHash ?? null)
     );
   }
   return false;

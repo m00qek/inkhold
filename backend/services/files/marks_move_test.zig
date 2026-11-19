@@ -162,8 +162,8 @@ test "the retention sweep expires a pair as one, never half of it" {
     defer freeEntry(p.mark);
 
     try f.files.trash(1, p.pdf.id);
-    // Backdate only the PDF, as a pre-fix bin left it.
-    try f.db.exec("UPDATE files SET deleted_at = 0 WHERE name = 'manual.pdf';");
+    // Past the window: both halves, which share their trash time.
+    try f.db.exec("UPDATE files SET deleted_at = 0;");
 
     _ = try f.files.sweepBin(1);
     try testing.expectEqual(@as(i64, 0), try countOf(&f, "SELECT COUNT(*) FROM files;"));

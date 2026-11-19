@@ -80,6 +80,10 @@ pub const ControlPlaneService = struct {
             .itemCount = try self.files.childCount(user_id, e.id),
         };
         const s = try self.summarize(arena, e);
+        // No query for the id: `e.mark_id` was resolved in the listing's own
+        // statement (`mark_pairing.pairedMarkId`). Gated on the verified paged
+        // type to match `noteMetaIn`, though pairing itself is format-agnostic.
+        const mark: ?u64 = if (takesInk(s.file_type)) e.mark_id else null;
         return .{
             .kind = "note",
             .id = try idStr(arena, e.id),
@@ -91,13 +95,8 @@ pub const ControlPlaneService = struct {
             .fileHash = if (e.md5) |m| try arena.dupe(u8, m) else null,
             .hasRecognizedText = s.has_recognized_text,
             .thumbAspect = s.aspect,
-            // No query here: `e.mark_id` was resolved in the listing's own
-            // statement (`mark_pairing.pairedMarkId`). Gated on the verified PDF
-            // type to match `noteMetaIn`, though pairing itself is format-agnostic.
-            .annotationsId = if (isPdf(s.file_type))
-                if (e.mark_id) |m| try idStr(arena, m) else null
-            else
-                null,
+            .annotationsId = if (mark) |m| try idStr(arena, m) else null,
+            .coverInkHash = if (mark) |m| try controlplane_index.coverInkHash(self, arena, m) else null,
         };
     }
 
@@ -112,6 +111,7 @@ pub const ControlPlaneService = struct {
             var file_type: ?[]const u8 = null;
             var first_page: ?PageRefVO = null;
             var thumb_aspect: ?AspectVO = null;
+            var mark: ?u64 = null;
             if (!r.is_folder) {
                 total += @intCast(r.size); // folders are 0 — never double-counted
                 var indexable = false;
@@ -128,6 +128,7 @@ pub const ControlPlaneService = struct {
                     }
                 }
                 file_type = try fileTypeFor(arena, indexable, marker, r.name);
+                if (takesInk(file_type)) mark = r.mark_id;
             }
             try out.append(arena, .{
                 .kind = if (r.is_folder) "folder" else "note",
@@ -142,6 +143,8 @@ pub const ControlPlaneService = struct {
                 .fileHash = if (r.md5) |m| try arena.dupe(u8, m) else null,
                 .firstPage = first_page,
                 .thumbAspect = thumb_aspect,
+                .annotationsId = if (mark) |m| try idStr(arena, m) else null,
+                .coverInkHash = if (mark) |m| try controlplane_index.coverInkHash(self, arena, m) else null,
             });
         }
 
@@ -273,7 +276,7 @@ pub const ControlPlaneService = struct {
     pub const lookup = controlplane_meta.lookup;
     pub const noteMeta = controlplane_meta.noteMeta;
     pub const binNoteMeta = controlplane_meta.binNoteMeta;
-    const isPdf = controlplane_meta.isPdf;
+    const takesInk = controlplane_meta.takesInk;
     const noteMetaIn = controlplane_meta.noteMetaIn;
     pub const historyNoteMeta = controlplane_meta.historyNoteMeta;
 
