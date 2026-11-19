@@ -1,6 +1,6 @@
 // What a signed-in person leaves in this browser, and its removal at sign-out
 // or when the session expires (#17): every IndexedDB database built from
-// their library, and the one localStorage entry about their files. The
+// their library, and the localStorage entries about their files. The
 // device's own preferences (theme, sort, a `.txt`'s font and zoom) stay.
 // Beside it: the service worker's stored listings (`forgetListings`), the
 // browser's HTTP cache (the server's `Clear-Site-Data` at sign-out), and what
@@ -16,12 +16,13 @@ import { TERMS_DB } from "./termsStore";
 import { TEXT_DB } from "./textStore";
 import { ITEMS_DB } from "./itemStore";
 import { REFUSALS_KEY } from "../search/textPrefetch";
+import { TERMS_SIZES_KEY } from "../search/termsBudget";
 
 /** Every database that holds something of the person's library. */
 export const PERSON_DATABASES: readonly string[] = [TERMS_DB, TEXT_DB, ITEMS_DB, THUMBS_DB, DIMS_DB, NOCOVER_DB];
 
 /** localStorage entries about the person's files, not the device's preferences. */
-export const PERSON_KEYS: readonly string[] = [REFUSALS_KEY];
+export const PERSON_KEYS: readonly string[] = [REFUSALS_KEY, TERMS_SIZES_KEY];
 
 export interface ForgetSeams {
   /** Null where IndexedDB is unavailable (a private window may refuse it). */

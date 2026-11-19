@@ -34,7 +34,7 @@ describe("forgetting the person at sign-out", () => {
     await forgetPerson({ idb, storage: s, blockedMs: 50 });
     expect(asked.sort()).toEqual(["sn-dims", "sn-doctext", "sn-nocover", "sn-search-items", "sn-terms", "sn-thumbs"]);
     expect([...s.held].sort()).toEqual(["sn.sort", "sn.theme"]);
-    expect(PERSON_KEYS).toEqual(["inkhold:text-refused"]);
+    expect(PERSON_KEYS).toEqual(["inkhold:text-refused", "inkhold:terms-sizes"]);
   });
 
   it("does not hang on a delete an open connection holds back, and goes on past one that fails", async () => {

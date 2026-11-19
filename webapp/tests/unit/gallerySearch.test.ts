@@ -2,6 +2,8 @@
 
 import { describe, it, expect } from "vitest";
 import type { Expansion } from "../../src/search/localSearch";
+import type { Entry } from "../../src/core/types";
+import type { SearchState } from "../../src/pages/noteSearch";
 import { doc, harness, note, results } from "./gallerySearch.shared";
 
 describe("the join between a hit and the listing", () => {
@@ -324,5 +326,40 @@ describe("where the to-dos go", () => {
     const h = harness({ state: results("q", [doc(1, [0])]), pending: 0, tree: [note("1", "Diário")], more: todos });
     const g = h.paint("valjean");
     expect(order(g).slice(-2)).toEqual(["Diário", "todos"]);
+  });
+});
+
+// The terms budget (`termsBudget.ts`): wherever the answer lands, the person
+// learns that some documents were searched by name only.
+describe("the search renderer's left-out sentence", () => {
+  const LINE = "This browser's search has no room for the text of 2 documents";
+  const leftOut = (state: SearchState, n: number): SearchState => ({ ...state, leftOut: n }) as SearchState;
+  const folder = (id: string, name: string): Entry => ({ kind: "folder", id, name }) as Entry;
+
+  it("is a notice over results", () => {
+    const h = harness({ state: leftOut(results("whale", [doc(7, [0])]), 2), pending: 0, tree: [note("7", "Notes")] });
+    h.paint("whale");
+    expect(h.notices().some((n) => n?.startsWith(LINE))).toBe(true);
+  });
+
+  it("is part of 'No matches', before the coverage sentence", () => {
+    const h = harness({ state: leftOut(results("whale", []), 2), pending: 0 });
+    h.paint("whale");
+    const body = h.emptyBody();
+    expect(body).toContain(LINE);
+    expect(body.indexOf(LINE)).toBeLessThan(body.indexOf("recognised"));
+  });
+
+  it("is a notice when only folders matched", () => {
+    const h = harness({ state: leftOut(results("whale", [], [], ["f:f1"]), 2), pending: 0, tree: [folder("f1", "Whale")] });
+    h.paint("whale");
+    expect(h.folderRows()).toEqual(["Whale"]);
+    expect(h.notices().some((n) => n?.startsWith(LINE))).toBe(true);
+  });
+
+  it("is not said when everything fits", () => {
+    const h = harness({ state: results("whale", [doc(7, [0])]), pending: 0, tree: [note("7", "Notes")] });
+    h.paint("whale");
+    expect(h.notices()).toEqual([]);
   });
 });

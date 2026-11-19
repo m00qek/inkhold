@@ -107,6 +107,31 @@ flowchart TD
   58 MB). Queries stay under 10 ms; a typo-ladder scan is 90 ms at a hundred
   times. So the rebuild only matters past a few thousand documents. IndexedDB
   reads are not in these numbers.
+- **The terms budget** is what the browser may keep, 32 MB of terms in UTF-8,
+  lower when its storage quota is short (`cache/termsStore.ts`). It is set by
+  memory, not storage: the index takes about four times its terms (measured
+  2026-11-19 on the hub's terms grown with copies of its biggest book: 4 MB
+  of terms take 37 MB, 16 MB 83 MB, 40 MB 164 MB, 77 MB 291 MB) and rebuilds
+  at about 80 ms a MB on a laptop. A long novel's `.txt` is 2.7 MB of terms.
+- **What fits is chosen before asking** (`search/termsBudget.ts`): every
+  notebook first, then the other documents by most recently changed, each kept
+  if it fits. Deleted files' records are dropped before the stream. An older
+  version stays, and holds its room, until its own new version replaces it,
+  so a re-derive of the whole library never holds both, and a torn one leaves
+  no document with neither; one refused while other old versions still held
+  room is asked for again by the next sync. A document never weighed
+  is asked for and decided on arrival, before it is stored: one that doesn't
+  fit is never written, and one that does lets go of what it pushes out
+  first, so the store stays within the budget even when the stream tears. A
+  write that fails (the quota ran out) lowers the budget to what is held, so
+  the next plan asks for no more than fits. Sizes weighed and let go are
+  remembered (`localStorage`, each write adding to what is stored, cleared at
+  sign-out), so such a document isn't asked for again until room is made or
+  it is re-derived. Nothing is evicted by age: that let go and fetched the
+  same documents on every sync. The bound is per tab: each knows only its own
+  writes, so two tabs syncing at once can briefly hold more between them.
+  Once a tab has synced, search names how many documents it left out; they
+  match by name, and Find in the document fetches their text itself.
 
 ## Ranking
 

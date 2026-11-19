@@ -67,6 +67,8 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   /** Beside `live` because `live` may be the listing, which has no versions. */
   let versions = new Map<string, number | null>();
   let derivations = new Map<string, Derivation>();
+  /** Documents the last sync found no room for (`termsBudget.ts`). */
+  let leftOut = 0;
 
   let index: SearchEngine | null = null;
   /** The engine of a first build still running: item rows go to it too, queued after the build. */
@@ -149,7 +151,9 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
       derivations = nextDerivations;
       live = next;
       versions = nextVersions;
-      if (outcome.received > 0) rows += 1;
+      leftOut = outcome.leftOut;
+      // A document let go leaves the index too, so its matches don't outlive the count.
+      if (outcome.stored > 0 || outcome.letGo > 0) rows += 1;
       return outcome;
     },
 
@@ -196,7 +200,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
         }
         throw err;
       }
-      return { query, ...group(answer, live ?? offlineLive(), pageCounts) };
+      return { query, ...group(answer, live ?? offlineLive(), pageCounts), ...(leftOut > 0 ? { leftOut } : {}) };
     },
   };
 }

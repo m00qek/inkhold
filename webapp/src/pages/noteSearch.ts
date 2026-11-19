@@ -32,6 +32,8 @@ export type SearchState =
       items: ItemHits;
       /** Kept for a quoted phrase without being checked (`LocalResults.unchecked`). */
       unchecked?: number;
+      /** Documents whose text doesn't fit this browser's search (`LocalResults.leftOut`). */
+      leftOut?: number;
     }
   | { kind: "error"; query: string };
 
@@ -109,6 +111,7 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
         items: results.items,
         // Only a phrase search that couldn't check everything says so.
         ...(results.unchecked ? { unchecked: results.unchecked } : {}),
+        ...(results.leftOut ? { leftOut: results.leftOut } : {}),
       });
     } catch (e) {
       if (mine !== token) return;
@@ -251,6 +254,16 @@ function documents(n: number): string {
 export function pendingLine(pending: number): string | null {
   if (pending <= 0) return null;
   return `${documents(pending)} — matches in them will appear on their own.`;
+}
+
+/**
+* Documents the browser keeps no text for (`termsBudget.ts`): still found by
+* name, and by Find once open, which fetches their text on its own.
+*/
+export function leftOutLine(leftOut: number): string | null {
+  if (leftOut <= 0) return null;
+  const docs = leftOut === 1 ? "1 document" : `${leftOut} documents`;
+  return `This browser's search has no room for the text of ${docs}: only ${leftOut === 1 ? "its name is" : "their names are"} searched. Open ${leftOut === 1 ? "it" : "one"} and use Find to search inside it.`;
 }
 
 /**
