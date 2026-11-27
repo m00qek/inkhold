@@ -54,20 +54,21 @@ export function leftOutList(
 }
 
 export interface SearchLeftOut {
-  /** The disclosure, or null when nothing is left out. */
-  block(ids: readonly number[], nameOf: (id: Id) => LeftOutName | null): HTMLElement | null;
+  /** The disclosure for the search `q`, or null when nothing is left out. */
+  block(q: string, ids: readonly number[], nameOf: (id: Id) => LeftOutName | null): HTMLElement | null;
 }
 
 export function createSearchLeftOut(): SearchLeftOut {
   /**
-   * The block last handed out, read for its open state: the gallery repaints
-   * whenever an answer lands, and the list must not close under the person
-   * reading it (as `searchCoverage.ts`).
+   * The block last handed out and its search, read for its open state: the
+   * gallery repaints whenever an answer lands, and the list must not close
+   * under the person reading it (as `searchCoverage.ts`). A new search starts
+   * closed: what was opened was another answer's list.
    */
-  let shown: HTMLDetailsElement | null = null;
+  let shown: { q: string; box: HTMLDetailsElement } | null = null;
 
   return {
-    block(ids, nameOf) {
+    block(q, ids, nameOf) {
       if (ids.length === 0) return null;
       const list = leftOutList(ids, nameOf);
       const rows = list.shown.map((entry) => {
@@ -87,8 +88,8 @@ export function createSearchLeftOut(): SearchLeftOut {
         rows.length > 0 ? el("ul", { class: "left-out__list" }, ...rows) : null,
         ...rest,
       );
-      box.open = shown?.open ?? false;
-      shown = box;
+      box.open = shown?.q === q && shown.box.open;
+      shown = { q, box };
       return box;
     },
   };

@@ -7,7 +7,7 @@ import type { IndexTransport, ManifestAnswer, StreamAnswer } from "../../src/sea
 import { openTermsStore, termsKeyOf, weigh } from "../../src/cache/termsStore";
 import type { TermsKey, TermsStore, StoredTermsDocument } from "../../src/cache/termsStore";
 import type { TermsDocument } from "../../src/search/termsStream";
-import { keepOrder, type RememberedSizes } from "../../src/search/termsBudget";
+import type { RememberedSizes } from "../../src/search/termsBudget";
 import { decodeManifest } from "../../src/search/manifestCodec";
 
 // The same golden manifest `manifestCodec.test.ts` decodes; position 2 has a null version.
@@ -428,10 +428,9 @@ describe("createIndexSync", () => {
     const outcome = await createIndexSync({ store, transport: fakeTransport([[body]]).transport, sizes: memorySizes() }).sync();
     // Positions 0 and 1 are the notebooks.
     expect([...store.records.keys()].sort()).toEqual([termsKeyOf(ROWS[0]![1], ROWS[0]![2]), termsKeyOf(ROWS[1]![1], ROWS[1]![2])].sort());
-    // The rest by file id, in keep order (`keepOrder`): the most wanted first.
+    // The rest, by file id (their order is `termsBudget.test.ts`'s to pin).
     const rows = decodeManifest(MANIFEST).rows;
-    const kept = keepOrder(rows).filter((p) => p === 3 || p === 4);
-    expect(outcome.leftOut).toEqual(kept.map((p) => rows[p]!.fileId));
+    expect(outcome.leftOut).toEqual([rows[3]!.fileId, rows[4]!.fileId]);
   });
 
   it("asks again for a document let go once room is made", async () => {

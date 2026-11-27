@@ -54,11 +54,11 @@ describe("leftOutList", () => {
 
 describe("createSearchLeftOut", () => {
   it("is nothing when nothing is left out", () => {
-    expect(createSearchLeftOut().block([], listing(1))).toBeNull();
+    expect(createSearchLeftOut().block("whale", [], listing(1))).toBeNull();
   });
 
   it("is a closed disclosure, 'Show them', listing links that open each document", () => {
-    const box = createSearchLeftOut().block([2, 1], listing(2)) as HTMLDetailsElement;
+    const box = createSearchLeftOut().block("whale", [2, 1], listing(2)) as HTMLDetailsElement;
     expect(box.tagName).toBe("DETAILS");
     expect(box.open).toBe(false);
     expect(box.querySelector("summary")?.textContent).toBe("Show them");
@@ -71,21 +71,29 @@ describe("createSearchLeftOut", () => {
 
   it("follows a plain click itself", () => {
     location.hash = "";
-    const box = createSearchLeftOut().block([1], listing(1))!;
+    const box = createSearchLeftOut().block("whale", [1], listing(1))!;
     box.querySelector<HTMLAnchorElement>("li a")!.click();
     expect(location.hash).toBe("#/note/1");
   });
 
   it("ends with 'and N more', then the count of those not listed yet", () => {
-    const box = createSearchLeftOut().block([...range(1, 51), 98, 99], listing(51))!;
+    const box = createSearchLeftOut().block("whale", [...range(1, 51), 98, 99], listing(51))!;
     expect(box.querySelectorAll("li")).toHaveLength(50);
     expect([...box.querySelectorAll(".left-out__rest")].map((p) => p.textContent)).toEqual(["and 1 more", "2 more not listed yet"]);
     // Never an id where a name should be.
     expect(box.textContent).not.toContain("98");
   });
 
+  it("stays open across a repaint of the same search, and starts closed for another", () => {
+    const names = createSearchLeftOut();
+    const first = names.block("whale", [1], listing(1)) as HTMLDetailsElement;
+    first.open = true;
+    expect((names.block("whale", [1, 2], listing(2)) as HTMLDetailsElement).open).toBe(true);
+    expect((names.block("aurora", [1, 2], listing(2)) as HTMLDetailsElement).open).toBe(false);
+  });
+
   it("with no name known yet, only counts them", () => {
-    const box = createSearchLeftOut().block([98, 99], listing(0))!;
+    const box = createSearchLeftOut().block("whale", [98, 99], listing(0))!;
     expect(box.querySelector("ul")).toBeNull();
     expect(box.querySelector(".left-out__rest")?.textContent).toBe("2 more not listed yet");
   });
