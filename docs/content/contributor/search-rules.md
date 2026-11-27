@@ -140,6 +140,21 @@ flowchart TD
   so the page neither counts nor lists it (`pages/gallerySearch.ts`); if none
   are left, there is no line. The search layer never sees names. They match
   by name, and Find in the document fetches their text itself.
+- **The scope**, what search reads the text of, is a setting of the browser
+  (`search/searchScope.ts`, kept by `ui/searchScope.ts` as `sn.search-scope`,
+  which sign-out leaves). Notebooks always; documents, every row whose tier
+  isn't `note`, annotated ones included, only while **Search inside
+  documents** is on. The search layer takes the scope as an option and reads
+  no storage. Off, a sync neither asks for nor keeps their terms, and lets go
+  of what it held; they are never planned, so never left out. The index
+  rebuilds whenever the scope differs from the one it was built under, so a
+  sync torn after its drop leaves no stale terms behind. A query drops their
+  hits at once, before that sync runs, and offline by the listing's file
+  type; the left-out list drops their ids. On again, the next sync asks for them
+  within the budget, using the sizes remembered when they were let go. A
+  switch starts that sync at once, in every tab (the `storage` event). The
+  results then say documents' text isn't searched, with a link to the
+  setting. Find inside a document and its text prefetch read every kind.
 
 ## Ranking
 

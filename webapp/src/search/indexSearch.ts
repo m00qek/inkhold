@@ -10,6 +10,7 @@ import { createSearchEngine, type SearchEngine } from "./searchEngine";
 import { createIndexSync, type IndexSync, type SyncOutcome } from "./indexSync";
 import type { Derivation, ManifestRow } from "./manifestCodec";
 import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
+import { FULL_SCOPE, inScope, sameScope, type SearchScope } from "./searchScope";
 
 /** No cap: the scan is full anyway, and a capped document would undercount its matches. */
 const ALL_PAGES = 0xffffffff;
@@ -22,6 +23,11 @@ export interface IndexSearchOptions {
    * persisted manifest: a stale one would resurrect deleted documents.
    */
   listing?: () => readonly LiveDocument[];
+  /**
+   * What is searched (`searchScope.ts`), read per sync and per query; all of
+   * it by default. Given to the sync this makes, when it makes one.
+   */
+  scope?: () => SearchScope;
 }
 
 /** What the manifest or the cached listing must say about a live document. */
@@ -29,6 +35,17 @@ export interface LiveDocument {
   readonly md5: string;
   readonly fileId: number;
   readonly updatedAt: number;
+  /**
+   * The listing's word for the manifest's tier, for the scope offline: a
+   * `.note` or not. Not a tier, which would change the ranking's weights.
+   */
+  readonly notebook: boolean;
+}
+
+/** Whether a live row's text is searched under `scope`, from the manifest's tier or the listing's file type. */
+function searched(scope: SearchScope, row: LiveDocument | ManifestRow): boolean {
+  if ("tier" in row) return inScope(scope, row);
+  return row.notebook || scope.documents;
 }
 
 export interface IndexSearch extends LocalSearch {
@@ -58,17 +75,23 @@ function abortError(): Error {
 }
 
 export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
-  const sync = opts.sync ?? createIndexSync();
+  const scopeOf = opts.scope ?? (() => FULL_SCOPE);
+  const sync = opts.sync ?? createIndexSync({ scope: scopeOf });
   const load = opts.load;
   const listing = opts.listing;
 
-  // Replaced wholesale per sync; merging would resurrect deletions.
-  let live: Map<string, LiveDocument> | null = null;
+  /**
+   * The manifest's rows once synced, else null (`offlineLive` stands in).
+   * Replaced wholesale per sync; merging would resurrect deletions.
+   */
+  let live: Map<string, ManifestRow> | null = null;
   /** Beside `live` because `live` may be the listing, which has no versions. */
   let versions = new Map<string, number | null>();
   let derivations = new Map<string, Derivation>();
   /** The file ids the last sync found no room for (`termsBudget.ts`). */
   let leftOut: readonly number[] = [];
+  /** The last manifest's rows by file id: a left-out id's kind, for the scope. */
+  let rowsById = new Map<number, ManifestRow>();
 
   let index: SearchEngine | null = null;
   /** The engine of a first build still running: item rows go to it too, queued after the build. */
@@ -81,12 +104,20 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   let built = -1;
   /** Each built document's page count, for density; replaced with every build. */
   let pageCounts = new Map<string, number>();
+  /**
+   * The scope the engine was built under. A different one rebuilds it from
+   * the store, whether or not the sync that let terms go finished: one torn
+   * after its drop reports nothing let go, and the engine would go on
+   * holding, and matching once back on, terms the store no longer has.
+   */
+  let builtScope: SearchScope = FULL_SCOPE;
   /** The last rows of each kind, for an engine made later. */
   const itemRows = new Map<ItemKind, readonly ItemRow[]>();
   const hasItems = () => [...itemRows.values()].some((rows) => rows.length > 0);
 
   async function build(): Promise<SearchEngine> {
     const target = rows;
+    const scope = scopeOf();
     const mine = generation;
     // Dedupe again: `SearchIndex.build` throws on a repeated md5.
     const stored = newestPerDocument(await sync.documents());
@@ -116,6 +147,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     }
     index = engine;
     built = target;
+    builtScope = scope;
     pageCounts = new Map(stored.map((d) => [d.md5, d.pageCount]));
     return engine;
   }
@@ -127,7 +159,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   }
 
   function engine(): Promise<SearchEngine> {
-    if (index && built === rows) return Promise.resolve(index);
+    if (index && built === rows && sameScope(builtScope, scopeOf())) return Promise.resolve(index);
     // A sync landing mid-build is picked up by the next search.
     if (building) return building;
     const p = build().finally(() => {
@@ -152,6 +184,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
       live = next;
       versions = nextVersions;
       leftOut = outcome.leftOut;
+      rowsById = new Map(outcome.manifest.rows.map((row) => [row.fileId, row]));
       // A document let go leaves the index too, so its matches don't outlive the count.
       if (outcome.stored > 0 || outcome.letGo > 0) rows += 1;
       return outcome;
@@ -200,7 +233,12 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
         }
         throw err;
       }
-      return { query, ...group(answer, live ?? offlineLive(), pageCounts), ...(leftOut.length > 0 ? { leftOut } : {}) };
+      const scope = scopeOf();
+      // Until the sync a switch started has run, the last one's list may name
+      // a kind the scope now leaves out: never left out, so never said.
+      // Both come from one sync's outcome: every left-out id has its row.
+      const unfit = leftOut.filter((id) => inScope(scope, rowsById.get(id)!));
+      return { query, ...group(answer, live ?? offlineLive(), pageCounts, scope), ...(unfit.length > 0 ? { leftOut: unfit } : {}) };
     },
   };
 }
@@ -208,15 +246,20 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
 /**
  * Group by document, intersect with the live set, rank. Pages go out
  * ascending: a row deep-links to the first matching page in the document.
+ * A row the scope leaves out matches nothing at once, before the sync that
+ * lets its terms go has run, and offline, where the listing says which rows
+ * are notebooks.
  */
 function group(
   result: QueryResult,
   live: ReadonlyMap<string, LiveDocument | ManifestRow>,
   pageCounts: ReadonlyMap<string, number>,
+  scope: SearchScope,
 ): Omit<LocalResults, "query"> {
   const pages = new Map<string, number[]>();
   for (const hit of result.hits) {
-    if (!live.has(hit.md5)) continue;
+    const row = live.get(hit.md5);
+    if (!row || !searched(scope, row)) continue;
     const seen = pages.get(hit.md5);
     if (seen) seen.push(hit.page);
     else pages.set(hit.md5, [hit.page]);

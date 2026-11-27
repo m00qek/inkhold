@@ -225,19 +225,19 @@ describe("createIndexSearch", () => {
     state.docs = DOCS.filter((d) => d.md5 !== CHARLIE);
     state.received = 0;
     state.letGo = 1;
-    state.leftOut = [33];
+    state.leftOut = [30];
     await local.sync();
     const after = await local.search("reuniao");
     expect(after.documents.map((d) => d.md5)).not.toContain(CHARLIE);
-    expect(after.leftOut).toEqual([33]);
+    expect(after.leftOut).toEqual([30]);
   });
 
   it("answers a session that never synced, from the cached listing alone", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();
     const listing = () => [
-      { md5: ALFA, fileId: 10, updatedAt: 1000 },
-      { md5: BRAVO, fileId: 20, updatedAt: 5000 },
+      { md5: ALFA, fileId: 10, updatedAt: 1000, notebook: true },
+      { md5: BRAVO, fileId: 20, updatedAt: 5000, notebook: true },
     ];
     const local = createIndexSearch({ sync, load, listing });
 
@@ -264,5 +264,67 @@ describe("createIndexSearch", () => {
     const pending = local.search("reuniao", controller.signal);
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
+// The scope (`searchScope.ts`): a kind left out matches nothing at once,
+// before the sync that lets its terms go, and is never said to be left out.
+describe("createIndexSearch with a scope", () => {
+  const tiered = (tier: "note" | "marked" | "other") => (r: ReturnType<typeof row>) => ({ ...r, tier });
+
+  it("with documents off, drops documents and annotated documents from the answer and keeps the notebooks", async () => {
+    let scope = { documents: false };
+    const rows = [row(ALFA, 10, 1000), tiered("marked")(row(BRAVO, 20, 5000)), tiered("other")(row(CHARLIE, 30, 9000))];
+    const { sync } = fakeSync({ rows });
+    const local = createIndexSearch({ sync, load: spyLoader().load, scope: () => scope });
+    await local.sync();
+    expect((await local.search("reuniao")).documents.map((d) => d.md5)).toEqual([ALFA]);
+
+    // On again: the same index answers in full, before any sync.
+    scope = { documents: true };
+    expect((await local.search("reuniao")).documents.map((d) => d.md5).sort()).toEqual([ALFA, BRAVO, CHARLIE].sort());
+  });
+
+  it("offline, before any sync, drops the documents the listing says aren't notebooks", async () => {
+    const { sync } = fakeSync();
+    const listing = () => [
+      { md5: ALFA, fileId: 10, updatedAt: 1000, notebook: true },
+      { md5: BRAVO, fileId: 20, updatedAt: 5000, notebook: false },
+      { md5: CHARLIE, fileId: 30, updatedAt: 9000, notebook: false },
+    ];
+    const local = createIndexSearch({ sync, load: spyLoader().load, listing, scope: () => ({ documents: false }) });
+    // Never synced: the listing stands in for the manifest, and says which are notebooks.
+    expect((await local.search("reuniao")).documents.map((d) => d.md5)).toEqual([ALFA]);
+  });
+
+  it("rebuilds from the store when the scope changes, even when no sync reported letting go", async () => {
+    let scope = { documents: true };
+    const rows = [row(ALFA, 10, 1000), row(BRAVO, 20, 5000), tiered("other")(row(CHARLIE, 30, 9000))];
+    const { sync, state } = fakeSync({ rows });
+    const local = createIndexSearch({ sync, load: spyLoader().load, scope: () => scope });
+    await local.sync();
+    expect((await local.search("reuniao")).documents.map((d) => d.md5)).toContain(CHARLIE);
+
+    // Switched off, the sync dropped CHARLIE's terms and then tore: it reported nothing.
+    state.docs = DOCS.filter((d) => d.md5 !== CHARLIE);
+    scope = { documents: false };
+    await local.search("reuniao");
+    // Back on before any sync: the store has no CHARLIE, so neither may the answer.
+    scope = { documents: true };
+    expect((await local.search("reuniao")).documents.map((d) => d.md5)).not.toContain(CHARLIE);
+  });
+
+  it("never says a document the scope leaves out was left out by the budget", async () => {
+    let scope = { documents: true };
+    const rows = [row(ALFA, 10, 1000), row(BRAVO, 20, 5000), tiered("other")(row(CHARLIE, 30, 9000))];
+    const { sync, state } = fakeSync({ rows });
+    state.leftOut = [30, 20];
+    const local = createIndexSearch({ sync, load: spyLoader().load, scope: () => scope });
+    await local.sync();
+    expect((await local.search("reuniao")).leftOut).toEqual([30, 20]);
+
+    // Switched off, before the next sync: the last one's list still names it.
+    scope = { documents: false };
+    expect((await local.search("reuniao")).leftOut).toEqual([20]);
   });
 });

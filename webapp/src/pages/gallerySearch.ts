@@ -5,7 +5,10 @@
 
 import { cardList } from "./galleryCards";
 import { el } from "../ui/dom";
-import { answerFor, coverageLine, expansionNotice, leftOutLine, pendingLine, resultsMayGrowLine, type SearchState } from "./noteSearch";
+import { answerFor, coverageLine, expansionNotice, leftOutLine, pendingLine, resultsMayGrowLine, scopeLine, SCOPE_LINK, type SearchState } from "./noteSearch";
+import { accountHref, go } from "../router";
+import { onPlainClick } from "../ui/link";
+import { FULL_SCOPE, type SearchScope } from "../search/searchScope";
 import { crumbPath } from "./rail/railPlaces";
 import { holdsInside, insideOf } from "../search/match";
 import { namedIds } from "./nameRows";
@@ -64,6 +67,8 @@ export interface GallerySearchCtx {
   moreResults?: (q: string) => MoreResults | null;
   /** How much handwriting search can find (`searchCoverage.ts`); absent: not said. */
   coverage?: SearchCoverage;
+  /** What this browser's search reads the text of, at paint time; absent: everything. */
+  searchScope?: () => SearchScope;
 }
 
 export interface GallerySearch {
@@ -167,6 +172,14 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     });
   }
 
+  /** The link to the scope's setting, the account page, after `scopeLine`. */
+  function scopeLink(): HTMLElement {
+    const href = accountHref();
+    const link = el("a", { class: "hits__link", href, text: SCOPE_LINK });
+    onPlainClick(link, () => go(href));
+    return link;
+  }
+
   /** Folders named like the query, by the label the rail shows; each once. */
   function folderResults(names: NameHits): Folder[] {
     const seen = new Map<Id, Folder>();
@@ -248,10 +261,16 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       const list = leftOutBlock(q, leftOutIds, cached);
       if (list) gallery.append(list);
     };
+    // A standing setting, not news: no status role, which would also hold its link.
+    const scoped = scopeLine(ctx.searchScope?.() ?? FULL_SCOPE);
+    const appendScope = () => {
+      if (scoped) gallery.append(el("p", { class: "hits__notice" }, `${scoped} `, scopeLink()));
+    };
     if (results.length > 0) {
       const grow = resultsMayGrowLine(pending);
       if (grow) gallery.append(el("p", { class: "hits__notice", role: "status", text: grow }));
       appendLeftOut();
+      appendScope();
     }
 
     // Folders first: a name typed to get somewhere. Their own group, like the to-dos'.
@@ -263,6 +282,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     if (results.length === 0 && (more || folders.length > 0)) {
       if (more) gallery.append(more);
       appendLeftOut();
+      appendScope();
       const cov = coverageBlock(cached);
       if (cov) gallery.append(cov);
       return;
@@ -283,9 +303,11 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         const cov = coverageBlock(cached);
         const why = cov ? "" : coverageLine();
         gallery.append(ctx.emptyState(`No matches for “${q}”`, [still, leftOut, why].filter(Boolean).join(" ")));
-        // The empty state's body is text only: the names go under it.
+        // The empty state's body is text only: the names go under it, then the
+        // scope's line with its link, as the other two places show it.
         const list = leftOutBlock(q, leftOutIds, cached);
         if (list) gallery.append(list);
+        appendScope();
         if (cov) gallery.append(cov);
       }
       return;

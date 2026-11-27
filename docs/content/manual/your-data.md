@@ -28,7 +28,8 @@ connections are private too.
 
 The browser keeps some things to be fast: page images, the search index, the
 app itself. They stay in that browser, for that person, and signing out removes
-everything but the app and your preferences (the theme, the sort order).
+everything but the app and your preferences (the theme, the sort order,
+whether search reads the text inside documents).
 
 ## Who can see what
 

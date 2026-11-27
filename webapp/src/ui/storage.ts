@@ -29,3 +29,9 @@ export function writeLocal(key: string, value: string): void {
 }
 
 export const SORT_KEY = "sn.sort";
+
+/**
+ * What this browser's search reads the text of (`ui/searchScope.ts`). The
+ * browser's preference, not the person's: it stays at sign-out, like the sort.
+ */
+export const SEARCH_SCOPE_KEY = "sn.search-scope";

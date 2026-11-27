@@ -5,6 +5,7 @@ import { createLazyEngine, renderPage } from "../../render/lazy";
 import { createThumbnails, createCanvasThumbPainter, createFetchThumbNet } from "../../render/thumbnails";
 import { createNoteSearch } from "../noteSearch";
 import { createSearchService } from "../../search/searchService";
+import { createSearchScopeSetting } from "../../ui/searchScope";
 import type { LibraryCtx } from "./libraryContext";
 import { createSearchItems } from "./searchItems";
 import { nameRows } from "../nameRows";
@@ -57,7 +58,9 @@ export function installLibraryEngines(ctx: LibraryCtx): void {
         )
       : null;
 
+  ctx.searchScope = createSearchScopeSetting();
   ctx.searchService = createSearchService({
+    scope: () => ctx.searchScope.get(),
     // Stands in for the manifest when this session never synced, so a full local
     // store stays searchable offline. Read fresh: the walk fills it later.
     listing: () =>
@@ -65,7 +68,7 @@ export function installLibraryEngines(ctx: LibraryCtx): void {
         cached.entries.flatMap((e) =>
           e.kind === "note" && e.fileHash
             // The numeric `fileId` is canonical; `gallerySearch` converts back.
-            ? [{ md5: e.fileHash, fileId: Number(e.id), updatedAt: e.updatedAt }]
+            ? [{ md5: e.fileHash, fileId: Number(e.id), updatedAt: e.updatedAt, notebook: e.fileType.trim().toLowerCase() === "note" }]
             : [],
         ),
       ),
@@ -81,6 +84,12 @@ export function installLibraryEngines(ctx: LibraryCtx): void {
       ctx.search.stale();
       if (ctx.searchInView()) ctx.search.askIfStale();
     },
+  });
+
+  // A switch, here or in another tab: the answer on screen is asked again.
+  ctx.searchService.attachScope(ctx.searchScope.subscribe, () => {
+    ctx.search.stale();
+    if (ctx.searchInView()) ctx.search.askIfStale();
   });
 
   ctx.search = createNoteSearch({

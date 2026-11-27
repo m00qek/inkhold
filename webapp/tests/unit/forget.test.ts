@@ -30,10 +30,11 @@ function storage(keys: string[]) {
 describe("forgetting the person at sign-out", () => {
   it("deletes every database built from their library, and their key, and keeps the device's preferences", async () => {
     const { idb, asked } = idbAnswering(() => "success");
-    const s = storage(["sn.theme", "sn.sort", ...PERSON_KEYS]);
+    const s = storage(["sn.theme", "sn.sort", "sn.search-scope", ...PERSON_KEYS]);
     await forgetPerson({ idb, storage: s, blockedMs: 50 });
     expect(asked.sort()).toEqual(["sn-dims", "sn-doctext", "sn-nocover", "sn-search-items", "sn-terms", "sn-thumbs"]);
-    expect([...s.held].sort()).toEqual(["sn.sort", "sn.theme"]);
+    // The search scope is the browser's, like the sort: it stays.
+    expect([...s.held].sort()).toEqual(["sn.search-scope", "sn.sort", "sn.theme"]);
     expect(PERSON_KEYS).toEqual(["inkhold:text-refused", "inkhold:terms-sizes"]);
   });
 

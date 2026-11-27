@@ -4,6 +4,7 @@
 
 import { dispatchApiFailure, type ApiFailureSink } from "../api/client";
 import { NO_ITEM_HITS, type Expansion, type ItemHits, type LocalHit, type LocalSearch } from "../search/localSearch";
+import type { SearchScope } from "../search/searchScope";
 
 /**
 * One or two characters match nearly the whole index (the expensive case).
@@ -265,6 +266,18 @@ export function leftOutLine(leftOut: number): string | null {
   const docs = leftOut === 1 ? "1 document" : `${leftOut} documents`;
   return `This browser's search has no room for the text of ${docs}: only ${leftOut === 1 ? "its name is" : "their names are"} searched. Open ${leftOut === 1 ? "it" : "one"} and use Find to search inside it.`;
 }
+
+/**
+* What the scope leaves out (`search/searchScope.ts`), said wherever the
+* results are; `null` when everything is searched. The setting's link follows
+* it (`SCOPE_LINK`).
+*/
+export function scopeLine(scope: SearchScope): string | null {
+  return scope.documents ? null : "This browser doesn't search the text inside documents, only their names.";
+}
+
+/** The link to the setting, after `scopeLine`. */
+export const SCOPE_LINK = "Change this in your account settings";
 
 /**
 * Over a non-empty list: a document still being derived isn't in the index

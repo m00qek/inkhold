@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createIndexSync, IndexSyncError } from "../../src/search/indexSync";
@@ -525,5 +525,146 @@ describe("openTermsStore", () => {
 
   it("spells its key the way the server spells the filename it came from", () => {
     expect(termsKeyOf("d41d8cd98f00b204e9800998ecf8427e", 7)).toBe("d41d8cd98f00b204e9800998ecf8427e.7");
+  });
+});
+
+// The scope (`searchScope.ts`): manifest positions 0 and 1 are notebooks, 3
+// and 4 other documents; `ROWS[2]` and `ROWS[3]` hold those two.
+describe("createIndexSync with a scope", () => {
+  const OFF = { documents: false };
+  const ON = { documents: true };
+  /** The cache key of `ROWS[i]`. */
+  const key = (i: number) => termsKeyOf(ROWS[i]![1], ROWS[i]![2]);
+  const NOTES = [key(0), key(1)];
+  const ALL = ROWS.map((_, i) => key(i));
+  const body = (rows = ROWS) => rows.map(([, md5, v]) => doc(md5, v)).join("");
+
+  it("with documents off, asks for the notebooks only and keeps nothing else", async () => {
+    const { transport, calls } = fakeTransport([[body(ROWS.slice(0, 2))]]);
+    const store = memoryStore();
+    const outcome = await createIndexSync({ store, transport, scope: () => OFF }).sync();
+    // Positions 0 and 1 only: 0b00000011.
+    expect(calls).toEqual([{ m: "etag-1", want: "Aw" }]);
+    expect([...store.records.keys()].sort()).toEqual([...NOTES].sort());
+    expect(outcome.requested).toBe(2);
+  });
+
+  it("lets go of documents already held, every version, and keeps the notebooks", async () => {
+    const store = memoryStore();
+    for (const [, md5, v] of ROWS) await store.put({ md5, indexVersion: v, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    // An older version of a document, not yet replaced: it goes too.
+    await store.put({ md5: ROWS[3]![1], indexVersion: 1, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const { transport, calls } = fakeTransport([[""]]);
+    const outcome = await createIndexSync({ store, transport, scope: () => OFF, sizes: memorySizes() }).sync();
+    expect(calls).toHaveLength(0);
+    expect([...store.records.keys()].sort()).toEqual([...NOTES].sort());
+    // What the index held changed: `indexSearch` rebuilds on it.
+    expect(outcome.letGo).toBe(3);
+  });
+
+  it("never counts a document the scope leaves out as left out, even when it would not fit", async () => {
+    const ONE = weigh({ md5: ROWS[0]![1], pages: [{ p: 0, t: "reuniao" }] });
+    const store = memoryStore(true, 2 * ONE);
+    const sizes = memorySizes();
+    // Weighed before: on, these two would be left out.
+    sizes.set([[key(2), ONE], [key(3), ONE]]);
+    const outcome = await createIndexSync({ store, transport: fakeTransport([[body(ROWS.slice(0, 2))]]).transport, scope: () => OFF, sizes }).sync();
+    expect(outcome.leftOut).toEqual([]);
+  });
+
+  it("asks for the documents again on the first sync after they are turned back on", async () => {
+    let scope = OFF;
+    const store = memoryStore();
+    const sizes = memorySizes();
+    const { transport, calls } = fakeTransport([[body(ROWS.slice(0, 2))], [body(ROWS.slice(2))]]);
+    const sync = createIndexSync({ store, transport, scope: () => scope, sizes });
+    await sync.sync();
+    scope = ON;
+    const outcome = await sync.sync();
+    // Positions 3 and 4: 0b00011000.
+    expect(calls[1]).toEqual({ m: "etag-1", want: "GA" });
+    expect(outcome.stored).toBe(2);
+    expect([...store.records.keys()].sort()).toEqual([...ALL].sort());
+  });
+
+  it("reads the scope once per attempt: a switch landing mid-run waits for the next sync", async () => {
+    let scope = ON;
+    const reads = vi.fn(() => scope);
+    const store = memoryStore();
+    const transport: IndexTransport = {
+      ...fakeTransport([]).transport,
+      async stream(): Promise<StreamAnswer> {
+        return {
+          status: 200,
+          chunks: (async function* () {
+            yield doc(ROWS[0]![1], ROWS[0]![2]) + doc(ROWS[1]![1], ROWS[1]![2]);
+            // Switched off while the stream runs.
+            scope = OFF;
+            yield doc(ROWS[2]![1], ROWS[2]![2]) + doc(ROWS[3]![1], ROWS[3]![2]);
+          })(),
+        };
+      },
+    };
+    const sync = createIndexSync({ store, transport, scope: reads, sizes: memorySizes() });
+    const first = await sync.sync();
+    expect(reads).toHaveBeenCalledTimes(1);
+    // The run planned with documents on keeps them, all four, whole.
+    expect(first.stored).toBe(4);
+    expect([...store.records.keys()].sort()).toEqual([...ALL].sort());
+
+    const next = await sync.sync();
+    expect(next.letGo).toBe(2);
+    expect([...store.records.keys()].sort()).toEqual([...NOTES].sort());
+  });
+
+  it("after a 412 that followed the drop, reports nothing let go: the drop was the first attempt's", async () => {
+    // Documents held, notebooks not yet: the drop runs, then the stream is refused.
+    const store = memoryStore();
+    for (const [, md5, v] of ROWS.slice(2)) await store.put({ md5, indexVersion: v, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const { transport, calls } = fakeTransport([412, [body(ROWS.slice(0, 2))]]);
+    const outcome = await createIndexSync({ store, transport, scope: () => OFF, sizes: memorySizes() }).sync();
+    expect(calls).toHaveLength(2);
+    expect([...store.records.keys()].sort()).toEqual([...NOTES].sort());
+    // Why `indexSearch` rebuilds on a scope change, not on `letGo` alone.
+    expect(outcome.letGo).toBe(0);
+  });
+
+  it("keeps a notebook's old version, documents off, until its new one arrives: it is replaced, not unsearched", async () => {
+    const store = memoryStore();
+    await store.put({ md5: ROWS[0]![1], indexVersion: 1, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    for (const [, md5, v] of ROWS.slice(2)) await store.put({ md5, indexVersion: v, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const transport: IndexTransport = {
+      ...fakeTransport([]).transport,
+      async stream(): Promise<StreamAnswer> {
+        return {
+          status: 200,
+          chunks: (async function* () {
+            yield "";
+            throw new Error("connection reset");
+          })(),
+        };
+      },
+    };
+    await expect(createIndexSync({ store, transport, scope: () => OFF, sizes: memorySizes() }).sync()).rejects.toThrow("connection reset");
+    // The documents went before the stream; the notebook's old version stays, its new one never came.
+    expect([...store.records.keys()]).toEqual([termsKeyOf(ROWS[0]![1], 1)]);
+  });
+
+  it("remembers the sizes it let go, so turning back on fetches what fits and not what won't", async () => {
+    const ONE = weigh({ md5: ROWS[0]![1], pages: [{ p: 0, t: "reuniao" }] });
+    const store = memoryStore(true, 3 * ONE);
+    for (const [, md5, v] of ROWS) await store.put({ md5, indexVersion: v, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const sizes = memorySizes();
+    await createIndexSync({ store, transport: fakeTransport([[""]]).transport, scope: () => OFF, sizes }).sync();
+    expect(sizes.get(key(2))).toBe(ONE);
+    expect(sizes.get(key(3))).toBe(ONE);
+
+    const { transport, calls } = fakeTransport([[doc(ROWS[2]![1], ROWS[2]![2])]]);
+    const outcome = await createIndexSync({ store, transport, scope: () => ON, sizes }).sync();
+    // Position 3 fits beside the notebooks and is asked for (0b00001000);
+    // position 4, known not to fit, is left out without a fetch.
+    expect(calls).toEqual([{ m: "etag-1", want: "CA" }]);
+    expect(outcome.leftOut).toEqual([decodeManifest(MANIFEST).rows[4]!.fileId]);
+    expect(store.records.size).toBe(3);
   });
 });

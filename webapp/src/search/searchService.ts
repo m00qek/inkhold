@@ -13,6 +13,7 @@ import { createTextPrefetch, type TextPrefetch } from "./textPrefetch";
 import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
 import { holdsAll, phrasesOf, withExpansions } from "./phrase";
 import { openTextStore, type TextStore } from "../cache/textStore";
+import type { SearchScope } from "./searchScope";
 
 /** The manifest costs ~150 ms on a Pi and device syncs burst; much longer feels like "not findable yet". */
 const COALESCE_MS = 1500;
@@ -26,6 +27,12 @@ export interface SearchServiceOptions {
   textPrefetch?: TextPrefetch;
   /** The browser's document text, to check quoted phrases against. */
   store?: Pick<TextStore, "get">;
+  /**
+   * What is searched (`searchScope.ts`), read per sync and per query; all of
+   * it by default. `attachScope` follows its changes. Find's text prefetch
+   * ignores it: Find inside an open document reads every kind.
+   */
+  scope?: () => SearchScope;
 }
 
 export interface SearchService extends LocalSearch {
@@ -33,7 +40,7 @@ export interface SearchService extends LocalSearch {
   setItems(kind: ItemKind, rows: readonly ItemRow[]): void;
   /** A trigger fired. Coalesced; extra calls are free. */
   refresh(): void;
-  /** Never rejects. */
+  /** Never rejects. Called during a sync, settles once the re-run it queues has. */
   syncNow(): Promise<void>;
   /** Forwarded for in-document search's `text/<md5>?v=`. */
   indexVersion(md5: string): number | null;
@@ -42,12 +49,19 @@ export interface SearchService extends LocalSearch {
   /** Exposed for `available` only. */
   readonly textPrefetch: TextPrefetch;
   attachLive(live: LiveChannel): () => void;
+  /**
+   * Follows the scope's changes (`subscribe`, as `ui/searchScope.ts` gives
+   * it): `stale` at once, since the index stops matching what the scope
+   * leaves out, then a sync now, not at the next trigger, to let go of or
+   * fetch what changed, and `stale` again once it has run.
+   */
+  attachScope(subscribe: (listener: () => void) => () => void, stale: () => void): () => void;
   /** Cancel the pending window and free the engine. */
   dispose(): void;
 }
 
 export function createSearchService(opts: SearchServiceOptions): SearchService {
-  const local = createIndexSearch({ sync: opts.sync, load: opts.load, listing: opts.listing });
+  const local = createIndexSearch({ sync: opts.sync, load: opts.load, listing: opts.listing, scope: opts.scope });
   const textPrefetch = opts.textPrefetch ?? createTextPrefetch();
   const coalesceMs = opts.coalesceMs ?? COALESCE_MS;
   let store = opts.store ?? null;
@@ -61,10 +75,16 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
   let running: Promise<void> | null = null;
   let queued = false;
 
+  /** Scope subscriptions (`attachScope`), ended by `dispose`. */
+  const detach = new Set<() => void>();
+
   function syncNow(): Promise<void> {
     if (running) {
       queued = true;
-      return running;
+      // Settles after the re-run this asks for, not the run already going:
+      // that one started before whatever this caller changed. The running
+      // run's `finally` starts the re-run before this handler runs.
+      return running.then(() => running ?? undefined);
     }
     const p = local
       .sync()
@@ -113,7 +133,27 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
       );
     },
 
+    attachScope(subscribe, stale) {
+      let attached = true;
+      const off = subscribe(() => {
+        stale();
+        // The sync may settle after the shell went (a switch in another tab,
+        // then this one leaves for /connect): no `stale` on a torn-down page.
+        void syncNow().then(() => {
+          if (attached) stale();
+        });
+      });
+      const detachThis = () => {
+        attached = false;
+        off();
+        detach.delete(detachThis);
+      };
+      detach.add(detachThis);
+      return detachThis;
+    },
+
     dispose() {
+      for (const off of [...detach]) off();
       if (timer !== null) clearTimeout(timer);
       timer = null;
       queued = false;

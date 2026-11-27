@@ -24,6 +24,7 @@ import type { LazyEngine } from "../../render/lazy";
 import type { Thumbnails } from "../../render/thumbnails";
 import type { PdfThumbs } from "../../render/pdfThumb";
 import type { SearchService } from "../../search/searchService";
+import type { SearchScopeSetting } from "../../ui/searchScope";
 import type { Exporter } from "../../export/exporter";
 import type { TodoInk } from "../todo/todoInk";
 import type { Masonry } from "../masonry";
@@ -95,6 +96,8 @@ export interface LibraryCtx {
   /** Promotes `data-src` on approach; null without `IntersectionObserver`. */
   imgLazy: IntersectionObserver | null;
   searchService: SearchService;
+  /** What this browser's search reads the text of; the account page sets it. */
+  searchScope: SearchScopeSetting;
   search: NoteSearchController;
   exporter: Exporter;
   /** Lassoed to-dos' handwriting, cut from their note pages (the To-Do page and search). */

@@ -4,7 +4,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSearchService } from "../../src/search/searchService";
 import type { LiveChannel } from "../../src/sync/types";
-import { fakeSync, spyLoader } from "./searchService.shared";
+import { fakeSync, spyLoader, LIVE } from "./searchService.shared";
+import type { ManifestRow } from "../../src/search/manifestCodec";
+import type { TextPrefetch } from "../../src/search/textPrefetch";
 
 describe("createSearchService", () => {
   it("coalesces a burst of triggers into one sync", async () => {
@@ -116,3 +118,97 @@ describe("createSearchService", () => {
   });
 });
 
+
+describe("createSearchService and the scope", () => {
+  it("follows a switch: the answer is stale at once, a sync runs now, and it is stale again after", async () => {
+    const { sync, state } = fakeSync();
+    const service = createSearchService({ sync, load: spyLoader().load });
+    let fire = () => {};
+    const stale = vi.fn();
+    service.attachScope((listener) => {
+      fire = listener;
+      return () => {};
+    }, stale);
+
+    fire();
+    expect(stale).toHaveBeenCalledTimes(1);
+    expect(state.syncs).toBe(1);
+    await vi.waitFor(() => expect(stale).toHaveBeenCalledTimes(2));
+    service.dispose();
+  });
+
+  it("after a switch during a sync, asks again only once the sync that runs under the new scope has", async () => {
+    const { sync, state } = fakeSync();
+    const service = createSearchService({ sync, load: spyLoader().load });
+    let fire = () => {};
+    const stale = vi.fn();
+    service.attachScope((listener) => {
+      fire = listener;
+      return () => {};
+    }, stale);
+
+    // A sync begun before the switch (the live channel's, say) is running.
+    state.hold = true;
+    const before = service.syncNow();
+    await Promise.resolve();
+    fire();
+    expect(stale).toHaveBeenCalledTimes(1);
+    // The re-run it queued is held in turn.
+    state.hold = true;
+    state.gate?.();
+    await before;
+    await vi.waitFor(() => expect(state.syncs).toBe(2));
+    expect(stale).toHaveBeenCalledTimes(1);
+    state.gate?.();
+    await vi.waitFor(() => expect(stale).toHaveBeenCalledTimes(2));
+    service.dispose();
+  });
+
+  it("asks nothing of a shell disposed while the sync a switch started is still running", async () => {
+    const { sync, state } = fakeSync();
+    const service = createSearchService({ sync, load: spyLoader().load });
+    let fire = () => {};
+    const stale = vi.fn();
+    service.attachScope((listener) => {
+      fire = listener;
+      return () => {};
+    }, stale);
+
+    // Another tab switched; this one leaves (for /connect, say) before the sync settles.
+    state.hold = true;
+    fire();
+    expect(stale).toHaveBeenCalledTimes(1);
+    service.dispose();
+    state.gate?.();
+    await vi.waitFor(() => expect(state.syncs).toBe(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stale).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops following the scope once disposed", () => {
+    const { sync, state } = fakeSync();
+    const service = createSearchService({ sync, load: spyLoader().load });
+    const listeners = new Set<() => void>();
+    const stale = vi.fn();
+    service.attachScope((listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }, stale);
+    service.dispose();
+    expect(listeners.size).toBe(0);
+    expect(stale).not.toHaveBeenCalled();
+    expect(state.syncs).toBe(0);
+  });
+
+  it("hands Find's text prefetch every row, whatever the scope: Find inside a document reads every kind", async () => {
+    const rows = LIVE.map((r, i) => (i === 0 ? r : { ...r, tier: "other" as const }));
+    const { sync } = fakeSync({ rows });
+    const seen: (readonly ManifestRow[])[] = [];
+    const textPrefetch = { prefetch: async (r: readonly ManifestRow[]) => (seen.push(r), { stored: 0 }) } as unknown as TextPrefetch;
+    const service = createSearchService({ sync, load: spyLoader().load, textPrefetch, scope: () => ({ documents: false }) });
+    await service.syncNow();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.map((r) => r.md5)).toEqual(rows.map((r) => r.md5));
+    service.dispose();
+  });
+});

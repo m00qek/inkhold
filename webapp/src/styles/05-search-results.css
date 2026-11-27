@@ -145,15 +145,20 @@
   outline-offset: 2px;
   border-radius: 2px;
 }
+/* The disclosures' labels, and a notice's link to a setting (`hits__link`):
+   one quiet underline, not the browser's blue, that firms up when opened or
+   hovered. */
 .coverage__more,
-.left-out__more {
+.left-out__more,
+.hits__link {
   color: var(--ink);
   text-decoration: underline;
   text-decoration-color: var(--line);
   text-underline-offset: 3px;
 }
 .coverage[open] .coverage__more,
-.left-out[open] .left-out__more {
+.left-out[open] .left-out__more,
+.hits__link:hover {
   text-decoration-color: currentColor;
 }
 .coverage__how {
@@ -205,6 +210,11 @@
 }
 .empty + .left-out summary {
   justify-content: center;
+}
+/* The scope's notice right under "No matches": pulled up the same way, so it
+   reads as that answer's. */
+.empty + .hits__notice {
+  margin-block-start: calc(-1 * (var(--sp-8) + var(--sp-4)));
 }
 .left-out__where {
   font-family: var(--font-mono);

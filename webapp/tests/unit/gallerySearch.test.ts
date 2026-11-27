@@ -413,3 +413,62 @@ describe("the search renderer's left-out sentence", () => {
     expect(h.paint("whale").querySelector<HTMLDetailsElement>("details.left-out")!.open).toBe(true);
   });
 });
+
+// The scope (`searchScope.ts`): wherever the answer lands, the person learns
+// that documents' text isn't searched here, and where to change it.
+describe("the search renderer's scope line", () => {
+  const LINE = "This browser doesn't search the text inside documents, only their names.";
+  const OFF = { documents: false };
+  const folder = (id: string, name: string): Entry => ({ kind: "folder", id, name }) as Entry;
+  /** The notice holding the line, if any. */
+  const notice = (g: HTMLElement) => [...g.querySelectorAll(".hits__notice")].find((n) => n.textContent?.startsWith(LINE)) ?? null;
+
+  it("is a notice over results, linking to the setting, and not a status announcement", () => {
+    const h = harness({ state: results("whale", [doc(7, [0])]), pending: 0, tree: [note("7", "Notes")], scope: OFF });
+    const n = notice(h.paint("whale"))!;
+    expect(n.textContent).toBe(`${LINE} Change this in your account settings`);
+    expect(n.querySelector("a")?.getAttribute("href")).toBe("#/account");
+    expect(n.getAttribute("role")).toBeNull();
+  });
+
+  it("is a notice when only folders matched", () => {
+    const h = harness({ state: results("whale", [], [], ["f:f1"]), pending: 0, tree: [folder("f1", "Whale")], scope: OFF });
+    expect(notice(h.paint("whale"))?.querySelector("a")?.getAttribute("href")).toBe("#/account");
+  });
+
+  it("is the same notice under 'No matches', whose sentence stays its own", () => {
+    const h = harness({ state: results("whale", []), pending: 0, scope: OFF });
+    const g = h.paint("whale");
+    expect(h.emptyBody()).not.toContain(LINE);
+    expect(h.emptyBody()).toContain("recognised");
+    const n = notice(g)!;
+    expect(n.previousElementSibling?.matches(".empty")).toBe(true);
+    expect(n.querySelector("a")?.getAttribute("href")).toBe("#/account");
+  });
+
+  it("under 'No matches', follows the left-out list", () => {
+    const h = harness({ state: { ...results("whale", []), leftOut: [8] } as SearchState, pending: 0, tree: [note("8", "Moby-Dick", "txt")], scope: OFF });
+    const g = h.paint("whale");
+    expect(notice(g)?.previousElementSibling?.matches("details.left-out")).toBe(true);
+  });
+
+  it("comes after the left-out line and its list", () => {
+    const h = harness({
+      state: { ...results("whale", [doc(7, [0])]), leftOut: [8] } as SearchState,
+      pending: 0,
+      tree: [note("7", "Notes"), note("8", "Moby-Dick", "txt")],
+      scope: OFF,
+    });
+    const g = h.paint("whale");
+    expect(notice(g)?.previousElementSibling?.matches("details.left-out")).toBe(true);
+  });
+
+  it("is not said when everything is searched", () => {
+    for (const scope of [undefined, { documents: true }]) {
+      const h = harness({ state: results("whale", []), pending: 0, ...(scope ? { scope } : {}) });
+      const g = h.paint("whale");
+      expect(h.emptyBody()).not.toContain(LINE);
+      expect(g.querySelector("a")).toBeNull();
+    }
+  });
+});
