@@ -137,6 +137,48 @@ describe("createSearchService and the scope", () => {
     service.dispose();
   });
 
+  it("after a switch during a sync, asks again only once the sync that runs under the new scope has", async () => {
+    const { sync, state } = fakeSync();
+    const service = createSearchService({ sync, load: spyLoader().load });
+    let fire = () => {};
+    const stale = vi.fn();
+    service.attachScope((listener) => {
+      fire = listener;
+      return () => {};
+    }, stale);
+
+    // A sync begun before the switch (the live channel's, say) is running.
+    state.hold = true;
+    const before = service.syncNow();
+    await Promise.resolve();
+    fire();
+    expect(stale).toHaveBeenCalledTimes(1);
+    // The re-run it queued is held in turn.
+    state.hold = true;
+    state.gate?.();
+    await before;
+    await vi.waitFor(() => expect(state.syncs).toBe(2));
+    expect(stale).toHaveBeenCalledTimes(1);
+    state.gate?.();
+    await vi.waitFor(() => expect(stale).toHaveBeenCalledTimes(2));
+    service.dispose();
+  });
+
+  it("stops following the scope once disposed", () => {
+    const { sync, state } = fakeSync();
+    const service = createSearchService({ sync, load: spyLoader().load });
+    const listeners = new Set<() => void>();
+    const stale = vi.fn();
+    service.attachScope((listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }, stale);
+    service.dispose();
+    expect(listeners.size).toBe(0);
+    expect(stale).not.toHaveBeenCalled();
+    expect(state.syncs).toBe(0);
+  });
+
   it("hands Find's text prefetch every row, whatever the scope: Find inside a document reads every kind", async () => {
     const rows = LIVE.map((r, i) => (i === 0 ? r : { ...r, tier: "other" as const }));
     const { sync } = fakeSync({ rows });

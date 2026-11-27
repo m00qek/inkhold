@@ -126,8 +126,8 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     folderCard: galleryCards.folderCard,
     emptyState: ctx.render.emptyState,
     indexPending: () => st.indexPending,
-    // Repaints only an open search, as the index frame does.
     searchScope: () => ctx.searchScope.get(),
+    // Repaints only an open search, as the index frame does.
     coverage: createSearchCoverage(ctx.api, () => {
       if (ctx.searchInView()) ctx.render.renderGallery();
     }),

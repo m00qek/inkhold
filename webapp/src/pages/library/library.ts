@@ -445,7 +445,9 @@ export function createAppShell(deps: AppDeps): AppShell {
       unsubscribe();
       // Otherwise one coalescing window and engine memory leak per sign-in cycle.
       detachSearchLive();
+      // Also ends its scope subscription; the setting stops hearing other tabs.
       ctx.searchService.dispose();
+      ctx.searchScope.dispose();
       // Otherwise these accumulate per sign-in cycle, each holding the shell alive.
       osThemeQuery?.removeEventListener("change", onOsThemeChange);
       window.removeEventListener("resize", onWindowResize);

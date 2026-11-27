@@ -40,7 +40,7 @@ export interface SearchService extends LocalSearch {
   setItems(kind: ItemKind, rows: readonly ItemRow[]): void;
   /** A trigger fired. Coalesced; extra calls are free. */
   refresh(): void;
-  /** Never rejects. */
+  /** Never rejects. Called during a sync, settles once the re-run it queues has. */
   syncNow(): Promise<void>;
   /** Forwarded for in-document search's `text/<md5>?v=`. */
   indexVersion(md5: string): number | null;
@@ -75,10 +75,16 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
   let running: Promise<void> | null = null;
   let queued = false;
 
+  /** Scope subscriptions (`attachScope`), ended by `dispose`. */
+  const detach = new Set<() => void>();
+
   function syncNow(): Promise<void> {
     if (running) {
       queued = true;
-      return running;
+      // Settles after the re-run this asks for, not the run already going:
+      // that one started before whatever this caller changed. The running
+      // run's `finally` starts the re-run before this handler runs.
+      return running.then(() => running ?? undefined);
     }
     const p = local
       .sync()
@@ -128,13 +134,20 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     },
 
     attachScope(subscribe, stale) {
-      return subscribe(() => {
+      const off = subscribe(() => {
         stale();
         void syncNow().then(stale);
       });
+      detach.add(off);
+      return () => {
+        off();
+        detach.delete(off);
+      };
     },
 
     dispose() {
+      for (const off of detach) off();
+      detach.clear();
       if (timer !== null) clearTimeout(timer);
       timer = null;
       queued = false;

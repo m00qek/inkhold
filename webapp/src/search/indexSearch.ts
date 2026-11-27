@@ -10,7 +10,7 @@ import { createSearchEngine, type SearchEngine } from "./searchEngine";
 import { createIndexSync, type IndexSync, type SyncOutcome } from "./indexSync";
 import type { Derivation, ManifestRow } from "./manifestCodec";
 import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
-import { FULL_SCOPE, inScope, type SearchScope } from "./searchScope";
+import { FULL_SCOPE, inScope, sameScope, type SearchScope } from "./searchScope";
 
 /** No cap: the scan is full anyway, and a capped document would undercount its matches. */
 const ALL_PAGES = 0xffffffff;
@@ -35,6 +35,18 @@ export interface LiveDocument {
   readonly md5: string;
   readonly fileId: number;
   readonly updatedAt: number;
+  /**
+   * The listing's word for the manifest's tier, for the scope offline: a
+   * `.note` or not. Not a tier, which would change the ranking's weights.
+   * Absent: searched whatever the scope.
+   */
+  readonly notebook?: boolean;
+}
+
+/** Whether a live row's text is searched under `scope`, from the manifest's tier or the listing's file type. */
+function searched(scope: SearchScope, row: LiveDocument | ManifestRow): boolean {
+  if ("tier" in row) return inScope(scope, row);
+  return row.notebook !== false || scope.documents;
 }
 
 export interface IndexSearch extends LocalSearch {
@@ -90,12 +102,20 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   let built = -1;
   /** Each built document's page count, for density; replaced with every build. */
   let pageCounts = new Map<string, number>();
+  /**
+   * The scope the engine was built under. A different one rebuilds it from
+   * the store, whether or not the sync that let terms go finished: one torn
+   * after its drop reports nothing let go, and the engine would go on
+   * holding, and matching once back on, terms the store no longer has.
+   */
+  let builtScope: SearchScope = FULL_SCOPE;
   /** The last rows of each kind, for an engine made later. */
   const itemRows = new Map<ItemKind, readonly ItemRow[]>();
   const hasItems = () => [...itemRows.values()].some((rows) => rows.length > 0);
 
   async function build(): Promise<SearchEngine> {
     const target = rows;
+    const scope = scopeOf();
     const mine = generation;
     // Dedupe again: `SearchIndex.build` throws on a repeated md5.
     const stored = newestPerDocument(await sync.documents());
@@ -125,6 +145,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
     }
     index = engine;
     built = target;
+    builtScope = scope;
     pageCounts = new Map(stored.map((d) => [d.md5, d.pageCount]));
     return engine;
   }
@@ -136,7 +157,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   }
 
   function engine(): Promise<SearchEngine> {
-    if (index && built === rows) return Promise.resolve(index);
+    if (index && built === rows && sameScope(builtScope, scopeOf())) return Promise.resolve(index);
     // A sync landing mid-build is picked up by the next search.
     if (building) return building;
     const p = build().finally(() => {
@@ -226,8 +247,8 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
  * Group by document, intersect with the live set, rank. Pages go out
  * ascending: a row deep-links to the first matching page in the document.
  * A row the scope leaves out matches nothing at once, before the sync that
- * lets its terms go has run; offline, the listing has no tiers, but the last
- * sync let them go.
+ * lets its terms go has run, and offline, where the listing says which rows
+ * are notebooks.
  */
 function group(
   result: QueryResult,
@@ -238,7 +259,7 @@ function group(
   const pages = new Map<string, number[]>();
   for (const hit of result.hits) {
     const row = live.get(hit.md5);
-    if (!row || ("tier" in row && !inScope(scope, row))) continue;
+    if (!row || !searched(scope, row)) continue;
     const seen = pages.get(hit.md5);
     if (seen) seen.push(hit.page);
     else pages.set(hit.md5, [hit.page]);

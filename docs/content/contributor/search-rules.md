@@ -146,9 +146,11 @@ flowchart TD
   isn't `note`, annotated ones included, only while **Search inside
   documents** is on. The search layer takes the scope as an option and reads
   no storage. Off, a sync neither asks for nor keeps their terms, and lets go
-  of what it held, so the index rebuilds; they are never planned, so never
-  left out. A query drops their hits at once, before that sync runs, and
-  the left-out list drops their ids. On again, the next sync asks for them
+  of what it held; they are never planned, so never left out. The index
+  rebuilds whenever the scope differs from the one it was built under, so a
+  sync torn after its drop leaves no stale terms behind. A query drops their
+  hits at once, before that sync runs, and offline by the listing's file
+  type; the left-out list drops their ids. On again, the next sync asks for them
   within the budget, using the sizes remembered when they were let go. A
   switch starts that sync at once, in every tab (the `storage` event). The
   results then say documents' text isn't searched, with a link to the

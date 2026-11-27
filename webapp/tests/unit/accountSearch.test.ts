@@ -29,6 +29,9 @@ describe("createSearchScopeSection", () => {
     expect(label.querySelector("span > span")?.textContent).toBe("Search inside documents");
     expect(label.querySelector("small")?.textContent).toBe("PDFs, XPS documents and text files");
     expect(hint.textContent).toBe(SEARCH_SCOPE_HINT);
+    // Read with the box: what turning it off costs.
+    expect(box.getAttribute("aria-describedby")).toBe(hint.id);
+    expect(hint.id).not.toBe("");
     expect(SEARCH_SCOPE_HINT).toContain("found by name");
     expect(SEARCH_SCOPE_HINT).toContain("Find");
   });

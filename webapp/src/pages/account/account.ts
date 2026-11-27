@@ -1,8 +1,8 @@
 // The signed-in user's own account page: Appearance, Search on this browser,
 // Signing in, Devices, Storage, Versions (search and the last three in their
-// own modules). Each section loads
-// and fails on its own and shows loading distinctly from known-empty. Quota and
-// self-delete are deliberately absent (the admin decides those).
+// own modules). Each section loads and fails on its own and shows loading
+// distinctly from known-empty. Quota and self-delete are deliberately absent
+// (the admin decides those).
 
 import { folderHref } from "../../router";
 import { libraryTrail } from "../../ui/crumbs";

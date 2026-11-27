@@ -30,7 +30,7 @@ export function inScope(scope: SearchScope, row: Pick<ManifestRow, "tier">): boo
   return kind === null || scope[kind];
 }
 
-/** Whether `scope` leaves any kind out: the results then say so. */
-export function narrowed(scope: SearchScope): boolean {
-  return SCOPE_KINDS.some((kind) => !scope[kind]);
+/** Pure. Whether two scopes search the same kinds. */
+export function sameScope(a: SearchScope, b: SearchScope): boolean {
+  return SCOPE_KINDS.every((kind) => a[kind] === b[kind]);
 }

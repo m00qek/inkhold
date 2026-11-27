@@ -5,7 +5,7 @@
 // default, everything searched. Another tab's change arrives through the
 // `storage` event; this tab's own through `set`, which the event never reports.
 
-import { FULL_SCOPE, SCOPE_KINDS, type ScopeKind, type SearchScope } from "../search/searchScope";
+import { FULL_SCOPE, SCOPE_KINDS, sameScope, type ScopeKind, type SearchScope } from "../search/searchScope";
 import { SEARCH_SCOPE_KEY, readLocal, writeLocal } from "./storage";
 
 /** Pure. A stored value, as written by `formatScope`; each unreadable kind takes its default. */
@@ -37,13 +37,15 @@ export interface SearchScopeSetting {
   set(kind: ScopeKind, on: boolean): void;
   /** Called with the new scope on each change, from this tab or another. Returns the unsubscribe. */
   subscribe(listener: (scope: SearchScope) => void): () => void;
+  /** Stops listening to other tabs: the shell's teardown, or each sign-in cycle adds one. */
+  dispose(): void;
 }
 
 export interface SearchScopeSeams {
   read(key: string): string | null;
   write(key: string, value: string): void;
   /** Where another tab's `storage` events arrive. */
-  events: Pick<EventTarget, "addEventListener">;
+  events: Pick<EventTarget, "addEventListener" | "removeEventListener">;
 }
 
 const browserSeams = (): SearchScopeSeams => ({ read: readLocal, write: writeLocal, events: window });
@@ -53,16 +55,17 @@ export function createSearchScopeSetting(seams: SearchScopeSeams = browserSeams(
   const listeners = new Set<(scope: SearchScope) => void>();
 
   function changeTo(next: SearchScope): void {
-    if (SCOPE_KINDS.every((kind) => next[kind] === scope[kind])) return;
+    if (sameScope(next, scope)) return;
     scope = next;
     for (const listener of listeners) listener(scope);
   }
 
-  seams.events.addEventListener("storage", (e) => {
+  const onStorage = (e: Event) => {
     const key = (e as StorageEvent).key;
     // A null key is `localStorage.clear()` in another tab: back to the default.
     if (key === SEARCH_SCOPE_KEY || key === null) changeTo(parseScope(seams.read(SEARCH_SCOPE_KEY)));
-  });
+  };
+  seams.events.addEventListener("storage", onStorage);
 
   return {
     get: () => scope,
@@ -74,6 +77,10 @@ export function createSearchScopeSetting(seams: SearchScopeSeams = browserSeams(
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    dispose() {
+      seams.events.removeEventListener("storage", onStorage);
+      listeners.clear();
     },
   };
 }

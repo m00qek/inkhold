@@ -68,7 +68,7 @@ export function installLibraryEngines(ctx: LibraryCtx): void {
         cached.entries.flatMap((e) =>
           e.kind === "note" && e.fileHash
             // The numeric `fileId` is canonical; `gallerySearch` converts back.
-            ? [{ md5: e.fileHash, fileId: Number(e.id), updatedAt: e.updatedAt }]
+            ? [{ md5: e.fileHash, fileId: Number(e.id), updatedAt: e.updatedAt, notebook: e.fileType.trim().toLowerCase() === "note" }]
             : [],
         ),
       ),

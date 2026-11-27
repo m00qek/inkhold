@@ -3,7 +3,7 @@
 // (`ui/searchScope.ts`).
 
 import { describe, expect, it, vi } from "vitest";
-import { FULL_SCOPE, inScope, narrowed, scopeKindOf } from "../../src/search/searchScope";
+import { FULL_SCOPE, inScope, sameScope, scopeKindOf } from "../../src/search/searchScope";
 import { createSearchScopeSetting, formatScope, parseScope, type SearchScopeSeams } from "../../src/ui/searchScope";
 import { SEARCH_SCOPE_KEY, readLocal, writeLocal } from "../../src/ui/storage";
 
@@ -19,9 +19,9 @@ describe("the scope", () => {
     expect(inScope(FULL_SCOPE, { tier: "other" })).toBe(true);
   });
 
-  it("is narrowed only when a kind is off", () => {
-    expect(narrowed(FULL_SCOPE)).toBe(false);
-    expect(narrowed({ documents: false })).toBe(true);
+  it("compares kind by kind", () => {
+    expect(sameScope(FULL_SCOPE, { documents: true })).toBe(true);
+    expect(sameScope(FULL_SCOPE, { documents: false })).toBe(false);
   });
 });
 
@@ -95,6 +95,17 @@ describe("createSearchScopeSetting", () => {
     t.otherTab(null);
     expect(setting.get()).toEqual(FULL_SCOPE);
     expect(heard).toHaveBeenCalledTimes(2);
+  });
+
+  it("hears no other tab once disposed, and tells no listener", () => {
+    const t = seams();
+    const setting = createSearchScopeSetting(t.seams);
+    const heard = vi.fn();
+    setting.subscribe(heard);
+    setting.dispose();
+    t.otherTab(SEARCH_SCOPE_KEY, '{"documents":false}');
+    expect(setting.get()).toEqual(FULL_SCOPE);
+    expect(heard).not.toHaveBeenCalled();
   });
 
   it("where storage is unavailable, is the default and still holds a change for this visit", () => {

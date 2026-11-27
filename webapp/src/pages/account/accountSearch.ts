@@ -5,7 +5,7 @@
 // its own state, unlike a toggle button.
 
 import { el } from "../../ui/dom";
-import type { ScopeKind } from "../../search/searchScope";
+import { SCOPE_KINDS, type ScopeKind } from "../../search/searchScope";
 import type { SearchScopeSetting } from "../../ui/searchScope";
 
 /** Each kind's switch: its label and what it covers. */
@@ -17,6 +17,9 @@ const SWITCHES: Readonly<Record<ScopeKind, { label: string; covers: string }>> =
 export const SEARCH_SCOPE_HINT =
   "Off, documents are still found by name, and by Find inside a document you open. The room their text took goes to your notebooks.";
 
+/** One account page at a time, so one id. */
+const HINT_ID = "acct-search-scope-hint";
+
 export interface SearchScopeSection {
   /** The rows: the notebooks' line, then a switch per kind. */
   readonly body: HTMLElement;
@@ -27,8 +30,9 @@ export interface SearchScopeSection {
 
 export function createSearchScopeSection(setting: Pick<SearchScopeSetting, "get" | "set" | "subscribe">): SearchScopeSection {
   const boxes = new Map<ScopeKind, HTMLInputElement>();
-  const switches = (Object.keys(SWITCHES) as ScopeKind[]).map((kind) => {
-    const box = el("input", { type: "checkbox", class: "acct-check__box" });
+  const switches = SCOPE_KINDS.map((kind) => {
+    // The hint says what off costs: read with the box, not only after it.
+    const box = el("input", { type: "checkbox", class: "acct-check__box", "aria-describedby": HINT_ID });
     box.addEventListener("change", () => setting.set(kind, box.checked));
     boxes.set(kind, box);
     return el(
@@ -58,6 +62,6 @@ export function createSearchScopeSection(setting: Pick<SearchScopeSetting, "get"
     ),
     ...switches,
   );
-  const hint = el("p", { class: "acct-hint", text: SEARCH_SCOPE_HINT });
+  const hint = el("p", { class: "acct-hint", id: HINT_ID, text: SEARCH_SCOPE_HINT });
   return { body, hint, dispose: unsubscribe };
 }

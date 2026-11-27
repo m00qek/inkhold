@@ -285,6 +285,35 @@ describe("createIndexSearch with a scope", () => {
     expect((await local.search("reuniao")).documents.map((d) => d.md5).sort()).toEqual([ALFA, BRAVO, CHARLIE].sort());
   });
 
+  it("offline, before any sync, drops the documents the listing says aren't notebooks", async () => {
+    const { sync } = fakeSync();
+    const listing = () => [
+      { md5: ALFA, fileId: 10, updatedAt: 1000, notebook: true },
+      { md5: BRAVO, fileId: 20, updatedAt: 5000, notebook: false },
+      { md5: CHARLIE, fileId: 30, updatedAt: 9000 },
+    ];
+    const local = createIndexSearch({ sync, load: spyLoader().load, listing, scope: () => ({ documents: false }) });
+    // Never synced: the listing stands in for the manifest; one it can't tell is searched.
+    expect((await local.search("reuniao")).documents.map((d) => d.md5).sort()).toEqual([ALFA, CHARLIE].sort());
+  });
+
+  it("rebuilds from the store when the scope changes, even when no sync reported letting go", async () => {
+    let scope = { documents: true };
+    const rows = [row(ALFA, 10, 1000), row(BRAVO, 20, 5000), tiered("other")(row(CHARLIE, 30, 9000))];
+    const { sync, state } = fakeSync({ rows });
+    const local = createIndexSearch({ sync, load: spyLoader().load, scope: () => scope });
+    await local.sync();
+    expect((await local.search("reuniao")).documents.map((d) => d.md5)).toContain(CHARLIE);
+
+    // Switched off, the sync dropped CHARLIE's terms and then tore: it reported nothing.
+    state.docs = DOCS.filter((d) => d.md5 !== CHARLIE);
+    scope = { documents: false };
+    await local.search("reuniao");
+    // Back on before any sync: the store has no CHARLIE, so neither may the answer.
+    scope = { documents: true };
+    expect((await local.search("reuniao")).documents.map((d) => d.md5)).not.toContain(CHARLIE);
+  });
+
   it("never says a document the scope leaves out was left out by the budget", async () => {
     let scope = { documents: true };
     const rows = [row(ALFA, 10, 1000), row(BRAVO, 20, 5000), tiered("other")(row(CHARLIE, 30, 9000))];
