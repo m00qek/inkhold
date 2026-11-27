@@ -161,8 +161,11 @@ function fakeSync(rows: readonly ManifestRow[]): IndexSync {
         etag: "etag-1",
         requested: STORED.length,
         received: STORED.length,
+        stored: 0,
         skipped: 0,
         dropped: 0,
+        leftOut: [],
+        letGo: 0,
         persisted: true,
       };
     },

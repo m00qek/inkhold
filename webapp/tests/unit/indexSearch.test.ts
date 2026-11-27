@@ -225,11 +225,11 @@ describe("createIndexSearch", () => {
     state.docs = DOCS.filter((d) => d.md5 !== CHARLIE);
     state.received = 0;
     state.letGo = 1;
-    state.leftOut = 1;
+    state.leftOut = [33];
     await local.sync();
     const after = await local.search("reuniao");
     expect(after.documents.map((d) => d.md5)).not.toContain(CHARLIE);
-    expect(after.leftOut).toBe(1);
+    expect(after.leftOut).toEqual([33]);
   });
 
   it("answers a session that never synced, from the cached listing alone", async () => {

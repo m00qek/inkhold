@@ -46,11 +46,12 @@ export interface LocalResults {
    */
   readonly unchecked?: number;
   /**
-   * Documents whose text doesn't fit this browser's search (`termsBudget.ts`):
-   * found only by name and by Find in the document. Counted in files, so two
-   * copies of one count twice, as the library lists them. Absent means none.
+   * The file ids whose text doesn't fit this browser's search (`termsBudget.ts`),
+   * in keep order: found only by name and by Find in the document. Ids, not
+   * md5s, so two copies of one are two entries, as the library lists them.
+   * The app names them from its listing. Absent means none.
    */
-  readonly leftOut?: number;
+  readonly leftOut?: readonly number[];
 }
 
 /** Matching item keys by kind. */

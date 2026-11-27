@@ -43,8 +43,11 @@ export interface SyncOutcome {
   /** Asked for and not delivered: normal, the server skips missing files. */
   readonly skipped: number;
   readonly dropped: number;
-  /** Files whose terms don't fit this browser's budget (`termsBudget.ts`); copies count each. */
-  readonly leftOut: number;
+  /**
+   * The file ids whose terms don't fit this browser's budget (`termsBudget.ts`),
+   * in keep order. Each copy of a file is its own id: it has its own name and place.
+   */
+  readonly leftOut: readonly number[];
   /** Held terms let go this sync to make room for documents kept first. */
   readonly letGo: number;
   /** False when IndexedDB degraded to a no-op: the work happened, nothing kept it. */
@@ -335,7 +338,7 @@ export function createIndexSync(opts: IndexSyncOptions = {}): IndexSync {
         stored,
         skipped: want.length - received,
         dropped: diff.stale.length,
-        leftOut: keeper.plan().leftOut.length,
+        leftOut: keeper.plan().leftOut.map((position) => manifest.rows[position]!.fileId),
         letGo: keeper.letGo(),
         persisted: store.available,
       };

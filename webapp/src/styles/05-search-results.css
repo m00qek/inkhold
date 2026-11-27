@@ -112,15 +112,21 @@
 
 
 /* How much handwriting search can find (`searchCoverage.ts`): a quiet line
-   under the results, opening to the notes it can't read and why. */
-.coverage {
+   under the results, opening to the notes it can't read and why. The
+   documents search holds no text for (`searchLeftOut.ts`) open the same way,
+   under the notice that counts them. */
+.coverage,
+.left-out {
   grid-column: 1 / -1;
   max-width: 760px;
-  margin: var(--sp-6) 2px var(--sp-4);
   font-size: var(--fs-caption);
   color: var(--ink-soft);
 }
-.coverage summary {
+.coverage {
+  margin: var(--sp-6) 2px var(--sp-4);
+}
+.coverage summary,
+.left-out summary {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-1) var(--sp-3);
@@ -129,41 +135,48 @@
   align-items: center;
   min-block-size: var(--hit-target-min);
 }
-.coverage summary::-webkit-details-marker {
+.coverage summary::-webkit-details-marker,
+.left-out summary::-webkit-details-marker {
   display: none;
 }
-.coverage summary:focus-visible {
+.coverage summary:focus-visible,
+.left-out summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: 2px;
 }
-.coverage__more {
+.coverage__more,
+.left-out__more {
   color: var(--ink);
   text-decoration: underline;
   text-decoration-color: var(--line);
   text-underline-offset: 3px;
 }
-.coverage[open] .coverage__more {
+.coverage[open] .coverage__more,
+.left-out[open] .left-out__more {
   text-decoration-color: currentColor;
 }
 .coverage__how {
   margin: var(--sp-2) 0;
   max-width: 64ch;
 }
-.coverage__list {
+.coverage__list,
+.left-out__list {
   margin: 0;
   padding: 0;
   list-style: none;
   border-top: 1px solid var(--row-rule);
 }
-.coverage__list li {
+.coverage__list li,
+.left-out__list li {
   display: flex;
   flex-wrap: wrap;
   gap: 2px var(--sp-3);
   padding: var(--sp-2) 0;
   border-bottom: 1px solid var(--row-rule);
 }
-.coverage__name {
+.coverage__name,
+.left-out__name {
   display: inline-flex;
   align-items: center;
   min-block-size: var(--hit-target-min);
@@ -171,9 +184,31 @@
   font-size: var(--fs-body);
   text-decoration: none;
 }
-.coverage__name:hover {
+.coverage__name:hover,
+.left-out__name:hover {
   text-decoration: underline;
 }
 .coverage__why {
   font-family: var(--font-mono);
+}
+
+/* Pulled up to the notice above it, which ends in a margin of its own. */
+.left-out {
+  margin: calc(-1 * var(--sp-2)) 2px var(--sp-4);
+}
+/* Under "No matches" its sentence is centred in the empty state: centred
+   beneath it, pulled up into the state's bottom padding, so it reads as that
+   sentence's, not as the coverage line's below. The names stay start-aligned. */
+.empty + .left-out {
+  margin: calc(-1 * (var(--sp-8) + var(--sp-4))) auto var(--sp-6);
+  text-align: start;
+}
+.empty + .left-out summary {
+  justify-content: center;
+}
+.left-out__where {
+  font-family: var(--font-mono);
+}
+.left-out__rest {
+  margin: var(--sp-2) 0 0;
 }

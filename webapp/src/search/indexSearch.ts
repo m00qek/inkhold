@@ -67,8 +67,8 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   /** Beside `live` because `live` may be the listing, which has no versions. */
   let versions = new Map<string, number | null>();
   let derivations = new Map<string, Derivation>();
-  /** Documents the last sync found no room for (`termsBudget.ts`). */
-  let leftOut = 0;
+  /** The file ids the last sync found no room for (`termsBudget.ts`). */
+  let leftOut: readonly number[] = [];
 
   let index: SearchEngine | null = null;
   /** The engine of a first build still running: item rows go to it too, queued after the build. */
@@ -200,7 +200,7 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
         }
         throw err;
       }
-      return { query, ...group(answer, live ?? offlineLive(), pageCounts), ...(leftOut > 0 ? { leftOut } : {}) };
+      return { query, ...group(answer, live ?? offlineLive(), pageCounts), ...(leftOut.length > 0 ? { leftOut } : {}) };
     },
   };
 }

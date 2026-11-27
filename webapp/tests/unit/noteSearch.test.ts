@@ -87,12 +87,12 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("createNoteSearch", () => {
-  it("passes on how many documents the browser's search left out, and nothing when none were", async () => {
+  it("passes on which documents the browser's search left out, and nothing when none were", async () => {
     const h = harness();
     h.controller.setQuery("whale");
     await vi.advanceTimersByTimeAsync(DEBOUNCE);
-    await h.settle(0, [doc(1, [0])], [], { leftOut: 4 });
-    expect(h.last()).toMatchObject({ kind: "results", leftOut: 4 });
+    await h.settle(0, [doc(1, [0])], [], { leftOut: [4, 5] });
+    expect(h.last()).toMatchObject({ kind: "results", leftOut: [4, 5] });
 
     h.controller.setQuery("whales");
     await vi.advanceTimersByTimeAsync(DEBOUNCE);

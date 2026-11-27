@@ -67,9 +67,14 @@ describe("planKeep", () => {
     expect(plan.leftOut).toEqual([]);
   });
 
-  it("lists what is left out in manifest order", () => {
-    const rows = [row("a", "other", 1), row("b", "other", 3), row("c", "other", 2)];
-    expect(planKeep(rows, sizes({ a: 10, b: 10, c: 10 }), 0).leftOut).toEqual([0, 1, 2]);
+  it("lists what is left out in keep order, the most wanted first, as search names them", () => {
+    const rows = [row("a", "other", 1), row("b", "other", 3), row("note", "note", 0), row("c", "other", 2)];
+    expect(planKeep(rows, sizes({ a: 10, b: 10, note: 10, c: 10 }), 0).leftOut).toEqual([2, 1, 3, 0]);
+  });
+
+  it("lists each copy of a file left out: one record, but each has its own place", () => {
+    const rows = [row("same", "other", 9), row("same", "other", 8), row("small", "other", 7)];
+    expect(planKeep(rows, sizes({ same: 60, small: 10 }), 50).leftOut).toEqual([0, 1]);
   });
 });
 

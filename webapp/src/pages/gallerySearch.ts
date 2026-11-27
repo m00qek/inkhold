@@ -9,11 +9,15 @@ import { answerFor, coverageLine, expansionNotice, leftOutLine, pendingLine, res
 import { crumbPath } from "./rail/railPlaces";
 import { holdsInside, insideOf } from "../search/match";
 import { namedIds } from "./nameRows";
+import { createSearchLeftOut } from "./searchLeftOut";
 import type { SearchCoverage } from "./searchCoverage";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
 import type { Expansion } from "../search/localSearch";
 import type { Folder, Id, NoteSummary } from "../core/types";
+
+/** Every note in the cached tree with its folder path, by id. */
+type CachedNotes = Map<Id, { note: NoteSummary; folderPath: string | null }>;
 
 function plural(n: number, one: string): string {
   return `${n} ${n === 1 ? one : `${one}s`}`;
@@ -70,10 +74,11 @@ export interface GallerySearch {
 
 export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   const { gallery } = ctx;
+  const leftOutNames = createSearchLeftOut();
 
   /** Every note in the cached (whole) tree with its folder, deduplicated. */
-  function allCachedNotes(): Map<Id, { note: NoteSummary; folderPath: string | null }> {
-    const seen = new Map<Id, { note: NoteSummary; folderPath: string | null }>();
+  function allCachedNotes(): CachedNotes {
+    const seen: CachedNotes = new Map();
     for (const cached of ctx.folders.values()) {
       const names = crumbPath(cached.path).map((f) => ctx.labelFor(f));
       const folderPath = names.length === 0 ? null : names.join(" / ");
@@ -115,9 +120,8 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   * drops hits the tree doesn't name: the local index may be a superset of the
   * live library. Name matches first; otherwise the engine's order is kept.
   */
-  function searchResults(names: NameHits): SearchResult[] {
+  function searchResults(names: NameHits, cached: CachedNotes): SearchResult[] {
     const searchState = ctx.getSearchState();
-    const cached = allCachedNotes();
     const byId = new Map<Id, SearchResult>();
 
     if (searchState.kind === "results") {
@@ -149,10 +153,18 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /** The coverage block, naming notes from the cached tree. */
-  function coverageBlock(): HTMLElement | null {
+  function coverageBlock(notes?: CachedNotes): HTMLElement | null {
     if (!ctx.coverage) return null;
-    const notes = allCachedNotes();
+    notes ??= allCachedNotes();
     return ctx.coverage.block((id) => notes.get(id)?.note.name ?? null);
+  }
+
+  /** The documents search holds no text for, named from the cached tree as the hits are. */
+  function leftOutBlock(q: string, ids: readonly number[], notes: CachedNotes): HTMLElement | null {
+    return leftOutNames.block(q, ids, (id) => {
+      const known = notes.get(id);
+      return known ? { name: known.note.name, folderPath: known.folderPath } : null;
+    });
   }
 
   /** Folders named like the query, by the label the rail shows; each once. */
@@ -198,7 +210,10 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   function renderSearch(q: string): void {
     const searchState = ctx.getSearchState();
     const names = nameHits(q);
-    const results = searchResults(names);
+    // Walked once per paint: the hits, the coverage block and the left-out
+    // names all read it, and a big library is when the names show.
+    const cached = allCachedNotes();
+    const results = searchResults(names, cached);
     const folders = folderResults(names);
     const pages = results.reduce((n, r) => n + r.pages.length, 0);
 
@@ -218,11 +233,25 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       );
     }
 
-    const leftOut = leftOutLine(searchState.kind === "results" ? (searchState.leftOut ?? 0) : 0);
+    // The ids are the last sync's. Once the walk has landed, one the tree
+    // doesn't name has left the library since (deleted, say): no longer left
+    // out of anything, so neither counted nor listed. Before, it may just not
+    // be reached yet, and the list says so.
+    const allIds = searchState.kind === "results" ? (searchState.leftOut ?? []) : [];
+    const leftOutIds = ctx.treeLoaded() ? allIds.filter((id) => cached.has(String(id))) : allIds;
+    const leftOut = leftOutLine(leftOutIds.length);
+    // The names go under the line, outside its status region: an
+    // announcement holds only the message.
+    const appendLeftOut = () => {
+      if (!leftOut) return;
+      gallery.append(el("p", { class: "hits__notice", role: "status", text: leftOut }));
+      const list = leftOutBlock(q, leftOutIds, cached);
+      if (list) gallery.append(list);
+    };
     if (results.length > 0) {
       const grow = resultsMayGrowLine(pending);
       if (grow) gallery.append(el("p", { class: "hits__notice", role: "status", text: grow }));
-      if (leftOut) gallery.append(el("p", { class: "hits__notice", role: "status", text: leftOut }));
+      appendLeftOut();
     }
 
     // Folders first: a name typed to get somewhere. Their own group, like the to-dos'.
@@ -233,8 +262,8 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
 
     if (results.length === 0 && (more || folders.length > 0)) {
       if (more) gallery.append(more);
-      if (leftOut) gallery.append(el("p", { class: "hits__notice", role: "status", text: leftOut }));
-      const cov = coverageBlock();
+      appendLeftOut();
+      const cov = coverageBlock(cached);
       if (cov) gallery.append(cov);
       return;
     }
@@ -251,9 +280,12 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       } else {
         const still = pendingLine(pending);
         // The coverage block says the rest, with numbers, once it has them.
-        const cov = coverageBlock();
+        const cov = coverageBlock(cached);
         const why = cov ? "" : coverageLine();
         gallery.append(ctx.emptyState(`No matches for “${q}”`, [still, leftOut, why].filter(Boolean).join(" ")));
+        // The empty state's body is text only: the names go under it.
+        const list = leftOutBlock(q, leftOutIds, cached);
+        if (list) gallery.append(list);
         if (cov) gallery.append(cov);
       }
       return;
@@ -275,7 +307,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     if (split > 0) gallery.append(cardList(...cards.slice(0, split)));
     if (more) gallery.append(more);
     if (split < cards.length) gallery.append(cardList(...cards.slice(split)));
-    const cov = coverageBlock();
+    const cov = coverageBlock(cached);
     if (cov) gallery.append(cov);
   }
 

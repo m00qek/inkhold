@@ -3,6 +3,7 @@ import { signedIn, contrastRatio, cardButton, freezeMotion, paintedColours, rail
 import { mockDocText, noteTextRecord, type TextRecord } from "./helpers/docText";
 import { mockSearchIndex, noteTermsDocument, type FixtureManifestRow } from "./helpers/searchIndex";
 import { fakeFileHash } from "../../src/api/fake";
+import { weigh } from "../../src/cache/termsStore";
 
 // Specs that want the transcript half mock it with `helpers/searchIndex.ts`; the rest
 // exercise the name half, since the fake ships no index and answers zero documents.
@@ -407,6 +408,40 @@ test.describe("universal search", () => {
     await expect(page).toHaveURL(/#\/note\/121\/page\/2\?q=endor$/);
     await expect(page.getByRole("textbox", { name: "Find in this note" })).toHaveValue("endor");
     await expect(page.locator(".findbar__count")).toHaveText("1 of 2", { timeout: 20_000 });
+  });
+
+  // The budget is 80% of the quota the browser reports (`budgetForQuota`): a
+  // quota that fits the newest notebook's terms alone leaves the other two out.
+  test("names the documents the budget left out, under the line that counts them, and opens one", async ({ page }) => {
+    const first = INDEX_DOCS[fakeFileHash("121")]!;
+    const quota = Math.ceil(weigh(first) / 0.8) + 1;
+    await page.addInitScript((q) => {
+      navigator.storage.estimate = () => Promise.resolve({ quota: q, usage: 0 });
+    }, quota);
+    await signedIn(page);
+    await mockSearchIndex(page, { rows: INDEX_ROWS, documents: INDEX_DOCS });
+    await page.goto("/");
+    await railSettled(page);
+
+    await searchBox(page).fill("Aurora");
+    await expect(results(page).filter({ hasText: "Project Aurora — kickoff" })).toHaveCount(1, { timeout: 20_000 });
+    await expect(page.locator(".hits__notice")).toHaveText(
+      "This browser's search has no room for the text of 2 documents: only their names are searched. Open one and use Find to search inside it.",
+      { timeout: 20_000 },
+    );
+
+    const names = page.locator("details.left-out");
+    await expect(names).toHaveCount(1);
+    await expect(names).not.toHaveAttribute("open");
+    // Closed, its names are out of the accessibility tree.
+    const links = names.getByRole("link");
+    await expect(links).toHaveCount(0);
+    await names.getByText("Show them").click();
+    // Keep order: notebooks, most recently changed first.
+    await expect(links).toHaveText(["Attention Is All You Need", "Unsorted — meeting doodles"]);
+
+    await links.first().click();
+    await expect(page).toHaveURL(/#\/note\/141$/);
   });
 
   test("a result row is reachable and openable by keyboard", async ({ page }) => {
