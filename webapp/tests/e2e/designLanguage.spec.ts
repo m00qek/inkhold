@@ -193,6 +193,13 @@ test.describe("every checkbox", () => {
           const box = await b.open(page);
           await expect(box).toBeVisible();
           await expect(box).toHaveAccessibleName(/\S/);
+          // Every id it names exists: its label's `for`, its description.
+          const dangling = await box.evaluate((el) =>
+            [el.id ? document.querySelector(`label[for="${el.id}"]`)?.getAttribute("for") : null, ...(el.getAttribute("aria-describedby") ?? "").split(/\s+/)]
+              .filter((id): id is string => !!id)
+              .filter((id) => !document.getElementById(id)),
+          );
+          expect(dangling).toEqual([]);
           const r = (await box.boundingBox())!;
           expect(Math.min(r.width, r.height)).toBeGreaterThanOrEqual(v.min);
           // Ink, never the accent: compared with a probe painted in `--ink` beside it.

@@ -87,6 +87,9 @@ function structure(opts: CheckOptions): Record<string, string[]> {
     if (shown(e) && !e.closest("[role=menu]")) add("navigates-by-button", e);
   }
 
+  // One checkbox (`.check`, design-language.md): a new one joins it, or this says so.
+  for (const e of document.querySelectorAll("input[type=checkbox]")) if (!e.classList.contains("check__box")) add("checkbox-not-shared", e);
+
   // Collections are lists.
   for (const e of document.querySelectorAll(".card,.todo-hit,.coverage__list > *")) if (shown(e) && !e.closest("li")) add("collection-not-list", e);
   for (const l of document.querySelectorAll("li")) if (!["UL", "OL", "MENU"].includes(l.parentElement?.tagName ?? "")) add("li-outside-list", l);

@@ -106,7 +106,8 @@ same on every screen.
 - **Checkboxes** are one control everywhere (`.check`, in
   `02-app-shell-rail.css`): a native box inside its label, filled with ink
   when on, never the accent, and at least the target minimum. A page lays the
-  row out and nothing else; `designLanguage.spec.ts` measures every one.
+  row out and nothing else. `semantics.spec.ts` flags any checkbox not on the
+  shared box, and `designLanguage.spec.ts` measures each one the app has.
 - **Contrast** is 4.5:1 for all text in both themes; the soft and faint greys
   are tuned to it on every surface they sit on.
 
