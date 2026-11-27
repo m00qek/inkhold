@@ -103,6 +103,10 @@ same on every screen.
   differ by a shade of grey. Never the accent: that is the focus ring, and a
   focused button must not look switched on. A menu trigger's open state
   (`aria-expanded`) keeps the quieter outline.
+- **Checkboxes** are one control everywhere (`.check`, in
+  `02-app-shell-rail.css`): a native box inside its label, filled with ink
+  when on, never the accent, and at least the target minimum. A page lays the
+  row out and nothing else; `designLanguage.spec.ts` measures every one.
 - **Contrast** is 4.5:1 for all text in both themes; the soft and faint greys
   are tuned to it on every surface they sit on.
 

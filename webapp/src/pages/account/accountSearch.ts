@@ -37,12 +37,12 @@ export function createSearchScopeSection(setting: Pick<SearchScopeSetting, "get"
   const boxes = new Map<ScopeKind, HTMLInputElement>();
   const switches = SCOPE_KINDS.map((kind) => {
     // The hint says what off costs: read with the box, not only after it.
-    const box = el("input", { type: "checkbox", class: "acct-check__box", "aria-describedby": HINT_ID });
+    const box = el("input", { type: "checkbox", class: "check__box", "aria-describedby": HINT_ID });
     box.addEventListener("change", () => setting.set(kind, box.checked));
     boxes.set(kind, box);
     return el(
       "label",
-      { class: "acct-row acct-check" },
+      { class: "acct-row acct-check check" },
       box,
       el("span", { class: "acct-check__text" }, el("span", { text: SWITCHES[kind].label }), el("small", { text: SWITCHES[kind].covers })),
     );

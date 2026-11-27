@@ -1,26 +1,10 @@
 import { test, expect, type Page } from "@playwright/test";
-import { signedIn, cardButton, railSettled } from "./helpers/app";
+import { signedIn, cardButton, dropFiles, railSettled } from "./helpers/app";
 import { mockApi } from "./helpers/mockApi";
 import { recordText } from "./helpers/recordText";
 
 /** ~2.9 s transfer under the fake's 120 ms per 64 KB step, wide enough to click Cancel. */
 const SLOW_UPLOAD_BYTES = 2 * 1024 * 1024;
-
-/** A live `DataTransfer`: drop and the picker enter the app through different events. */
-async function dropFiles(page: Page, selector: string, files: { name: string; size?: number }[]): Promise<void> {
-  await page.evaluate(
-    ({ selector, files }) => {
-      const target = document.querySelector(selector);
-      if (!target) throw new Error(`no drop target: ${selector}`);
-      const dt = new DataTransfer();
-      for (const f of files) dt.items.add(new File([new Uint8Array(f.size ?? 2048)], f.name));
-      for (const type of ["dragenter", "dragover", "drop"]) {
-        target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
-      }
-    },
-    { selector, files },
-  );
-}
 
 /** Hold a file OVER the target without dropping it — what the dropzone copy is for. */
 async function hoverFiles(page: Page, selector: string, name: string): Promise<void> {

@@ -368,6 +368,8 @@
   user-select: all;
 }
 
+/* The shared checkbox (`.check`), laid out in a grid: the box, then its
+   words with the note under them. */
 .admin-check {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -376,17 +378,8 @@
   font-size: var(--fs-body);
 }
 
-.admin-check input {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--accent);
-}
-
 .admin-check small {
   grid-column: 2;
-  font-size: var(--fs-caption);
-  line-height: 1.45;
-  color: var(--ink-soft);
 }
 
 /* --- narrow ---------------------------------------------------------------- */

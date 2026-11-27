@@ -22,7 +22,7 @@ export interface CheckOptions {
   readonly minTarget: number;
 }
 
-const AXE_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
+export const AXE_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
 /** axe-core's findings, one rule per entry. */
 async function axe(page: Page): Promise<Findings> {
