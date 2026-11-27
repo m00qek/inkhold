@@ -20,7 +20,7 @@ export interface LibraryRender {
   /** The narrow repaint the walk owes a listing: crumbs and folder cards only. */
   relabelFolders(): void;
   renderGallery(opts?: RenderOpts): void;
-  emptyState(title: string, body: string): HTMLElement;
+  emptyState(title: string, body: string | readonly (string | Node)[]): HTMLElement;
 }
 
 export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
@@ -211,13 +211,13 @@ export function createLibraryRender(ctx: LibraryCtx): LibraryRender {
     return parts.join(" · ");
   }
 
-  function emptyState(title: string, body: string): HTMLElement {
+  function emptyState(title: string, body: string | readonly (string | Node)[]): HTMLElement {
     return el(
       "div",
       { class: "empty" },
       el("div", { class: "empty__mark", text: ctx.rail.pending()?.label ?? (st.folderId ? "Folder" : "Library") }),
       el("h2", { text: title }),
-      el("p", { text: body }),
+      typeof body === "string" ? el("p", { text: body }) : el("p", {}, ...body),
     );
   }
 

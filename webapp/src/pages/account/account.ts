@@ -1,5 +1,6 @@
-// The signed-in user's own account page: Appearance, Signing in, Devices,
-// Storage, Versions (the last three in their own modules). Each section loads
+// The signed-in user's own account page: Appearance, Search on this browser,
+// Signing in, Devices, Storage, Versions (search and the last three in their
+// own modules). Each section loads
 // and fails on its own and shows loading distinctly from known-empty. Quota and
 // self-delete are deliberately absent (the admin decides those).
 
@@ -11,6 +12,8 @@ import { createPasswordForm } from "./accountPasswordForm";
 import { createVersionsControl } from "./accountVersions";
 import { createDevicesSection } from "./accountDevices";
 import * as accountStorage from "./accountStorage";
+import { createSearchScopeSection } from "./accountSearch";
+import type { SearchScopeSetting } from "../../ui/searchScope";
 import { ICONS, svg, type IconName } from "../../ui/icons";
 import { absoluteTime } from "../../ui/relativeTime";
 import { currentTheme } from "../../ui/theme";
@@ -57,6 +60,8 @@ export interface AccountHost {
   onSignOut(): void;
   onSessionExpired(): void;
   onSetTheme(theme: Theme): void;
+  /** What this browser's search reads the text of. */
+  searchScope: Pick<SearchScopeSetting, "get" | "set" | "subscribe">;
 }
 
 export interface AccountPage {
@@ -111,6 +116,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
     onDevices: (list) => passwordForm.syncConsequence(list),
   });
   const renderStorage = (): void => accountStorage.renderStorage(storageBody, storage, host.onOpenBin);
+  const searchScope = createSearchScopeSection(host.searchScope);
 
 
   const body = el(
@@ -129,6 +135,8 @@ export function createAccountPage(host: AccountHost): AccountPage {
     ),
     // First: a preference with no round trip, so the page opens with something resolved.
     section("Appearance", appearanceBody),
+    // Beside it: the other preference of this browser, not of the account.
+    section("Search on this browser", searchScope.body, searchScope.hint),
     section("Signing in", securityBody),
     section("Devices", devicesBody, deviceHint()),
     section("Storage", storageBody),
@@ -392,6 +400,7 @@ export function createAccountPage(host: AccountHost): AccountPage {
 
     destroy(): void {
       generation++;
+      searchScope.dispose();
       panel.remove();
       host.gallery.hidden = false;
       if (open_) chrome(false);

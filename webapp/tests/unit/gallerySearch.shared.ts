@@ -6,6 +6,7 @@ import type { SearchState } from "../../src/pages/noteSearch";
 import type { SearchResult } from "../../src/pages/galleryCards";
 import type { Entry, Id, Listing, NoteSummary } from "../../src/core/types";
 import type { Expansion, LocalHit } from "../../src/search/localSearch";
+import type { SearchScope } from "../../src/search/searchScope";
 
 export function doc(fileId: number, pages: number[], updatedAt = 0): LocalHit {
   return { md5: `md5-${fileId}`, fileId, pages, updatedAt, tier: "note", pageCount: null };
@@ -35,7 +36,7 @@ export function results(query: string, documents: LocalHit[], expansions: Expans
 }
 
 /** The renderer with every collaborator stubbed; `resultCard` records the join. */
-export function harness(initial: { state: SearchState; pending: number | null; tree?: Entry[]; treeLoaded?: boolean; more?: () => HTMLElement; moreCorrected?: boolean }) {
+export function harness(initial: { state: SearchState; pending: number | null; tree?: Entry[]; treeLoaded?: boolean; more?: () => HTMLElement; moreCorrected?: boolean; scope?: SearchScope }) {
   const gallery = document.createElement("section");
   let state = initial.state;
   let pending = initial.pending;
@@ -67,11 +68,13 @@ export function harness(initial: { state: SearchState; pending: number | null; t
       const box = document.createElement("div");
       box.className = "empty";
       box.dataset["title"] = title;
-      box.textContent = body;
+      if (typeof body === "string") box.textContent = body;
+      else box.append(...body);
       return box;
     },
     indexPending: () => pending,
     moreResults: initial.more ? () => ({ node: initial.more!(), corrected: initial.moreCorrected ?? false }) : undefined,
+    searchScope: initial.scope ? () => initial.scope! : undefined,
   };
 
   const search = createGallerySearch(ctx);

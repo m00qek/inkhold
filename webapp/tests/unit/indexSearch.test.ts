@@ -266,3 +266,36 @@ describe("createIndexSearch", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 });
+
+// The scope (`searchScope.ts`): a kind left out matches nothing at once,
+// before the sync that lets its terms go, and is never said to be left out.
+describe("createIndexSearch with a scope", () => {
+  const tiered = (tier: "note" | "marked" | "other") => (r: ReturnType<typeof row>) => ({ ...r, tier });
+
+  it("with documents off, drops documents and annotated documents from the answer and keeps the notebooks", async () => {
+    let scope = { documents: false };
+    const rows = [row(ALFA, 10, 1000), tiered("marked")(row(BRAVO, 20, 5000)), tiered("other")(row(CHARLIE, 30, 9000))];
+    const { sync } = fakeSync({ rows });
+    const local = createIndexSearch({ sync, load: spyLoader().load, scope: () => scope });
+    await local.sync();
+    expect((await local.search("reuniao")).documents.map((d) => d.md5)).toEqual([ALFA]);
+
+    // On again: the same index answers in full, before any sync.
+    scope = { documents: true };
+    expect((await local.search("reuniao")).documents.map((d) => d.md5).sort()).toEqual([ALFA, BRAVO, CHARLIE].sort());
+  });
+
+  it("never says a document the scope leaves out was left out by the budget", async () => {
+    let scope = { documents: true };
+    const rows = [row(ALFA, 10, 1000), row(BRAVO, 20, 5000), tiered("other")(row(CHARLIE, 30, 9000))];
+    const { sync, state } = fakeSync({ rows });
+    state.leftOut = [30, 20];
+    const local = createIndexSearch({ sync, load: spyLoader().load, scope: () => scope });
+    await local.sync();
+    expect((await local.search("reuniao")).leftOut).toEqual([30, 20]);
+
+    // Switched off, before the next sync: the last one's list still names it.
+    scope = { documents: false };
+    expect((await local.search("reuniao")).leftOut).toEqual([20]);
+  });
+});

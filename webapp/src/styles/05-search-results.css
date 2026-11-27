@@ -22,6 +22,17 @@
   font-weight: 600;
   color: var(--ink);
 }
+/* The link to a setting, in a notice or the empty state's sentence: the
+   quiet underline of the disclosures' labels, not the browser's blue. */
+.hits__link {
+  color: var(--ink);
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+.hits__link:hover {
+  text-decoration-color: currentColor;
+}
 /* A path, shared by bin rows (home is gone) and search (results span the library). */
 .card__path {
   color: var(--ink-soft);

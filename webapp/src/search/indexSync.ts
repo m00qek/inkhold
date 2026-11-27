@@ -8,6 +8,7 @@ import { encodeWant } from "./wantBitmap";
 import { parseTermsJsonl, type TermsDocument } from "./termsStream";
 import { httpTransport, type IndexTransport } from "./indexTransport";
 import { keepOrder, planKeep, rememberedSizes, rowKeys, type KeepPlan, type RememberedSizes } from "./termsBudget";
+import { FULL_SCOPE, inScope, type SearchScope } from "./searchScope";
 import {
   openTermsStore,
   termsKeyOf,
@@ -46,9 +47,10 @@ export interface SyncOutcome {
   /**
    * The file ids whose terms don't fit this browser's budget (`termsBudget.ts`),
    * in keep order. Each copy of a file is its own id: it has its own name and place.
+   * Rows the scope leaves out are not among them: they were never asked to fit.
    */
   readonly leftOut: readonly number[];
-  /** Held terms let go this sync to make room for documents kept first. */
+  /** Held terms let go this sync: for room, or because the scope no longer searches them. */
   readonly letGo: number;
   /** False when IndexedDB degraded to a no-op: the work happened, nothing kept it. */
   readonly persisted: boolean;
@@ -59,6 +61,11 @@ export interface IndexSyncOptions {
   transport?: IndexTransport;
   /** Sizes of terms weighed and let go; kept across visits by default. */
   sizes?: RememberedSizes;
+  /**
+   * What is searched (`searchScope.ts`), read at the start of each sync; all
+   * of it by default. Rows out of scope are neither fetched nor kept.
+   */
+  scope?: () => SearchScope;
 }
 
 export interface SyncRequest {
@@ -144,21 +151,43 @@ interface Keeper {
  * `replaced`: held older versions of documents the manifest still names. Each
  * stays, and holds its room, until its own new version is stored, so a torn
  * stream never leaves a document with neither.
+ *
+ * `unsearched`: held records, any version, of documents the scope leaves out.
+ * They go before anything is planned or streamed, so the room they held is
+ * the notebooks' at once. Their rows have no key here: never asked for, and
+ * never left out, since the budget was never asked to fit them.
  */
 async function keepWithin(
   rows: readonly ManifestRow[],
   store: TermsStore,
   remembered: RememberedSizes,
   replaced: readonly TermsKey[],
+  scope: SearchScope,
+  unsearched: readonly TermsKey[],
 ): Promise<Keeper> {
   let budget = await store.budget();
   const order = keepOrder(rows);
-  const keys = rowKeys(rows);
+  const keys = rowKeys(rows).map((key, i) => (inScope(scope, rows[i]!) ? key : null));
   const planned = new Set(keys.filter((key): key is string => key !== null));
   /** What each held record weighs; kept current as records come and go. */
   const held = new Map(await store.sizes());
   /** Weighed this sync and not held: remembered at the end, known at once. */
   const weighed = new Map<string, number>();
+  const letGo = new Set<string>();
+  if (unsearched.length > 0) {
+    await store.drop(unsearched);
+    // The current versions' sizes are remembered, so turning the kind back
+    // on plans them at once instead of fetching what won't fit.
+    const current = new Set(rowKeys(rows));
+    for (const k of unsearched) {
+      const key = termsKeyOf(k.md5, k.indexVersion);
+      const size = held.get(key);
+      if (size === undefined) continue;
+      held.delete(key);
+      letGo.add(key);
+      if (current.has(key)) weighed.set(key, size);
+    }
+  }
   const sizeOf = (key: string) => held.get(key) ?? weighed.get(key) ?? remembered.get(key);
   /** Old versions still held, by md5: the plan counts their room until they go. */
   const old = new Map<string, TermsKey[]>();
@@ -171,7 +200,6 @@ async function keepWithin(
   let pendingOld = 0;
   for (const md5 of old.keys()) pendingOld += oldBytes(md5);
   const replan = () => (plan = planKeep(rows, sizeOf, budget - pendingOld, order, keys));
-  const letGo = new Set<string>();
   let plan = planKeep(rows, sizeOf, budget - pendingOld, order, keys);
 
   /** Drops a document's old versions: its new one replaces them. */
@@ -261,6 +289,7 @@ export function createIndexSync(opts: IndexSyncOptions = {}): IndexSync {
   const store = opts.store ?? openTermsStore();
   const transport = opts.transport ?? httpTransport();
   const remembered = opts.sizes ?? rememberedSizes();
+  const scopeOf = opts.scope ?? (() => FULL_SCOPE);
 
   // In memory only, for a conditional (304) refetch.
   let memo: { etag: string; manifest: DocumentManifest } | null = null;
@@ -288,14 +317,19 @@ export function createIndexSync(opts: IndexSyncOptions = {}): IndexSync {
   async function run(req: SyncRequest): Promise<SyncOutcome> {
     for (let attempt = 0; attempt < MANIFEST_ATTEMPTS; attempt += 1) {
       const { etag, manifest } = await loadManifest(attempt === 0, req.signal);
-      const diff = diffManifest(manifest.rows, await store.keys());
+      const scope = scopeOf();
+      const local = await store.keys();
+      const diff = diffManifest(manifest.rows, local);
       // Deleted files' records go first. Older versions of documents still
-      // live stay until their new version replaces them (`keepWithin`).
+      // live and searched stay until their new version replaces them
+      // (`keepWithin`); every version of one the scope leaves out goes.
       const live = new Set(manifest.rows.map((row) => row.md5));
+      const searched = new Set(manifest.rows.filter((row) => inScope(scope, row)).map((row) => row.md5));
       const gone = diff.stale.filter((key) => !live.has(key.md5));
-      const replaced = diff.stale.filter((key) => live.has(key.md5));
+      const replaced = diff.stale.filter((key) => searched.has(key.md5));
+      const unsearched = local.filter((key) => live.has(key.md5) && !searched.has(key.md5));
       await store.drop(gone);
-      const keeper = await keepWithin(manifest.rows, store, remembered, replaced);
+      const keeper = await keepWithin(manifest.rows, store, remembered, replaced, scope, unsearched);
       const want = diff.want.filter((position) => keeper.plan().keep.has(position));
 
       let received = 0;

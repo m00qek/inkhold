@@ -13,6 +13,7 @@ import { createTextPrefetch, type TextPrefetch } from "./textPrefetch";
 import { rankDocuments, type LocalHit, type LocalResults, type LocalSearch } from "./localSearch";
 import { holdsAll, phrasesOf, withExpansions } from "./phrase";
 import { openTextStore, type TextStore } from "../cache/textStore";
+import type { SearchScope } from "./searchScope";
 
 /** The manifest costs ~150 ms on a Pi and device syncs burst; much longer feels like "not findable yet". */
 const COALESCE_MS = 1500;
@@ -26,6 +27,12 @@ export interface SearchServiceOptions {
   textPrefetch?: TextPrefetch;
   /** The browser's document text, to check quoted phrases against. */
   store?: Pick<TextStore, "get">;
+  /**
+   * What is searched (`searchScope.ts`); all of it by default. A change is the
+   * caller's to follow with `syncNow`. Find's text prefetch ignores it: Find
+   * inside an open document reads every kind.
+   */
+  scope?: () => SearchScope;
 }
 
 export interface SearchService extends LocalSearch {
@@ -42,12 +49,19 @@ export interface SearchService extends LocalSearch {
   /** Exposed for `available` only. */
   readonly textPrefetch: TextPrefetch;
   attachLive(live: LiveChannel): () => void;
+  /**
+   * Follows the scope's changes (`subscribe`, as `ui/searchScope.ts` gives
+   * it): `stale` at once, since the index stops matching what the scope
+   * leaves out, then a sync now, not at the next trigger, to let go of or
+   * fetch what changed, and `stale` again once it has run.
+   */
+  attachScope(subscribe: (listener: () => void) => () => void, stale: () => void): () => void;
   /** Cancel the pending window and free the engine. */
   dispose(): void;
 }
 
 export function createSearchService(opts: SearchServiceOptions): SearchService {
-  const local = createIndexSearch({ sync: opts.sync, load: opts.load, listing: opts.listing });
+  const local = createIndexSearch({ sync: opts.sync, load: opts.load, listing: opts.listing, scope: opts.scope });
   const textPrefetch = opts.textPrefetch ?? createTextPrefetch();
   const coalesceMs = opts.coalesceMs ?? COALESCE_MS;
   let store = opts.store ?? null;
@@ -111,6 +125,13 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
         () => refresh(),
         () => refresh(),
       );
+    },
+
+    attachScope(subscribe, stale) {
+      return subscribe(() => {
+        stale();
+        void syncNow().then(stale);
+      });
     },
 
     dispose() {

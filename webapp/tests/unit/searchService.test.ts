@@ -4,7 +4,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSearchService } from "../../src/search/searchService";
 import type { LiveChannel } from "../../src/sync/types";
-import { fakeSync, spyLoader } from "./searchService.shared";
+import { fakeSync, spyLoader, LIVE } from "./searchService.shared";
+import type { ManifestRow } from "../../src/search/manifestCodec";
+import type { TextPrefetch } from "../../src/search/textPrefetch";
 
 describe("createSearchService", () => {
   it("coalesces a burst of triggers into one sync", async () => {
@@ -116,3 +118,34 @@ describe("createSearchService", () => {
   });
 });
 
+
+describe("createSearchService and the scope", () => {
+  it("follows a switch: the answer is stale at once, a sync runs now, and it is stale again after", async () => {
+    const { sync, state } = fakeSync();
+    const service = createSearchService({ sync, load: spyLoader().load });
+    let fire = () => {};
+    const stale = vi.fn();
+    service.attachScope((listener) => {
+      fire = listener;
+      return () => {};
+    }, stale);
+
+    fire();
+    expect(stale).toHaveBeenCalledTimes(1);
+    expect(state.syncs).toBe(1);
+    await vi.waitFor(() => expect(stale).toHaveBeenCalledTimes(2));
+    service.dispose();
+  });
+
+  it("hands Find's text prefetch every row, whatever the scope: Find inside a document reads every kind", async () => {
+    const rows = LIVE.map((r, i) => (i === 0 ? r : { ...r, tier: "other" as const }));
+    const { sync } = fakeSync({ rows });
+    const seen: (readonly ManifestRow[])[] = [];
+    const textPrefetch = { prefetch: async (r: readonly ManifestRow[]) => (seen.push(r), { stored: 0 }) } as unknown as TextPrefetch;
+    const service = createSearchService({ sync, load: spyLoader().load, textPrefetch, scope: () => ({ documents: false }) });
+    await service.syncNow();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.map((r) => r.md5)).toEqual(rows.map((r) => r.md5));
+    service.dispose();
+  });
+});

@@ -444,6 +444,52 @@ test.describe("universal search", () => {
     await expect(page).toHaveURL(/#\/note\/141$/);
   });
 
+  // "escrow" is only in the PDF's text, "lease" in its name, "Endor" in a notebook's handwriting.
+  test("with documents' text switched off on the Account page, a PDF is found by name only, until it is switched back on", async ({ page }) => {
+    const lease = fakeFileHash("142");
+    const rows: FixtureManifestRow[] = [
+      ...INDEX_ROWS.slice(0, 1),
+      { md5: lease, fileId: 142, tier: "other", updatedAt: 1_700_000_000, indexVersion: 1, derivation: "derived" },
+    ];
+    const documents = {
+      [fakeFileHash("121")]: INDEX_DOCS[fakeFileHash("121")]!,
+      [lease]: { md5: lease, indexVersion: 1, pageCount: 6, pages: [{ p: 0, t: "escrow deposit returned" }] },
+    };
+    await signedIn(page);
+    await mockSearchIndex(page, { rows, documents });
+    await page.goto("/");
+    await railSettled(page);
+    const leaseRow = results(page).filter({ hasText: "Apartment lease — signed" });
+
+    await searchBox(page).fill("escrow");
+    await expect(leaseRow).toHaveCount(1, { timeout: 20_000 });
+
+    await page.goto("/#/account");
+    const box = page.getByRole("checkbox", { name: /Search inside documents/ });
+    await expect(box).toBeChecked();
+    await box.uncheck();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("sn.search-scope"))).toBe('{"documents":false}');
+
+    await page.goto("/#/search?q=escrow");
+    await expect(page.getByRole("heading", { name: "No matches for “escrow”" })).toBeVisible({ timeout: 20_000 });
+    const line = page.locator(".empty p");
+    await expect(line).toContainText("This browser doesn't search the text inside documents, only their names.");
+    // Still found by name; a notebook's handwriting still matches.
+    await searchBox(page).fill("lease");
+    await expect(leaseRow).toHaveCount(1);
+    await expect(page.locator(".hits__notice").filter({ hasText: "doesn't search the text inside documents" })).toBeVisible();
+    await searchBox(page).fill("Endor");
+    await expect(results(page).filter({ hasText: "Project Aurora — kickoff" })).toHaveCount(1, { timeout: 20_000 });
+
+    // The line's link goes to the setting; switched back on, the text matches again.
+    await page.getByRole("link", { name: "Change it in your account" }).click();
+    await expect(page).toHaveURL(/#\/account$/);
+    await page.getByRole("checkbox", { name: /Search inside documents/ }).check();
+    await page.goto("/#/search?q=escrow");
+    await expect(leaseRow).toHaveCount(1, { timeout: 20_000 });
+    await expect(page.getByText("doesn't search the text inside documents")).toHaveCount(0);
+  });
+
   test("a result row is reachable and openable by keyboard", async ({ page }) => {
     await signedIn(page);
     await page.goto("/");

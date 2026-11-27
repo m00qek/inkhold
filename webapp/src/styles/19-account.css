@@ -128,6 +128,33 @@
 .acct-rows + .acct-hint {
   margin-top: var(--sp-2);
 }
+/* A switch row (`accountSearch.ts`): the whole row is its label, so the
+   words toggle it too. On is filled with ink, as the toggles are: the accent
+   is the focus ring's. */
+.acct-check {
+  align-items: center;
+  cursor: pointer;
+}
+/* At least the target minimum: the box is a control of its own, whatever
+   the label around it. */
+.acct-check__box {
+  flex: none;
+  inline-size: var(--hit-target-min);
+  block-size: var(--hit-target-min);
+  margin: 0;
+  accent-color: var(--ink);
+}
+.acct-check__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--fs-body);
+  color: var(--ink);
+}
+.acct-check__text small {
+  font-size: var(--fs-caption);
+  color: var(--ink-soft);
+}
 /* An open disclosure's row gives up its underline. */
 .acct-row.is-expanded {
   border-bottom-color: transparent;

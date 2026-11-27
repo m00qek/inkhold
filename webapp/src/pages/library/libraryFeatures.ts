@@ -127,6 +127,7 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     emptyState: ctx.render.emptyState,
     indexPending: () => st.indexPending,
     // Repaints only an open search, as the index frame does.
+    searchScope: () => ctx.searchScope.get(),
     coverage: createSearchCoverage(ctx.api, () => {
       if (ctx.searchInView()) ctx.render.renderGallery();
     }),
@@ -223,6 +224,7 @@ export function createLibraryFeatures(ctx: LibraryCtx): LibraryFeatures {
     onSignOut: () => ctx.deps.onSignOut(),
     onSessionExpired: ctx.sessionDidExpire,
     onSetTheme: (next) => ctx.view.setThemeTo(next),
+    searchScope: ctx.searchScope,
   };
 
   return { historyController, galleryCards, gallerySearch, uploadDestination, uploadZone, accountHost };
