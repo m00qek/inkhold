@@ -68,8 +68,7 @@ export function harness(initial: { state: SearchState; pending: number | null; t
       const box = document.createElement("div");
       box.className = "empty";
       box.dataset["title"] = title;
-      if (typeof body === "string") box.textContent = body;
-      else box.append(...body);
+      box.textContent = body;
       return box;
     },
     indexPending: () => pending,

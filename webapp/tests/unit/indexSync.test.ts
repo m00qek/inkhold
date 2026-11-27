@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createIndexSync, IndexSyncError } from "../../src/search/indexSync";
@@ -585,6 +585,69 @@ describe("createIndexSync with a scope", () => {
     expect(calls[1]).toEqual({ m: "etag-1", want: "GA" });
     expect(outcome.stored).toBe(2);
     expect([...store.records.keys()].sort()).toEqual([...ALL].sort());
+  });
+
+  it("reads the scope once per attempt: a switch landing mid-run waits for the next sync", async () => {
+    let scope = ON;
+    const reads = vi.fn(() => scope);
+    const store = memoryStore();
+    const transport: IndexTransport = {
+      ...fakeTransport([]).transport,
+      async stream(): Promise<StreamAnswer> {
+        return {
+          status: 200,
+          chunks: (async function* () {
+            yield doc(ROWS[0]![1], ROWS[0]![2]) + doc(ROWS[1]![1], ROWS[1]![2]);
+            // Switched off while the stream runs.
+            scope = OFF;
+            yield doc(ROWS[2]![1], ROWS[2]![2]) + doc(ROWS[3]![1], ROWS[3]![2]);
+          })(),
+        };
+      },
+    };
+    const sync = createIndexSync({ store, transport, scope: reads, sizes: memorySizes() });
+    const first = await sync.sync();
+    expect(reads).toHaveBeenCalledTimes(1);
+    // The run planned with documents on keeps them, all four, whole.
+    expect(first.stored).toBe(4);
+    expect([...store.records.keys()].sort()).toEqual([...ALL].sort());
+
+    const next = await sync.sync();
+    expect(next.letGo).toBe(2);
+    expect([...store.records.keys()].sort()).toEqual([...NOTES].sort());
+  });
+
+  it("after a 412 that followed the drop, reports nothing let go: the drop was the first attempt's", async () => {
+    // Documents held, notebooks not yet: the drop runs, then the stream is refused.
+    const store = memoryStore();
+    for (const [, md5, v] of ROWS.slice(2)) await store.put({ md5, indexVersion: v, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const { transport, calls } = fakeTransport([412, [body(ROWS.slice(0, 2))]]);
+    const outcome = await createIndexSync({ store, transport, scope: () => OFF, sizes: memorySizes() }).sync();
+    expect(calls).toHaveLength(2);
+    expect([...store.records.keys()].sort()).toEqual([...NOTES].sort());
+    // Why `indexSearch` rebuilds on a scope change, not on `letGo` alone.
+    expect(outcome.letGo).toBe(0);
+  });
+
+  it("keeps a notebook's old version, documents off, until its new one arrives: it is replaced, not unsearched", async () => {
+    const store = memoryStore();
+    await store.put({ md5: ROWS[0]![1], indexVersion: 1, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    for (const [, md5, v] of ROWS.slice(2)) await store.put({ md5, indexVersion: v, pageCount: 1, pages: [{ p: 0, t: "reuniao" }] });
+    const transport: IndexTransport = {
+      ...fakeTransport([]).transport,
+      async stream(): Promise<StreamAnswer> {
+        return {
+          status: 200,
+          chunks: (async function* () {
+            yield "";
+            throw new Error("connection reset");
+          })(),
+        };
+      },
+    };
+    await expect(createIndexSync({ store, transport, scope: () => OFF, sizes: memorySizes() }).sync()).rejects.toThrow("connection reset");
+    // The documents went before the stream; the notebook's old version stays, its new one never came.
+    expect([...store.records.keys()]).toEqual([termsKeyOf(ROWS[0]![1], 1)]);
   });
 
   it("remembers the sizes it let go, so turning back on fetches what fits and not what won't", async () => {

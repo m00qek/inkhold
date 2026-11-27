@@ -25,7 +25,11 @@ export function parseScope(raw: string | null): SearchScope {
   return out;
 }
 
-/** Pure. The stored spelling: every kind, so a reader of any version sees them all. */
+/**
+ * Pure. The stored spelling: every kind this build knows. A kind it doesn't
+ * know is not kept: an older tab's `set` writes over a newer build's key, and
+ * that kind is back at its default.
+ */
 export function formatScope(scope: SearchScope): string {
   return JSON.stringify(Object.fromEntries(SCOPE_KINDS.map((kind) => [kind, scope[kind]])));
 }

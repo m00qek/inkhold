@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// The account page's "Search on this browser" (`pages/account/accountSearch.ts`).
+// The account page's "Search", this browser's (`pages/account/accountSearch.ts`).
 
 import { describe, expect, it } from "vitest";
 import { createSearchScopeSection, SEARCH_SCOPE_HINT } from "../../src/pages/account/accountSearch";

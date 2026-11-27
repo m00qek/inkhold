@@ -277,7 +277,7 @@ export function scopeLine(scope: SearchScope): string | null {
 }
 
 /** The link to the setting, after `scopeLine`. */
-export const SCOPE_LINK = "Change it in your account";
+export const SCOPE_LINK = "Change this in your account settings";
 
 /**
 * Over a non-empty list: a document still being derived isn't in the index

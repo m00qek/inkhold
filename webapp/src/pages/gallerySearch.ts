@@ -57,8 +57,7 @@ export interface GallerySearchCtx {
   resultCard: (result: SearchResult, i: number, q: string, expansions?: readonly Expansion[]) => HTMLElement;
   /** A folder whose name matched, as the gallery shows folders. */
   folderCard: (folder: Folder) => HTMLElement;
-  /** `body` as text, or as parts when it carries a link. */
-  emptyState: (title: string, body: string | readonly (string | Node)[]) => HTMLElement;
+  emptyState: (title: string, body: string) => HTMLElement;
   /**
   * Documents still being derived, from the live channel's `event: index`
   * frame, or `null` if unknown. Read at paint time.
@@ -303,14 +302,12 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         // The coverage block says the rest, with numbers, once it has them.
         const cov = coverageBlock(cached);
         const why = cov ? "" : coverageLine();
-        const text = (parts: (string | null)[]) => parts.filter(Boolean).join(" ");
-        const body = scoped
-          ? [`${text([still, leftOut, scoped])} `, scopeLink(), ...(why ? [` ${why}`] : [])]
-          : text([still, leftOut, why]);
-        gallery.append(ctx.emptyState(`No matches for “${q}”`, body));
-        // The empty state's body is text only: the names go under it.
+        gallery.append(ctx.emptyState(`No matches for “${q}”`, [still, leftOut, why].filter(Boolean).join(" ")));
+        // The empty state's body is text only: the names go under it, then the
+        // scope's line with its link, as the other two places show it.
         const list = leftOutBlock(q, leftOutIds, cached);
         if (list) gallery.append(list);
+        appendScope();
         if (cov) gallery.append(cov);
       }
       return;

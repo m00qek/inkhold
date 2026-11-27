@@ -38,15 +38,14 @@ export interface LiveDocument {
   /**
    * The listing's word for the manifest's tier, for the scope offline: a
    * `.note` or not. Not a tier, which would change the ranking's weights.
-   * Absent: searched whatever the scope.
    */
-  readonly notebook?: boolean;
+  readonly notebook: boolean;
 }
 
 /** Whether a live row's text is searched under `scope`, from the manifest's tier or the listing's file type. */
 function searched(scope: SearchScope, row: LiveDocument | ManifestRow): boolean {
   if ("tier" in row) return inScope(scope, row);
-  return row.notebook !== false || scope.documents;
+  return row.notebook || scope.documents;
 }
 
 export interface IndexSearch extends LocalSearch {
@@ -81,8 +80,11 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
   const load = opts.load;
   const listing = opts.listing;
 
-  // Replaced wholesale per sync; merging would resurrect deletions.
-  let live: Map<string, LiveDocument> | null = null;
+  /**
+   * The manifest's rows once synced, else null (`offlineLive` stands in).
+   * Replaced wholesale per sync; merging would resurrect deletions.
+   */
+  let live: Map<string, ManifestRow> | null = null;
   /** Beside `live` because `live` may be the listing, which has no versions. */
   let versions = new Map<string, number | null>();
   let derivations = new Map<string, Derivation>();
@@ -234,10 +236,8 @@ export function createIndexSearch(opts: IndexSearchOptions = {}): IndexSearch {
       const scope = scopeOf();
       // Until the sync a switch started has run, the last one's list may name
       // a kind the scope now leaves out: never left out, so never said.
-      const unfit = leftOut.filter((id) => {
-        const row = rowsById.get(id);
-        return !row || inScope(scope, row);
-      });
+      // Both come from one sync's outcome: every left-out id has its row.
+      const unfit = leftOut.filter((id) => inScope(scope, rowsById.get(id)!));
       return { query, ...group(answer, live ?? offlineLive(), pageCounts, scope), ...(unfit.length > 0 ? { leftOut: unfit } : {}) };
     },
   };

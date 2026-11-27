@@ -5,7 +5,11 @@
 //
 // One kind for now: documents, every row that isn't a notebook (PDFs, XPS
 // documents, text files, annotated ones included), told apart by the row's
-// tier alone. Another kind joins `SCOPE_KINDS` as one more entry.
+// tier alone. Another kind (books, with EPUB) is one more entry in
+// `SCOPE_KINDS` and in the account page's switches, but not only that: the
+// tier can't tell it from documents, so `scopeKindOf`, `searched` in
+// `indexSearch.ts` (with the listing's `notebook` flag) and `scopeLine` in
+// `pages/noteSearch.ts` each need to learn it.
 
 import type { ManifestRow } from "./manifestCodec";
 

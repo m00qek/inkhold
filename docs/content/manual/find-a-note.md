@@ -33,7 +33,7 @@ of PDFs, XPS documents and text files, your to-dos and your digests.
   pages are pictures, so it is found by its name. Handwriting on a PDF is not
   searchable: see [What doesn't work yet](@/manual/limits.md). To keep a
   browser's search to your notebooks, turn off **Search inside documents**
-  under **Search on this browser** on your account page: documents are then
+  under **Search** on your account page: documents are then
   found by name, and by **Find** once you open one.
 - **Digests**, by the passage, your comment, the category and the document
   it came from, all together: "whale obsession" finds the passage about the

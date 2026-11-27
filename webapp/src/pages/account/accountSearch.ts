@@ -1,4 +1,4 @@
-// The account page's "Search on this browser": what this browser's search
+// The account page's "Search": what this browser's search
 // reads the text of. A preference of the browser, not of the account, so it
 // is kept beside the theme (`ui/searchScope.ts`), with no round trip.
 // Notebooks are always searched; each other kind is a checkbox, which says
@@ -13,9 +13,14 @@ const SWITCHES: Readonly<Record<ScopeKind, { label: string; covers: string }>> =
   documents: { label: "Search inside documents", covers: "PDFs, XPS documents and text files" },
 };
 
-/** What turning a kind off costs and gives, in the person's terms. */
+/**
+ * What turning a kind off does, in the person's terms. It says "this
+ * browser": the group's label doesn't. Notebooks never lose room to documents
+ * (`termsBudget.ts` keeps them first), so it promises less to keep, not more
+ * room.
+ */
 export const SEARCH_SCOPE_HINT =
-  "Off, documents are still found by name, and by Find inside a document you open. The room their text took goes to your notebooks.";
+  "Off, this browser no longer downloads or keeps the text inside documents, so it stores less and search uses less memory. Documents are still found by name, and by Find inside one you open.";
 
 /** One account page at a time, so one id. */
 const HINT_ID = "acct-search-scope-hint";

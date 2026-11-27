@@ -426,7 +426,7 @@ describe("the search renderer's scope line", () => {
   it("is a notice over results, linking to the setting, and not a status announcement", () => {
     const h = harness({ state: results("whale", [doc(7, [0])]), pending: 0, tree: [note("7", "Notes")], scope: OFF });
     const n = notice(h.paint("whale"))!;
-    expect(n.textContent).toBe(`${LINE} Change it in your account`);
+    expect(n.textContent).toBe(`${LINE} Change this in your account settings`);
     expect(n.querySelector("a")?.getAttribute("href")).toBe("#/account");
     expect(n.getAttribute("role")).toBeNull();
   });
@@ -436,13 +436,20 @@ describe("the search renderer's scope line", () => {
     expect(notice(h.paint("whale"))?.querySelector("a")?.getAttribute("href")).toBe("#/account");
   });
 
-  it("is part of 'No matches', with its link inside the sentence, before the coverage sentence", () => {
+  it("is the same notice under 'No matches', whose sentence stays its own", () => {
     const h = harness({ state: results("whale", []), pending: 0, scope: OFF });
     const g = h.paint("whale");
-    const body = h.emptyBody();
-    expect(body).toContain(`${LINE} Change it in your account`);
-    expect(body.indexOf(LINE)).toBeLessThan(body.indexOf("recognised"));
-    expect(g.querySelector(".empty a")?.getAttribute("href")).toBe("#/account");
+    expect(h.emptyBody()).not.toContain(LINE);
+    expect(h.emptyBody()).toContain("recognised");
+    const n = notice(g)!;
+    expect(n.previousElementSibling?.matches(".empty")).toBe(true);
+    expect(n.querySelector("a")?.getAttribute("href")).toBe("#/account");
+  });
+
+  it("under 'No matches', follows the left-out list", () => {
+    const h = harness({ state: { ...results("whale", []), leftOut: [8] } as SearchState, pending: 0, tree: [note("8", "Moby-Dick", "txt")], scope: OFF });
+    const g = h.paint("whale");
+    expect(notice(g)?.previousElementSibling?.matches("details.left-out")).toBe(true);
   });
 
   it("comes after the left-out line and its list", () => {

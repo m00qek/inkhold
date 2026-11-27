@@ -1,4 +1,4 @@
-// The signed-in user's own account page: Appearance, Search on this browser,
+// The signed-in user's own account page: Appearance, Search (this browser's),
 // Signing in, Devices, Storage, Versions (search and the last three in their
 // own modules). Each section loads and fails on its own and shows loading
 // distinctly from known-empty. Quota and self-delete are deliberately absent
@@ -136,7 +136,8 @@ export function createAccountPage(host: AccountHost): AccountPage {
     // First: a preference with no round trip, so the page opens with something resolved.
     section("Appearance", appearanceBody),
     // Beside it: the other preference of this browser, not of the account.
-    section("Search on this browser", searchScope.body, searchScope.hint),
+    // The hint says "this browser"; the label stays one word, as the others.
+    section("Search", searchScope.body, searchScope.hint),
     section("Signing in", securityBody),
     section("Devices", devicesBody, deviceHint()),
     section("Storage", storageBody),

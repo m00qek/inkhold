@@ -28,9 +28,9 @@ export interface SearchServiceOptions {
   /** The browser's document text, to check quoted phrases against. */
   store?: Pick<TextStore, "get">;
   /**
-   * What is searched (`searchScope.ts`); all of it by default. A change is the
-   * caller's to follow with `syncNow`. Find's text prefetch ignores it: Find
-   * inside an open document reads every kind.
+   * What is searched (`searchScope.ts`), read per sync and per query; all of
+   * it by default. `attachScope` follows its changes. Find's text prefetch
+   * ignores it: Find inside an open document reads every kind.
    */
   scope?: () => SearchScope;
 }
@@ -134,20 +134,26 @@ export function createSearchService(opts: SearchServiceOptions): SearchService {
     },
 
     attachScope(subscribe, stale) {
+      let attached = true;
       const off = subscribe(() => {
         stale();
-        void syncNow().then(stale);
+        // The sync may settle after the shell went (a switch in another tab,
+        // then this one leaves for /connect): no `stale` on a torn-down page.
+        void syncNow().then(() => {
+          if (attached) stale();
+        });
       });
-      detach.add(off);
-      return () => {
+      const detachThis = () => {
+        attached = false;
         off();
-        detach.delete(off);
+        detach.delete(detachThis);
       };
+      detach.add(detachThis);
+      return detachThis;
     },
 
     dispose() {
-      for (const off of detach) off();
-      detach.clear();
+      for (const off of [...detach]) off();
       if (timer !== null) clearTimeout(timer);
       timer = null;
       queued = false;

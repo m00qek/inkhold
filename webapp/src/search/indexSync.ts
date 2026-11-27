@@ -153,9 +153,10 @@ interface Keeper {
  * stream never leaves a document with neither.
  *
  * `unsearched`: held records, any version, of documents the scope leaves out.
- * They go before anything is planned or streamed, so the room they held is
- * the notebooks' at once. Their rows have no key here: never asked for, and
- * never left out, since the budget was never asked to fit them.
+ * They go before anything is streamed: their rows have no key here, so the
+ * plan never counts them, and while held they would sit outside the budget
+ * it keeps the store within. Never asked for, and never left out, since the
+ * budget was never asked to fit them.
  */
 async function keepWithin(
   rows: readonly ManifestRow[],

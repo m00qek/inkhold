@@ -225,19 +225,19 @@ describe("createIndexSearch", () => {
     state.docs = DOCS.filter((d) => d.md5 !== CHARLIE);
     state.received = 0;
     state.letGo = 1;
-    state.leftOut = [33];
+    state.leftOut = [30];
     await local.sync();
     const after = await local.search("reuniao");
     expect(after.documents.map((d) => d.md5)).not.toContain(CHARLIE);
-    expect(after.leftOut).toEqual([33]);
+    expect(after.leftOut).toEqual([30]);
   });
 
   it("answers a session that never synced, from the cached listing alone", async () => {
     const { load } = spyLoader();
     const { sync } = fakeSync();
     const listing = () => [
-      { md5: ALFA, fileId: 10, updatedAt: 1000 },
-      { md5: BRAVO, fileId: 20, updatedAt: 5000 },
+      { md5: ALFA, fileId: 10, updatedAt: 1000, notebook: true },
+      { md5: BRAVO, fileId: 20, updatedAt: 5000, notebook: true },
     ];
     const local = createIndexSearch({ sync, load, listing });
 
@@ -290,11 +290,11 @@ describe("createIndexSearch with a scope", () => {
     const listing = () => [
       { md5: ALFA, fileId: 10, updatedAt: 1000, notebook: true },
       { md5: BRAVO, fileId: 20, updatedAt: 5000, notebook: false },
-      { md5: CHARLIE, fileId: 30, updatedAt: 9000 },
+      { md5: CHARLIE, fileId: 30, updatedAt: 9000, notebook: false },
     ];
     const local = createIndexSearch({ sync, load: spyLoader().load, listing, scope: () => ({ documents: false }) });
-    // Never synced: the listing stands in for the manifest; one it can't tell is searched.
-    expect((await local.search("reuniao")).documents.map((d) => d.md5).sort()).toEqual([ALFA, CHARLIE].sort());
+    // Never synced: the listing stands in for the manifest, and says which are notebooks.
+    expect((await local.search("reuniao")).documents.map((d) => d.md5)).toEqual([ALFA]);
   });
 
   it("rebuilds from the store when the scope changes, even when no sync reported letting go", async () => {

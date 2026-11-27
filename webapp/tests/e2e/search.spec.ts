@@ -472,17 +472,17 @@ test.describe("universal search", () => {
 
     await page.goto("/#/search?q=escrow");
     await expect(page.getByRole("heading", { name: "No matches for “escrow”" })).toBeVisible({ timeout: 20_000 });
-    const line = page.locator(".empty p");
-    await expect(line).toContainText("This browser doesn't search the text inside documents, only their names.");
+    const line = page.locator(".hits__notice").filter({ hasText: "This browser doesn't search the text inside documents, only their names." });
+    await expect(line).toBeVisible();
     // Still found by name; a notebook's handwriting still matches.
     await searchBox(page).fill("lease");
     await expect(leaseRow).toHaveCount(1);
-    await expect(page.locator(".hits__notice").filter({ hasText: "doesn't search the text inside documents" })).toBeVisible();
+    await expect(line).toBeVisible();
     await searchBox(page).fill("Endor");
     await expect(results(page).filter({ hasText: "Project Aurora — kickoff" })).toHaveCount(1, { timeout: 20_000 });
 
     // The line's link goes to the setting; switched back on, the text matches again.
-    await page.getByRole("link", { name: "Change it in your account" }).click();
+    await page.getByRole("link", { name: "Change this in your account settings" }).click();
     await expect(page).toHaveURL(/#\/account$/);
     await page.getByRole("checkbox", { name: /Search inside documents/ }).check();
     await page.goto("/#/search?q=escrow");

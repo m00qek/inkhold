@@ -164,6 +164,27 @@ describe("createSearchService and the scope", () => {
     service.dispose();
   });
 
+  it("asks nothing of a shell disposed while the sync a switch started is still running", async () => {
+    const { sync, state } = fakeSync();
+    const service = createSearchService({ sync, load: spyLoader().load });
+    let fire = () => {};
+    const stale = vi.fn();
+    service.attachScope((listener) => {
+      fire = listener;
+      return () => {};
+    }, stale);
+
+    // Another tab switched; this one leaves (for /connect, say) before the sync settles.
+    state.hold = true;
+    fire();
+    expect(stale).toHaveBeenCalledTimes(1);
+    service.dispose();
+    state.gate?.();
+    await vi.waitFor(() => expect(state.syncs).toBe(1));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stale).toHaveBeenCalledTimes(1);
+  });
+
   it("stops following the scope once disposed", () => {
     const { sync, state } = fakeSync();
     const service = createSearchService({ sync, load: spyLoader().load });
