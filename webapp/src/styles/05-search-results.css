@@ -112,13 +112,18 @@
 
 
 /* How much handwriting search can find (`searchCoverage.ts`): a quiet line
-   under the results, opening to the notes it can't read and why. */
-.coverage {
+   under the results, opening to the notes it can't read and why. The
+   documents search holds no text for (`searchLeftOut.ts`) open the same way,
+   under the notice that counts them. */
+.coverage,
+.left-out {
   grid-column: 1 / -1;
   max-width: 760px;
-  margin: var(--sp-6) 2px var(--sp-4);
   font-size: var(--fs-caption);
   color: var(--ink-soft);
+}
+.coverage {
+  margin: var(--sp-6) 2px var(--sp-4);
 }
 .coverage summary,
 .left-out summary {
@@ -187,14 +192,19 @@
   font-family: var(--font-mono);
 }
 
-/* The documents search holds no text for (`searchLeftOut.ts`): the coverage
-   block's disclosure, under the notice that counts them. */
+/* Pulled up to the notice above it, which ends in a margin of its own. */
 .left-out {
-  grid-column: 1 / -1;
-  max-width: 760px;
   margin: calc(-1 * var(--sp-2)) 2px var(--sp-4);
-  font-size: var(--fs-caption);
-  color: var(--ink-soft);
+}
+/* Under "No matches" its sentence is centred in the empty state: centred
+   beneath it, pulled up into the state's bottom padding, so it reads as that
+   sentence's, not as the coverage line's below. The names stay start-aligned. */
+.empty + .left-out {
+  margin: calc(-1 * (var(--sp-8) + var(--sp-4))) auto var(--sp-6);
+  text-align: start;
+}
+.empty + .left-out summary {
+  justify-content: center;
 }
 .left-out__where {
   font-family: var(--font-mono);

@@ -2,7 +2,8 @@
 // under the line that counts them: a closed list, so the count stays one line
 // until the person asks which. Names come from the listing the app holds, by
 // file id; a document the walk hasn't reached yet is counted, never shown as
-// an id.
+// an id. Once the walk has landed, the page drops ids it doesn't name before
+// they get here (`gallerySearch.ts`): those have left the library.
 
 import { el } from "../ui/dom";
 import { onPlainClick } from "../ui/link";
@@ -28,7 +29,7 @@ export interface LeftOutList {
   readonly shown: readonly LeftOutEntry[];
   /** Named, past the cap. */
   readonly more: number;
-  /** Not in the listing yet: no name to show. */
+  /** Not in the listing yet, while the walk is still running: no name to show. */
   readonly unlisted: number;
 }
 
@@ -37,11 +38,7 @@ export interface LeftOutList {
  * the listing's ids are decimal strings. Each copy of a file is its own id,
  * so it is listed once per copy, each with its own name and place.
  */
-export function leftOutList(
-  ids: readonly number[],
-  nameOf: (id: Id) => LeftOutName | null,
-  cap = LEFT_OUT_SHOWN,
-): LeftOutList {
+export function leftOutList(ids: readonly number[], nameOf: (id: Id) => LeftOutName | null): LeftOutList {
   const named: LeftOutEntry[] = [];
   let unlisted = 0;
   for (const fileId of ids) {
@@ -50,7 +47,7 @@ export function leftOutList(
     if (known) named.push({ id, ...known });
     else unlisted += 1;
   }
-  return { shown: named.slice(0, cap), more: Math.max(0, named.length - cap), unlisted };
+  return { shown: named.slice(0, LEFT_OUT_SHOWN), more: Math.max(0, named.length - LEFT_OUT_SHOWN), unlisted };
 }
 
 export interface SearchLeftOut {

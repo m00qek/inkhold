@@ -428,9 +428,10 @@ describe("createIndexSync", () => {
     const outcome = await createIndexSync({ store, transport: fakeTransport([[body]]).transport, sizes: memorySizes() }).sync();
     // Positions 0 and 1 are the notebooks.
     expect([...store.records.keys()].sort()).toEqual([termsKeyOf(ROWS[0]![1], ROWS[0]![2]), termsKeyOf(ROWS[1]![1], ROWS[1]![2])].sort());
-    // The rest, by file id (their order is `termsBudget.test.ts`'s to pin).
+    // The rest, by file id. Which ones, not their order: these two sort the
+    // same either way, so `termsBudget.test.ts` pins the order.
     const rows = decodeManifest(MANIFEST).rows;
-    expect(outcome.leftOut).toEqual([rows[3]!.fileId, rows[4]!.fileId]);
+    expect([...outcome.leftOut].sort((a, b) => a - b)).toEqual([rows[3]!.fileId, rows[4]!.fileId].sort((a, b) => a - b));
   });
 
   it("asks again for a document let go once room is made", async () => {

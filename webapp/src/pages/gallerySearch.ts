@@ -160,7 +160,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   }
 
   /** The documents search holds no text for, named from the cached tree as the hits are. */
-  function leftOutList(q: string, ids: readonly number[], notes: CachedNotes): HTMLElement | null {
+  function leftOutBlock(q: string, ids: readonly number[], notes: CachedNotes): HTMLElement | null {
     return leftOutNames.block(q, ids, (id) => {
       const known = notes.get(id);
       return known ? { name: known.note.name, folderPath: known.folderPath } : null;
@@ -233,14 +233,19 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       );
     }
 
-    const leftOutIds = searchState.kind === "results" ? (searchState.leftOut ?? []) : [];
+    // The ids are the last sync's. Once the walk has landed, one the tree
+    // doesn't name has left the library since (deleted, say): no longer left
+    // out of anything, so neither counted nor listed. Before, it may just not
+    // be reached yet, and the list says so.
+    const allIds = searchState.kind === "results" ? (searchState.leftOut ?? []) : [];
+    const leftOutIds = ctx.treeLoaded() ? allIds.filter((id) => cached.has(String(id))) : allIds;
     const leftOut = leftOutLine(leftOutIds.length);
     // The names go under the line, outside its status region: an
     // announcement holds only the message.
     const appendLeftOut = () => {
       if (!leftOut) return;
       gallery.append(el("p", { class: "hits__notice", role: "status", text: leftOut }));
-      const list = leftOutList(q, leftOutIds, cached);
+      const list = leftOutBlock(q, leftOutIds, cached);
       if (list) gallery.append(list);
     };
     if (results.length > 0) {
@@ -279,7 +284,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         const why = cov ? "" : coverageLine();
         gallery.append(ctx.emptyState(`No matches for “${q}”`, [still, leftOut, why].filter(Boolean).join(" ")));
         // The empty state's body is text only: the names go under it.
-        const list = leftOutList(q, leftOutIds, cached);
+        const list = leftOutBlock(q, leftOutIds, cached);
         if (list) gallery.append(list);
         if (cov) gallery.append(cov);
       }

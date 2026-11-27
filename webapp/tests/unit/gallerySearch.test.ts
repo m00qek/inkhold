@@ -363,7 +363,38 @@ describe("the search renderer's left-out sentence", () => {
     const g = h.paint("whale");
     expect(h.folderRows()).toEqual(["Whale"]);
     expect(h.notices().some((n) => n?.startsWith(LINE))).toBe(true);
+    const box = g.querySelector("details.left-out");
+    expect(box?.previousElementSibling?.textContent).toMatch(new RegExp(`^${LINE}`));
     expect(names(g)).toEqual(["Moby-Dick", "Ulysses"]);
+  });
+
+  it("while the listing loads, counts every id and says the unnamed are not listed yet", () => {
+    // The walk has reached the hit's folder only: neither book is named yet.
+    const h = harness({ state: leftOut(results("whale", [doc(7, [0])]), [8, 9]), pending: 0, tree: [note("7", "Notes")], treeLoaded: false });
+    const g = h.paint("whale");
+    expect(h.notices().some((n) => n?.startsWith(LINE))).toBe(true);
+    expect(names(g)).toEqual([]);
+    expect(g.querySelector(".left-out__rest")?.textContent).toBe("2 more not listed yet");
+  });
+
+  it("once the listing has loaded, neither counts nor lists an id it doesn't name: that file has left the library", () => {
+    const h = harness({ state: leftOut(results("whale", [doc(7, [0])]), [8, 9]), pending: 0, tree: [note("7", "Notes"), BOOKS[0]!] });
+    const g = h.paint("whale");
+    expect(h.notices().some((n) => n?.startsWith("This browser's search has no room for the text of 1 document:"))).toBe(true);
+    expect(names(g)).toEqual(["Moby-Dick"]);
+    expect(g.querySelector(".left-out__rest")).toBeNull();
+  });
+
+  it("says nothing once the listing has loaded and every left-out id has left the library", () => {
+    const over = harness({ state: leftOut(results("whale", [doc(7, [0])]), [8, 9]), pending: 0, tree: [note("7", "Notes")] });
+    const g = over.paint("whale");
+    expect(over.notices()).toEqual([]);
+    expect(g.querySelector(".left-out")).toBeNull();
+
+    const none = harness({ state: leftOut(results("whale", []), [8, 9]), pending: 0 });
+    const e = none.paint("whale");
+    expect(none.emptyBody()).not.toContain("no room");
+    expect(e.querySelector(".left-out")).toBeNull();
   });
 
   it("is not said, and nothing is listed, when everything fits", () => {
