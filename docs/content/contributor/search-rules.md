@@ -130,8 +130,13 @@ flowchart TD
   it is re-derived. Nothing is evicted by age: that let go and fetched the
   same documents on every sync. The bound is per tab: each knows only its own
   writes, so two tabs syncing at once can briefly hold more between them.
-  Once a tab has synced, search names how many documents it left out; they
-  match by name, and Find in the document fetches their text itself.
+  Once a tab has synced, search says how many documents it left out, and a
+  closed list under that line names them (`pages/searchLeftOut.ts`): the sync
+  passes their file ids in keep order, one per copy, and the app names them
+  from the listing it holds, as it names hits. It shows 50 names, then "and N
+  more"; a document the tree walk hasn't reached yet is counted, never shown
+  as an id. They match by name, and Find in the document fetches their text
+  itself.
 
 ## Ranking
 

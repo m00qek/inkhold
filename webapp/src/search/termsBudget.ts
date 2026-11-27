@@ -14,7 +14,10 @@ import { termsKeyOf } from "../cache/termsStore";
 export interface KeepPlan {
   /** Manifest positions whose terms the browser keeps, or asks for. */
   readonly keep: ReadonlySet<number>;
-  /** Positions that don't fit: found by name and by Find in the document only. */
+  /**
+   * Positions that don't fit, in keep order: found by name and by Find in the
+   * document only. Search lists them in this order, most wanted first.
+   */
   readonly leftOut: readonly number[];
   /** The `<md5>.<index_version>` of every kept position: what may be held. */
   readonly keptKeys: ReadonlySet<string>;
@@ -71,7 +74,6 @@ export function planKeep(
     if (kept) keep.add(position);
     else leftOut.push(position);
   }
-  leftOut.sort((a, b) => a - b);
   const keptKeys = new Set<string>();
   for (const [key, kept] of decided) if (kept) keptKeys.add(key);
   return { keep, leftOut, keptKeys };

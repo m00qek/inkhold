@@ -9,6 +9,7 @@ import { answerFor, coverageLine, expansionNotice, leftOutLine, pendingLine, res
 import { crumbPath } from "./rail/railPlaces";
 import { holdsInside, insideOf } from "../search/match";
 import { namedIds } from "./nameRows";
+import { createSearchLeftOut } from "./searchLeftOut";
 import type { SearchCoverage } from "./searchCoverage";
 import type { FolderCache } from "./folderCache";
 import type { SearchResult } from "./galleryCards";
@@ -70,6 +71,7 @@ export interface GallerySearch {
 
 export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
   const { gallery } = ctx;
+  const leftOutNames = createSearchLeftOut();
 
   /** Every note in the cached (whole) tree with its folder, deduplicated. */
   function allCachedNotes(): Map<Id, { note: NoteSummary; folderPath: string | null }> {
@@ -155,6 +157,15 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
     return ctx.coverage.block((id) => notes.get(id)?.note.name ?? null);
   }
 
+  /** The documents search holds no text for, named from the cached tree as the hits are. */
+  function leftOutList(ids: readonly number[]): HTMLElement | null {
+    const notes = allCachedNotes();
+    return leftOutNames.block(ids, (id) => {
+      const known = notes.get(id);
+      return known ? { name: known.note.name, folderPath: known.folderPath } : null;
+    });
+  }
+
   /** Folders named like the query, by the label the rail shows; each once. */
   function folderResults(names: NameHits): Folder[] {
     const seen = new Map<Id, Folder>();
@@ -218,11 +229,20 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
       );
     }
 
-    const leftOut = leftOutLine(searchState.kind === "results" ? (searchState.leftOut ?? 0) : 0);
+    const leftOutIds = searchState.kind === "results" ? (searchState.leftOut ?? []) : [];
+    const leftOut = leftOutLine(leftOutIds.length);
+    // The names go under the line, outside its status region: an
+    // announcement holds only the message.
+    const appendLeftOut = () => {
+      if (!leftOut) return;
+      gallery.append(el("p", { class: "hits__notice", role: "status", text: leftOut }));
+      const list = leftOutList(leftOutIds);
+      if (list) gallery.append(list);
+    };
     if (results.length > 0) {
       const grow = resultsMayGrowLine(pending);
       if (grow) gallery.append(el("p", { class: "hits__notice", role: "status", text: grow }));
-      if (leftOut) gallery.append(el("p", { class: "hits__notice", role: "status", text: leftOut }));
+      appendLeftOut();
     }
 
     // Folders first: a name typed to get somewhere. Their own group, like the to-dos'.
@@ -233,7 +253,7 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
 
     if (results.length === 0 && (more || folders.length > 0)) {
       if (more) gallery.append(more);
-      if (leftOut) gallery.append(el("p", { class: "hits__notice", role: "status", text: leftOut }));
+      appendLeftOut();
       const cov = coverageBlock();
       if (cov) gallery.append(cov);
       return;
@@ -254,6 +274,9 @@ export function createGallerySearch(ctx: GallerySearchCtx): GallerySearch {
         const cov = coverageBlock();
         const why = cov ? "" : coverageLine();
         gallery.append(ctx.emptyState(`No matches for “${q}”`, [still, leftOut, why].filter(Boolean).join(" ")));
+        // The empty state's body is text only: the names go under it.
+        const list = leftOutList(leftOutIds);
+        if (list) gallery.append(list);
         if (cov) gallery.append(cov);
       }
       return;

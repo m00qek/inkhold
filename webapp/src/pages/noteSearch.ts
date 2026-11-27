@@ -32,8 +32,8 @@ export type SearchState =
       items: ItemHits;
       /** Kept for a quoted phrase without being checked (`LocalResults.unchecked`). */
       unchecked?: number;
-      /** Documents whose text doesn't fit this browser's search (`LocalResults.leftOut`). */
-      leftOut?: number;
+      /** The file ids whose text doesn't fit this browser's search (`LocalResults.leftOut`). */
+      leftOut?: readonly number[];
     }
   | { kind: "error"; query: string };
 
@@ -111,7 +111,7 @@ export function createNoteSearch(deps: NoteSearchDeps): NoteSearchController {
         items: results.items,
         // Only a phrase search that couldn't check everything says so.
         ...(results.unchecked ? { unchecked: results.unchecked } : {}),
-        ...(results.leftOut ? { leftOut: results.leftOut } : {}),
+        ...(results.leftOut?.length ? { leftOut: results.leftOut } : {}),
       });
     } catch (e) {
       if (mine !== token) return;

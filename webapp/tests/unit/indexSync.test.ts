@@ -7,7 +7,8 @@ import type { IndexTransport, ManifestAnswer, StreamAnswer } from "../../src/sea
 import { openTermsStore, termsKeyOf, weigh } from "../../src/cache/termsStore";
 import type { TermsKey, TermsStore, StoredTermsDocument } from "../../src/cache/termsStore";
 import type { TermsDocument } from "../../src/search/termsStream";
-import type { RememberedSizes } from "../../src/search/termsBudget";
+import { keepOrder, type RememberedSizes } from "../../src/search/termsBudget";
+import { decodeManifest } from "../../src/search/manifestCodec";
 
 // The same golden manifest `manifestCodec.test.ts` decodes; position 2 has a null version.
 const MANIFEST = new Uint8Array(
@@ -260,7 +261,8 @@ describe("createIndexSync", () => {
     const first = await sync.sync();
     expect(first.received).toBe(4);
     // Position 4 is the oldest non-notebook: kept last, so refused on arrival.
-    expect(first.leftOut).toBe(1);
+    // Named by file id, which the app finds in its listing.
+    expect(first.leftOut).toEqual([decodeManifest(MANIFEST).rows[4]!.fileId]);
     expect(first.letGo).toBe(0);
     expect(store.records.has(termsKeyOf(ROWS[3]![1], ROWS[3]![2]))).toBe(false);
     expect(store.peak()).toBeLessThanOrEqual(3 * ONE);
@@ -269,7 +271,7 @@ describe("createIndexSync", () => {
     const second = await sync.sync();
     expect(calls).toHaveLength(1);
     expect(second.requested).toBe(0);
-    expect(second.leftOut).toBe(1);
+    expect(second.leftOut).toHaveLength(1);
     expect(second.letGo).toBe(0);
   });
 
@@ -305,7 +307,7 @@ describe("createIndexSync", () => {
     const { transport, calls } = fakeTransport([[body]]);
     const next = await createIndexSync({ store, transport, sizes }).sync();
     expect(calls).toHaveLength(0);
-    expect(next.leftOut).toBe(4);
+    expect(next.leftOut).toHaveLength(4);
   });
 
   it("replaces each old version as its new one arrives, so a re-derive stays within the budget", async () => {
@@ -351,7 +353,7 @@ describe("createIndexSync", () => {
     const outcome = await createIndexSync({ store, transport, sizes: memorySizes() }).sync();
     expect(calls).toHaveLength(0);
     expect(outcome.letGo).toBe(1);
-    expect(outcome.leftOut).toBe(1);
+    expect(outcome.leftOut).toHaveLength(1);
     expect(store.records.has(termsKeyOf(ROWS[3]![1], ROWS[3]![2]))).toBe(false);
   });
 
@@ -362,7 +364,7 @@ describe("createIndexSync", () => {
     const outcome = await createIndexSync({ store, transport, sizes: memorySizes() }).sync();
     expect(calls).toHaveLength(2);
     expect(outcome.stored).toBe(3);
-    expect(outcome.leftOut).toBe(1);
+    expect(outcome.leftOut).toHaveLength(1);
     expect(store.peak()).toBeLessThanOrEqual(3 * ONE);
   });
 
@@ -417,7 +419,7 @@ describe("createIndexSync", () => {
     const { transport, calls } = fakeTransport([[body]]);
     const next = await createIndexSync({ store, transport, sizes }).sync();
     expect(calls).toHaveLength(0);
-    expect(next.leftOut).toBe(1);
+    expect(next.leftOut).toHaveLength(1);
   });
 
   it("keeps notebooks first: a smaller budget lets go of the other documents before any notebook", async () => {
@@ -426,7 +428,10 @@ describe("createIndexSync", () => {
     const outcome = await createIndexSync({ store, transport: fakeTransport([[body]]).transport, sizes: memorySizes() }).sync();
     // Positions 0 and 1 are the notebooks.
     expect([...store.records.keys()].sort()).toEqual([termsKeyOf(ROWS[0]![1], ROWS[0]![2]), termsKeyOf(ROWS[1]![1], ROWS[1]![2])].sort());
-    expect(outcome.leftOut).toBe(2);
+    // The rest by file id, in keep order (`keepOrder`): the most wanted first.
+    const rows = decodeManifest(MANIFEST).rows;
+    const kept = keepOrder(rows).filter((p) => p === 3 || p === 4);
+    expect(outcome.leftOut).toEqual(kept.map((p) => rows[p]!.fileId));
   });
 
   it("asks again for a document let go once room is made", async () => {
@@ -442,7 +447,7 @@ describe("createIndexSync", () => {
     const outcome = await createIndexSync({ store: roomy, transport, sizes }).sync();
     expect(calls).toHaveLength(1);
     expect(outcome.received).toBe(1);
-    expect(outcome.leftOut).toBe(0);
+    expect(outcome.leftOut).toHaveLength(0);
   });
 
   it("coalesces a concurrent sync into the one already in flight", async () => {
@@ -463,7 +468,7 @@ describe("createIndexSync", () => {
     expect(outcome.received).toBe(4);
     expect(outcome.persisted).toBe(false);
     // Nothing kept is not "nothing fits": no budget, nothing left out or remembered.
-    expect(outcome.leftOut).toBe(0);
+    expect(outcome.leftOut).toHaveLength(0);
     await expect(sync.documents()).resolves.toEqual([]);
     expect((await sync.sync()).requested).toBe(4);
   });

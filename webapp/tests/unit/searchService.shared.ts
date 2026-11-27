@@ -135,7 +135,7 @@ export function fakeSync(opts: FakeSyncOptions = {}) {
     docs: opts.docs ?? DOCS,
     rows: opts.rows ?? LIVE,
     received: opts.docs?.length ?? DOCS.length,
-    leftOut: 0,
+    leftOut: [] as number[],
     letGo: 0,
     syncs: 0,
     /** Set before a call to make THAT call block; `gate` then releases it. */
