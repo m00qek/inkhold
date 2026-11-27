@@ -98,10 +98,16 @@ test "an explicit <config> that does not exist is refused rather than defaulted"
     try testing.expect(std.mem.indexOf(u8, c.err, "No config file at") != null);
 }
 
-test "serve on a port another program listens on: one plain line, a failed exit, nothing created" {
+/// `serve` on `host` with its port already bound: the one line it prints,
+/// checked against `shown` (the host as the message spells it).
+fn expectPortTaken(host: []const u8, shown: []const u8) !void {
     const gpa = testing.allocator;
     const io = testing.io;
-    var taken = try transport.listenExclusive(try std.Io.net.IpAddress.parse("127.0.0.1", 0));
+    var taken = transport.listenExclusive(try std.Io.net.IpAddress.parse(host, 0)) catch |e| switch (e) {
+        // No IPv6 on this machine: nothing to show.
+        error.AddressFamilyUnsupported, error.AddressUnavailable => return error.SkipZigTest,
+        else => return e,
+    };
     defer taken.deinit(io);
     const port = taken.socket.address.getPort();
 
@@ -110,8 +116,8 @@ test "serve on a port another program listens on: one plain line, a failed exit,
     const root = ".zig-cache/tmp/" ++ tmp.sub_path;
     var body: [512]u8 = undefined;
     try tmp.dir.writeFile(io, .{ .sub_path = "inkhold.zon", .data = try std.fmt.bufPrint(&body,
-        \\.{{ .host = "127.0.0.1", .port = {d}, .db_path = "{s}/inkhold.db", .cred_key_path = "{s}/cred.key", .data_dir = "{s}/data" }}
-    , .{ port, root, root, root }) });
+        \\.{{ .host = "{s}", .port = {d}, .db_path = "{s}/inkhold.db", .cred_key_path = "{s}/cred.key", .data_dir = "{s}/data" }}
+    , .{ host, port, root, root, root }) });
     var path_buf: [256]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/inkhold.zon", .{root});
 
@@ -119,9 +125,17 @@ test "serve on a port another program listens on: one plain line, a failed exit,
     defer c.deinit(gpa);
     try testing.expectEqual(exit_failed, c.code);
     var want: [512]u8 = undefined;
-    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "Cannot listen on 127.0.0.1:{d}: another program is already listening there. Stop it, or set another `port` in {s}.\n", .{ port, path }), c.err);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "Cannot listen on {s}:{d}: another program is already listening there. Stop it, or set another `port` in {s}.\n", .{ shown, port, path }), c.err);
     // The port is taken first: the database is never opened, nor created.
     try testing.expectError(error.FileNotFound, tmp.dir.access(io, "inkhold.db", .{}));
+}
+
+test "serve on a port another program listens on: one plain line, a failed exit, nothing created" {
+    try expectPortTaken("127.0.0.1", "127.0.0.1");
+}
+
+test "serve on an IPv6 port in use names it in brackets, so the port stands apart" {
+    try expectPortTaken("::1", "[::1]");
 }
 
 test "the escapes are really there under ansi, and really absent under plain" {

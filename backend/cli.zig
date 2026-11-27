@@ -445,10 +445,14 @@ pub fn execute(
             app.run(gpa, io, loaded.config, &routes.routes) catch |e| switch (e) {
                 // One line, no trace: the usual cause is a server already running.
                 error.AddressInUse => {
-                    try err.print("{[b]s}Cannot listen on {[h]s}:{[p]d}:{[r]s} another program is already listening there. Stop it, or set another `port` in {[cfg]s}.\n", .{
+                    // An IPv6 host in brackets, or `::` and the port would run together.
+                    const v6 = std.mem.indexOfScalar(u8, loaded.config.host, ':') != null;
+                    try err.print("{[b]s}Cannot listen on {[o]s}{[h]s}{[c]s}:{[p]d}:{[r]s} another program is already listening there. Stop it, or set another `port` in {[cfg]s}.\n", .{
                         .b = st.bold,
                         .r = st.reset,
+                        .o = if (v6) "[" else "",
                         .h = loaded.config.host,
+                        .c = if (v6) "]" else "",
                         .p = loaded.config.port,
                         .cfg = inv.configPath(),
                     });

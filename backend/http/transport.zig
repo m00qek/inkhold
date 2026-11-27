@@ -224,6 +224,8 @@ pub const ListenError = error{
     AddressInUse,
     AccessDenied,
     AddressUnavailable,
+    /// An IPv6 `host` on a system without IPv6, say.
+    AddressFamilyUnsupported,
     SystemResources,
     Unexpected,
 };
@@ -236,6 +238,11 @@ pub const ListenError = error{
 /// inkhold binds the same port and silently takes half the connections.
 /// A blocking socket, as std's own listen makes; `Server` and `accept` take
 /// it as theirs. Port 0 is resolved, as std does, into `socket.address`.
+/// Bind and listen together: on Linux a socket bound with SO_REUSEADDR but
+/// not yet listening does not hold the port against another one that also
+/// sets it, so binding early and listening late would let the clash through
+/// to `listen`, after the database. Connections made while `app.run` starts
+/// up wait in the backlog until the accept loop runs.
 pub fn listenExclusive(address: Io.net.IpAddress) ListenError!Io.net.Server {
     const posix = std.posix;
     const Threaded = Io.Threaded;
@@ -247,6 +254,7 @@ pub fn listenExclusive(address: Io.net.IpAddress) ListenError!Io.net.Server {
         .SUCCESS => @intCast(rc),
         .MFILE, .NFILE, .NOBUFS, .NOMEM => return error.SystemResources,
         .ACCES => return error.AccessDenied,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
         else => |e| return posix.unexpectedErrno(e),
     };
     errdefer _ = posix.system.close(fd);
@@ -260,6 +268,7 @@ pub fn listenExclusive(address: Io.net.IpAddress) ListenError!Io.net.Server {
         .ADDRINUSE => return error.AddressInUse,
         .ACCES => return error.AccessDenied,
         .ADDRNOTAVAIL => return error.AddressUnavailable,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
         .NOMEM => return error.SystemResources,
         else => |e| return posix.unexpectedErrno(e),
     };
@@ -520,14 +529,15 @@ test "listenExclusive: a server stopped a moment ago binds its port again, past 
     // SO_REUSEADDR is what lets a restart through: the server closes first, so
     // its side of the connection waits out TIME_WAIT on the listening port.
     const io = std.testing.io;
-    var first = try listenExclusive(try Io.net.IpAddress.parse("127.0.0.1", 0));
-    const address = first.socket.address;
-    const client = try address.connect(io, .{ .mode = .stream });
-    const accepted = try first.accept(io);
-    accepted.close(io);
-    client.close(io);
-    first.deinit(io);
-
+    const address = address: {
+        var first = try listenExclusive(try Io.net.IpAddress.parse("127.0.0.1", 0));
+        defer first.deinit(io);
+        const client = try first.socket.address.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+        const accepted = try first.accept(io);
+        accepted.close(io);
+        break :address first.socket.address;
+    };
     var again = try listenExclusive(address);
     again.deinit(io);
 }
