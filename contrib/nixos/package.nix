@@ -21,25 +21,25 @@
 }:
 
 let
-  released = "1.0.0-beta.2";
+  released = "1.0.0-beta.3";
   builds = {
     x86_64-linux = {
       target = "x86_64-linux-musl";
-      hash = "sha256-asYC62rxYlAFg5knfVhdpnSIzZ8KnUYTbzeBdB53HlU=";
+      hash = "sha256-kOwe9jwRkH2XZBRbeXiolBR5s8R2oJQFsA53k6VV824=";
     };
     aarch64-linux = {
       target = "aarch64-linux-musl";
-      hash = "sha256-XuV3vLxJpOh5tdexypzL6/68qDAawUbL+oUD0nqZQOQ=";
+      hash = "sha256-z7WQ4eCJcbyGfNrWXEKHsiP6Z0M8rPkEdWEwqZtgu84=";
     };
     # Built for the Raspberry Pi 1's ARMv6, so it runs on any 32-bit ARM.
     armv6l-linux = {
       target = "arm-linux-musleabihf";
-      hash = "sha256-XCQIZkeWWad4BuxDFzGjSbWZ4RoEmgYxM3LjXukbq9Y=";
+      hash = "sha256-KWGn+R4ofVUA/nyiod56xKUPJOTjLTlGU41vAb4wpmE=";
     };
     armv7l-linux = builds.armv6l-linux;
     i686-linux = {
       target = "x86-linux-musl";
-      hash = "sha256-kosXUvc6/yo4aVxEC/k2COgSma2MjJ9KgMm/7GwxHgs=";
+      hash = "sha256-phYPq1snDdGfSXcXeZr/eeQjwdWGdHvNscKeJRgoKpU=";
     };
   };
   system = stdenvNoCC.hostPlatform.system;
