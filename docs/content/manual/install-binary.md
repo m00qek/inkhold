@@ -78,6 +78,11 @@ journalctl -u inkhold
 The journal shows the first account's password, once. Open
 `http://<the computer's address>:8089` and sign in as `admin@home.lan`.
 
+If instead it says `Cannot listen on 0.0.0.0:8089: another program is already
+listening there`, the port is taken, often by an Inkhold you started by hand.
+Stop that program, or set another `port` in `config.zon`; until then systemd
+tries again every five seconds.
+
 The service runs as the `inkhold` account and can write only to
 `/var/lib/inkhold`, which systemd creates for it: the database, `cred.key`,
 your notebooks and the search index all live there.

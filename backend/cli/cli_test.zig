@@ -12,6 +12,7 @@ const parse = cli.parse;
 const Style = cli.Style;
 const writeHelp = cli.writeHelp;
 const fixture = @import("fixture.zig");
+const transport = @import("../http/transport.zig");
 const capture = fixture.capture;
 
 test "bare `inkhold` and an explicit `serve` both serve" {
@@ -95,6 +96,32 @@ test "an explicit <config> that does not exist is refused rather than defaulted"
     try testing.expectEqual(exit_failed, c.code);
     try testing.expect(std.mem.indexOf(u8, c.err, "no/such/inkhold.zon") != null);
     try testing.expect(std.mem.indexOf(u8, c.err, "No config file at") != null);
+}
+
+test "serve on a port another program listens on: one plain line, a failed exit, nothing created" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var taken = try transport.listenExclusive(try std.Io.net.IpAddress.parse("127.0.0.1", 0));
+    defer taken.deinit(io);
+    const port = taken.socket.address.getPort();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = ".zig-cache/tmp/" ++ tmp.sub_path;
+    var body: [512]u8 = undefined;
+    try tmp.dir.writeFile(io, .{ .sub_path = "inkhold.zon", .data = try std.fmt.bufPrint(&body,
+        \\.{{ .host = "127.0.0.1", .port = {d}, .db_path = "{s}/inkhold.db", .cred_key_path = "{s}/cred.key", .data_dir = "{s}/data" }}
+    , .{ port, root, root, root }) });
+    var path_buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/inkhold.zon", .{root});
+
+    const c = try capture(gpa, .{ .command = .serve, .config = path });
+    defer c.deinit(gpa);
+    try testing.expectEqual(exit_failed, c.code);
+    var want: [512]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "Cannot listen on 127.0.0.1:{d}: another program is already listening there. Stop it, or set another `port` in {s}.\n", .{ port, path }), c.err);
+    // The port is taken first: the database is never opened, nor created.
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "inkhold.db", .{}));
 }
 
 test "the escapes are really there under ansi, and really absent under plain" {

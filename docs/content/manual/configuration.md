@@ -19,7 +19,7 @@ which lists them all, and change what you need.
 | Setting | Default | What it does |
 |---|---|---|
 | `host` | `"127.0.0.1"` | The address to listen on. The default accepts this computer only: use "0.0.0.0" for every network it is on, or one of its addresses. |
-| `port` | `8089` | The port for everything: the tablet's sync, the browser app and HTTPS. |
+| `port` | `8089` | The port for everything: the tablet's sync, the browser app and HTTPS. Inkhold won't start on a port another program is already listening on. |
 | `db_path` | `"inkhold.db"` | The database file, created on the first start. |
 | `cred_key_path` | `"cred.key"` | The key that encrypts stored credentials, created on the first start. Kept apart from the database, so a stolen database reveals nothing. Back it up somewhere else: without it, everyone has to reset their password. |
 | `data_dir` | `"data"` | Where your notebooks and everything derived from them are stored. |

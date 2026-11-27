@@ -30,9 +30,17 @@ const passwordmod = @import("services/auth/password.zig");
 
 /// Builds everything and serves; never returns on success.
 pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const router.Route) !void {
+    // The port first, before the database or a worker: a second server on
+    // it fails here (`error.AddressInUse`, said by `cli.zig`) having touched
+    // nothing, not even the signal mask.
+    const address = try Io.net.IpAddress.parse(cfg.host, cfg.port);
+    var listener = try transport.listenExclusive(address);
+    defer listener.deinit(io);
+
     // Before any thread exists, so every thread inherits the mask and only the
     // transport's stop thread takes SIGTERM/SIGINT (http/shutdown.zig).
     shutdown.blockStopSignals();
+
     var rng_source: std.Random.IoSource = .{ .io = io };
     const rng = rng_source.interface();
 
@@ -164,7 +172,7 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     };
 
     const auth_ptr: ?*tls.config.CertKeyPair = if (auth) |*a| a else null;
-    try transport.listenAndServe(io, cfg, routes, &ctx, auth_ptr, ciphers, rng);
+    try transport.listenAndServe(io, &listener, cfg, routes, &ctx, auth_ptr, ciphers, rng);
 }
 
 fn sweepFailed(what: []const u8, e: anyerror) usize {
