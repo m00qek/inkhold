@@ -39,6 +39,7 @@ test {
     _ = config;
     _ = transport;
     _ = @import("app.zig");
+    _ = @import("services/serve_lock.zig");
     _ = routes;
     _ = cli;
     _ = @import("util/expiring.zig");

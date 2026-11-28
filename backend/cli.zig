@@ -13,6 +13,7 @@ const passwordmod = @import("services/auth/password.zig");
 
 const cli_recovery = @import("cli/recovery.zig");
 const cli_backup = @import("cli/backup.zig");
+const serve_lock = @import("services/serve_lock.zig");
 const listUsers = cli_recovery.listUsers;
 const resetPassword = cli_recovery.resetPassword;
 const makeAdmin = cli_recovery.makeAdmin;
@@ -442,7 +443,8 @@ pub fn execute(
                 return exit_failed;
             }
 
-            app.run(gpa, io, loaded.config, &routes.routes) catch |e| switch (e) {
+            var held_by: ?serve_lock.Holder = null;
+            app.run(gpa, io, loaded.config, &routes.routes, &held_by) catch |e| switch (e) {
                 // One line, no trace: the usual cause is a server already running.
                 error.AddressInUse => {
                     // An IPv6 host in brackets, or `::` and the port would run together.
@@ -456,6 +458,12 @@ pub fn execute(
                         .p = loaded.config.port,
                         .cfg = inv.configPath(),
                     });
+                    return exit_failed;
+                },
+                error.DataFolderInUse => {
+                    try err.print("{[b]s}Cannot serve {[d]s}:{[r]s} another Inkhold is already serving it", .{ .b = st.bold, .r = st.reset, .d = loaded.config.data_dir });
+                    try serve_lock.writeHolder(err, held_by);
+                    try err.print(". Stop it, or set another `data_dir` in {s}.\n", .{inv.configPath()});
                     return exit_failed;
                 },
                 else => return e,

@@ -13,6 +13,7 @@ const Style = cli.Style;
 const writeHelp = cli.writeHelp;
 const fixture = @import("fixture.zig");
 const transport = @import("../http/transport.zig");
+const serve_lock = @import("../services/serve_lock.zig");
 const capture = fixture.capture;
 
 test "bare `inkhold` and an explicit `serve` both serve" {
@@ -136,6 +137,38 @@ test "serve on a port another program listens on: one plain line, a failed exit,
 
 test "serve on an IPv6 port in use names it in brackets, so the port stands apart" {
     try expectPortTaken("::1", "[::1]");
+}
+
+test "serve on a data folder another Inkhold serves: one plain line naming it, a failed exit, nothing created" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "data");
+    var data = try tmp.dir.openDir(io, "data", .{});
+    defer data.close(io);
+    var holder: ?serve_lock.Holder = null;
+    const live = try serve_lock.acquireAs(io, data, 4242, "hub", &holder);
+    defer live.release(io);
+
+    const root = ".zig-cache/tmp/" ++ tmp.sub_path;
+    // Port 0: the port is free, so the folder is what refuses. The database
+    // sits in a folder that doesn't exist: were the lock ever to let `serve`
+    // past, it fails there at once instead of serving, and the test fails
+    // rather than hangs.
+    try tmp.dir.writeFile(io, .{ .sub_path = "inkhold.zon", .data =
+        \\.{ .host = "127.0.0.1", .port = 0, .db_path = "no/such/folder/inkhold.db", .cred_key_path = "cred.key", .data_dir = "data" }
+    });
+    var path_buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/inkhold.zon", .{root});
+
+    const c = try capture(gpa, .{ .command = .serve, .config = path });
+    defer c.deinit(gpa);
+    try testing.expectEqual(exit_failed, c.code);
+    var want: [512]u8 = undefined;
+    // The folder as the config resolves it, against the config file's own.
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "Cannot serve {s}/data: another Inkhold is already serving it (pid 4242 on hub). Stop it, or set another `data_dir` in {s}.\n", .{ root, path }), c.err);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "no", .{}));
 }
 
 test "the escapes are really there under ansi, and really absent under plain" {

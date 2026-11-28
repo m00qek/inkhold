@@ -27,15 +27,37 @@ const blobstore = @import("store/blobs.zig");
 const thumbstore = @import("store/thumbs.zig");
 const derivedstore = @import("store/derived.zig");
 const passwordmod = @import("services/auth/password.zig");
+const serve_lock = @import("services/serve_lock.zig");
 
-/// Builds everything and serves; never returns on success.
-pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const router.Route) !void {
+/// Builds everything and serves; never returns on success. On
+/// `error.DataFolderInUse`, `held_by` names the other server when its lock
+/// file says who it is.
+pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const router.Route, held_by: *?serve_lock.Holder) !void {
     // The port first, before the database or a worker: a second server on
     // it fails here (`error.AddressInUse`, said by `cli.zig`) having touched
     // nothing, not even the signal mask.
     const address = try Io.net.IpAddress.parse(cfg.host, cfg.port);
     var listener = try transport.listenExclusive(address);
     defer listener.deinit(io);
+
+    // Then the data folder (`serve_lock.zig`): another server on it, on any
+    // port, fails here (`error.DataFolderInUse`) having touched nothing but
+    // the folder, which a first start creates now rather than with its
+    // stores below.
+    var data_dir = try std.Io.Dir.cwd().createDirPathOpen(io, cfg.data_dir, .{});
+    defer data_dir.close(io);
+    const folder_lock: ?serve_lock.Lock = serve_lock.acquire(io, data_dir, held_by) catch |e| switch (e) {
+        error.Locked => return error.DataFolderInUse,
+        // A folder that cannot be locked at all (a FUSE mount without locks,
+        // NFSv3 with its lock daemon down) serves as it did before this lock:
+        // refusing would stop an install that worked. Said once, in the log.
+        error.FileLocksUnsupported, error.SystemResources => unlocked: {
+            std.log.warn("cannot lock {s} ({t}): a second Inkhold on this folder would not be refused", .{ cfg.data_dir, e });
+            break :unlocked null;
+        },
+        else => return e,
+    };
+    defer if (folder_lock) |l| l.release(io);
 
     // Before any thread exists, so every thread inherits the mask and only the
     // transport's stop thread takes SIGTERM/SIGINT (http/shutdown.zig).

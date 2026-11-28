@@ -12,6 +12,7 @@ const exit_failed = cli.exit_failed;
 const fixture = @import("fixture.zig");
 const bfix = @import("../services/backup/fixture.zig");
 const repeat = @import("../util/repeat.zig").repeat;
+const serve_lock = @import("../services/serve_lock.zig");
 
 test "backup verbs take a directory, and only the options that mean something to them" {
     {
@@ -138,6 +139,58 @@ test "create, list, verify, prune and restore, end to end through the command li
     }
 }
 
+test "beside a live server: users and backups run, restore is refused and touches nothing" {
+    var inst = try bfix.Install.init();
+    defer inst.deinit();
+    _ = try inst.addUser("ana@home.lan", "pw");
+    _ = try inst.addBlob(repeat(u8, "ink ", 2000));
+    var cbuf: [256]u8 = undefined;
+    const cfg = try configPath(inst.tmp, inst.root, &cbuf);
+    // The data folder held as `serve` holds it.
+    var data = try inst.tmp.dir.openDir(testing.io, "state/data", .{});
+    defer data.close(testing.io);
+    var holder: ?serve_lock.Holder = null;
+    const live = try serve_lock.acquireAs(testing.io, data, 4242, "hub", &holder);
+    defer live.release(testing.io);
+
+    {
+        const c = try run(&.{ "--config", cfg, "users", "list" });
+        defer c.deinit(testing.allocator);
+        try testing.expectEqual(exit_ok, c.code);
+        try testing.expect(std.mem.indexOf(u8, c.out, "ana@home.lan") != null);
+    }
+    {
+        const c = try run(&.{ "--config", cfg, "backup", "create", inst.backup_dir, "--max-rate=0" });
+        defer c.deinit(testing.allocator);
+        try testing.expectEqual(exit_ok, c.code);
+    }
+
+    var target = try bfix.Target.init();
+    defer target.deinit();
+    var tbuf: [256]u8 = undefined;
+    const tcfg = try configPath(target.tmp, target.root, &tbuf);
+    try target.tmp.dir.createDirPath(testing.io, "state/data");
+    var tdata = try target.tmp.dir.openDir(testing.io, "state/data", .{});
+    defer tdata.close(testing.io);
+    const serving = try serve_lock.acquireAs(testing.io, tdata, 4243, "hub", &holder);
+    {
+        const c = try run(&.{ "--config", tcfg, "restore", inst.backup_dir });
+        defer c.deinit(testing.allocator);
+        try testing.expectEqual(exit_failed, c.code);
+        var want: [512]u8 = undefined;
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&want, "Another Inkhold is serving {s}/state/data (pid 4243 on hub). Stop it before restoring; nothing was touched.\n", .{target.root}), c.err);
+        try testing.expectError(error.FileNotFound, target.tmp.dir.access(testing.io, "state/inkhold.db", .{}));
+    }
+    // That server gone, its lock file left behind: restore runs, and leaves the file.
+    serving.release(testing.io);
+    {
+        const c = try run(&.{ "--config", tcfg, "restore", inst.backup_dir });
+        defer c.deinit(testing.allocator);
+        try testing.expectEqual(exit_ok, c.code);
+        try target.tmp.dir.access(testing.io, "state/data/" ++ serve_lock.file_name, .{});
+    }
+}
+
 test "a missing backup directory is named, and nothing is created in its place" {
     var inst = try bfix.Install.init();
     defer inst.deinit();
@@ -157,6 +210,16 @@ test "a missing backup directory is named, and nothing is created in its place" 
         try testing.expect(std.mem.indexOf(u8, c.err, "is it mounted?") != null);
     }
     try testing.expectError(error.FileNotFound, inst.tmp.dir.access(testing.io, "nas-not-mounted", .{}));
+
+    // Nor a data folder (or its lock) on an empty target the restore never began.
+    var target = try bfix.Target.init();
+    defer target.deinit();
+    var tbuf: [256]u8 = undefined;
+    const tcfg = try configPath(target.tmp, target.root, &tbuf);
+    const c = try run(&.{ "--config", tcfg, "restore", missing });
+    defer c.deinit(testing.allocator);
+    try testing.expectEqual(exit_failed, c.code);
+    try testing.expectError(error.FileNotFound, target.tmp.dir.access(testing.io, "state/data", .{}));
 }
 
 test "a backup inside the live data is refused" {

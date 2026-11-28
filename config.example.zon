@@ -20,6 +20,7 @@
     .cred_key_path = "cred.key",
 
     // Where your notebooks and everything derived from them are stored.
+    // Only one Inkhold serves a data folder at a time; a second won't start.
     .data_dir = "data",
 
     // The browser app's files. Empty serves no browser app, only the tablet's
