@@ -43,3 +43,6 @@ that feedback is the point of the beta.
 
 [AGPL-3.0](LICENSE). The understanding of Supernote's file formats derives from
 [supernote-tool](https://github.com/jya-dev/supernote-tool) (Apache-2.0).
+The fonts the browser app embeds, and their licences, are listed in
+[THIRD-PARTY-NOTICES.txt](webapp/public/THIRD-PARTY-NOTICES.txt), which the
+release archive and the container image carry in `webapp/dist`.

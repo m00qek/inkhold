@@ -104,6 +104,23 @@ its `.mark` does.
   that can suspend on `ink.host_read` must be wrapped for JSPI.
 - MuPDF is a pinned, unpatched dependency. An upstream bug is worked around by
   excluding sources and supplying stubs, never by patching.
+- A book (EPUB) is laid out as the tablet's reader lays it out, so its pages
+  are the tablet's pages: `fz_layout_document` at 1200 x 1600 with a 100/3
+  em, the numbers at which the reader's MuPDF 1.17 reproduces its own page
+  33 of Moby Dick (`ink_layout_book` in `pdf_shim.c`; layout is not
+  scale-invariant, so not 288 x 384 with 8). A user stylesheet undoes what
+  our MuPDF does and 1.17 doesn't (`ink_tablet_css`: no automatic
+  hyphenation, though a soft hyphen still breaks a line; no `hgroup`
+  margins). The book face is the reader's: Charis SIL, and Noto
+  Serif as the fallback for characters it lacks (U+FEFF, which would
+  otherwise take a stand-in's width and move line breaks). The wasm build
+  keeps them (`TOFU_NOTO`; `book_fonts.zig`: +479 KB raw, +264 KB brotli);
+  Noto Serif reaches MuPDF through its public system-fallback hook, for the
+  scripts its own font table gives it. `pdf_decode_abi/book.mjs` pins all of
+  it on a small fixture. The layout and the stylesheet are never applied to
+  a PDF, XPS or CBZ; the fallback font can reach a PDF only where MuPDF
+  draws text itself (a form field's or note's generated appearance), as in
+  a stock MuPDF build.
 - `pdf-decode.wasm` declares a 1 GiB memory maximum (`pdf_decode_max_memory`
   in `build.zig`, pinned by `pdf_decode_abi/memory_cap.mjs`). A hostile
   document then fails as MuPDF's out-of-memory error instead of growing the

@@ -5,6 +5,7 @@
 
 #include <mupdf/fitz.h>
 #include <mupdf/pdf.h> /* the export path builds a PDF, not just reads one */
+#include <mupdf/ucdn.h> /* script numbers, for the book fallback font */
 
 #include <stdio.h> /* EOF, SEEK_CUR, SEEK_END — for the callback stream */
 #include <stdlib.h>

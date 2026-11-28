@@ -231,6 +231,11 @@ pub fn build(b: *std.Build) void {
     });
     pdf_decode_mod.link_libc = true;
     pdf_decode_mod.linkLibrary(buildMupdfWasm(b, mupdf_dep));
+    // Charis SIL and Noto Serif for books (`webapp/wasm/book_fonts.zig`,
+    // `TOFU_NOTO` in build_mupdf.zig).
+    for ([_][]const u8{ "sil/CharisSIL.cff", "sil/CharisSIL-Bold.cff", "sil/CharisSIL-Italic.cff", "sil/CharisSIL-BoldItalic.cff", "noto/NotoSerif-Regular.otf" }) |face| {
+        pdf_decode_mod.addAnonymousImport(std.fs.path.basename(face), .{ .root_source_file = mupdf_dep.path(b.fmt("resources/fonts/{s}", .{face})) });
+    }
     const pdf_decode = b.addExecutable(.{ .name = "pdf-decode", .root_module = pdf_decode_mod });
     pdf_decode.wasi_exec_model = .reactor;
     pdf_decode.rdynamic = true; // keep the `export fn`s
