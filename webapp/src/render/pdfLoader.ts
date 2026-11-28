@@ -210,12 +210,15 @@ export function supportsWasmExceptions(): boolean {
  * Fetch, instantiate against the shim, run `_initialize`. `hostRead` is a
  * factory because the block cache needs the instance's `memory` first.
  */
+/** Loads the decoder once; `reset` makes the next load a fresh instance. */
+export type PdfDecoderLoader = (() => Promise<PdfDecoderExports>) & { reset(): void };
+
 export function browserLoader(
   wasmUrl: string,
   hostRead?: (getMemory: () => WebAssembly.Memory) => HostRead | WebAssembly.Suspending,
-): () => Promise<PdfDecoderExports> {
+): PdfDecoderLoader {
   let cached: Promise<PdfDecoderExports> | null = null;
-  return () =>
+  const load = () =>
     (cached ??= (async () => {
       if (!supportsWasmExceptions()) {
         throw new Error("this browser cannot run the PDF decoder (no wasm exceptions)");
@@ -237,6 +240,20 @@ export function browserLoader(
       exports._initialize?.();
       return exports;
     })());
+  // Dropped, not reused: its memory never shrinks, and MuPDF may have been
+  // mid-operation when it ran out.
+  return Object.assign(load, { reset: () => void (cached = null) });
+}
+
+/**
+ * Whether an error means the decoder's instance is spent: it ran out of
+ * memory at its ceiling (`max_memory` in build.zig; MuPDF says "malloc (…)
+ * failed"), or it trapped. Either way it is not used again.
+ */
+export function spentDecoder(err: unknown): boolean {
+  if (err instanceof WebAssembly.RuntimeError) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /malloc \(\d+ bytes\) failed|out of memory/i.test(message);
 }
 
 // ---- typed wrapper ----

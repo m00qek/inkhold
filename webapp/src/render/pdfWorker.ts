@@ -6,6 +6,7 @@
 import {
   DEFAULT_WASM_URL,
   browserLoader,
+  spentDecoder,
   type HostRead,
   type PdfDecoderExports,
 } from "./pdfLoader";
@@ -307,6 +308,13 @@ function handle(req: PdfRequest): Promise<void> {
       }
     }
   })().catch((err: unknown) => {
+    // Out of memory at the ceiling, or a trap: drop the document and the
+    // instance; the next open starts a fresh one. This request still fails,
+    // with the viewer's own message for it.
+    if (spentDecoder(err)) {
+      release();
+      loadDecoder.reset();
+    }
     ctx.postMessage({
       kind: "error",
       id: req.id,

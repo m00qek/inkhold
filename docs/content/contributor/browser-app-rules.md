@@ -104,3 +104,12 @@ its `.mark` does.
   that can suspend on `ink.host_read` must be wrapped for JSPI.
 - MuPDF is a pinned, unpatched dependency. An upstream bug is worked around by
   excluding sources and supplying stubs, never by patching.
+- `pdf-decode.wasm` declares a 1 GiB memory maximum (`pdf_decode_max_memory`
+  in `build.zig`, pinned by `pdf_decode_abi/memory_cap.mjs`). A hostile
+  document then fails as MuPDF's out-of-memory error instead of growing the
+  worker until the tab dies. It is sized never to refuse what opens today: a
+  scanned page at the largest raster (16 M px) peaks near 580 MiB, a session
+  of them near 730 MiB, since wasm memory is never returned. After that error
+  (or a trap) the worker drops the instance and the next open starts a fresh
+  one (`spentDecoder`, `browserLoader().reset`). A backstop, not a phone's
+  protection.

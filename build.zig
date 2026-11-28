@@ -223,6 +223,7 @@ pub fn build(b: *std.Build) void {
     // ---- WebAssembly PDF decoder (MuPDF) ----
     // Linked at plain `wasi_target`; see `buildMupdfWasm`.
     const mupdf_dep = b.dependency("mupdf", .{});
+    const pdf_decode_max_memory: u64 = 1 << 30;
     const pdf_decode_mod = b.createModule(.{
         .root_source_file = b.path("webapp/wasm/pdf_decode.zig"),
         .target = wasi_target,
@@ -233,6 +234,14 @@ pub fn build(b: *std.Build) void {
     const pdf_decode = b.addExecutable(.{ .name = "pdf-decode", .root_module = pdf_decode_mod });
     pdf_decode.wasi_exec_model = .reactor;
     pdf_decode.rdynamic = true; // keep the `export fn`s
+    // A hard ceiling, so a hostile document (a zip bomb, a huge image) fails
+    // inside MuPDF as an ordinary out-of-memory error instead of growing the
+    // worker until the tab dies. Sized never to refuse what opens today:
+    // measured 2026-11-28 through the stream path at the viewer's largest
+    // raster (16 M px), a single scanned page peaks at ~580 MiB and a session
+    // of seven such pages at ~730 MiB, since wasm memory is never returned.
+    // A backstop, not a phone's protection. `pdf_decode_abi.mjs` pins it.
+    pdf_decode.max_memory = pdf_decode_max_memory;
     const pdf_decode_step = b.step("wasm-pdf-decode", "Build the PDF viewer decoder wasm (MuPDF)");
     pdf_decode_step.dependOn(&b.addInstallArtifact(pdf_decode, .{}).step);
 
