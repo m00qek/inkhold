@@ -19,6 +19,13 @@ extra:
   tablets at about 15% of its single core through a busy evening.
 - **Disk**: room for your notebooks and their versions, plus the search index.
   A backup belongs on another disk.
+- **The data folder on a NAS** (NFS or SMB) works, with one Inkhold serving it
+  at a time: a second one refuses to start. On one computer that holds on any
+  disk or share. Across two computers it holds only where the share passes
+  file locks on (NFSv4; SMB without `nobrl`), and not at all on an NFS mount
+  with `local_lock` or in a cloud-synced folder. It guards the data folder,
+  so keep `db_path` beside it: two configs sharing one database with
+  different data folders are not caught.
 - **An address the tablet can reach**: the same home network, or HTTPS for
   [anywhere](@/manual/https.md).
 

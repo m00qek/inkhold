@@ -81,7 +81,9 @@ The journal shows the first account's password, once. Open
 If instead it says `Cannot listen on 0.0.0.0:8089: another program is already
 listening there`, the port is taken, often by an Inkhold you started by hand.
 Stop that program, or set another `port` in `config.zon`; until then systemd
-tries again every five seconds.
+tries again every five seconds. Likewise `Cannot serve /var/lib/inkhold/data:
+another Inkhold is already serving it`: a second Inkhold, on whatever port,
+won't share a data folder with the first.
 
 The service runs as the `inkhold` account and can write only to
 `/var/lib/inkhold`, which systemd creates for it: the database, `cred.key`,

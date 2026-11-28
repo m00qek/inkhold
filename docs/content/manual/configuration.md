@@ -22,7 +22,7 @@ which lists them all, and change what you need.
 | `port` | `8089` | The port for everything: the tablet's sync, the browser app and HTTPS. Inkhold won't start on a port another program is already listening on. |
 | `db_path` | `"inkhold.db"` | The database file, created on the first start. |
 | `cred_key_path` | `"cred.key"` | The key that encrypts stored credentials, created on the first start. Kept apart from the database, so a stolen database reveals nothing. Back it up somewhere else: without it, everyone has to reset their password. |
-| `data_dir` | `"data"` | Where your notebooks and everything derived from them are stored. |
+| `data_dir` | `"data"` | Where your notebooks and everything derived from them are stored. Only one Inkhold serves a data folder at a time; a second won't start. |
 | `web_dir` | `""` | The browser app's files. Empty serves no browser app, only the tablet's sync. |
 | `admin_email` | `"admin@home.lan"` | The email of the first account, created on the first start with a temporary password. It must be an email address, and it applies on the first start only. |
 | `max_connections` | `192` | How many connections may be open at once. An idle one costs about 34 KB and no thread, and a browser keeps about 6 per tab. |
