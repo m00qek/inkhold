@@ -218,9 +218,82 @@ pub const Serve = struct {
     }
 };
 
-/// The accept loop. Never returns on success.
+pub const ListenError = error{
+    /// Another socket is bound to the address and port: another program, or
+    /// another inkhold, is already listening there.
+    AddressInUse,
+    AccessDenied,
+    AddressUnavailable,
+    /// An IPv6 `host` on a system without IPv6, say.
+    AddressFamilyUnsupported,
+    SystemResources,
+    Unexpected,
+};
+
+/// Binds and listens on `address` with SO_REUSEADDR alone, so a server
+/// stopped a moment ago binds again past its connections in TIME_WAIT, but
+/// a second program on the same address fails with `error.AddressInUse`.
+/// Not std's `ListenOptions.reuse_address`: it also sets SO_REUSEPORT
+/// (`std/Io/Threaded.zig`, `netListenIpPosix`), under which a second
+/// inkhold binds the same port and silently takes half the connections.
+/// A blocking socket, as std's own listen makes; `Server` and `accept` take
+/// it as theirs. Port 0 is resolved, as std does, into `socket.address`.
+/// Bind and listen together: on Linux a socket bound with SO_REUSEADDR but
+/// not yet listening does not hold the port against another one that also
+/// sets it, so binding early and listening late would let the clash through
+/// to `listen`, after the database. Connections made while `app.run` starts
+/// up wait in the backlog until the accept loop runs.
+pub fn listenExclusive(address: Io.net.IpAddress) ListenError!Io.net.Server {
+    const posix = std.posix;
+    const Threaded = Io.Threaded;
+    var storage: Threaded.PosixAddress = undefined;
+    var len = Threaded.addressToPosix(&address, &storage);
+
+    const rc = posix.system.socket(storage.any.family, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, posix.IPPROTO.TCP);
+    const fd: posix.socket_t = switch (posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .MFILE, .NFILE, .NOBUFS, .NOMEM => return error.SystemResources,
+        .ACCES => return error.AccessDenied,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+        else => |e| return posix.unexpectedErrno(e),
+    };
+    errdefer _ = posix.system.close(fd);
+
+    const on: c_int = 1;
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&on)) catch return error.Unexpected;
+
+    while (true) switch (posix.errno(posix.system.bind(fd, &storage.any, len))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        .ADDRINUSE => return error.AddressInUse,
+        .ACCES => return error.AccessDenied,
+        .ADDRNOTAVAIL => return error.AddressUnavailable,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+        .NOMEM => return error.SystemResources,
+        else => |e| return posix.unexpectedErrno(e),
+    };
+    while (true) switch (posix.errno(posix.system.listen(fd, Io.net.default_kernel_backlog))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        .ADDRINUSE => return error.AddressInUse,
+        else => |e| return posix.unexpectedErrno(e),
+    };
+    switch (posix.errno(posix.system.getsockname(fd, &storage.any, &len))) {
+        .SUCCESS => {},
+        else => |e| return posix.unexpectedErrno(e),
+    }
+    return .{
+        .socket = .{ .handle = fd, .address = Threaded.addressFromPosix(&storage) },
+        .options = if (Io.net.Server.AcceptOptions != void) .{ .mode = .stream, .protocol = .tcp },
+    };
+}
+
+/// The accept loop on `listener` (`listenExclusive`, bound by `app.run`
+/// before anything else starts, which owns and closes it). Never returns on
+/// success.
 pub fn listenAndServe(
     io: Io,
+    listener: *Io.net.Server,
     cfg: config.Config,
     routes: []const router.Route,
     ctx: *Context,
@@ -228,10 +301,6 @@ pub fn listenAndServe(
     ciphers: []const tls.config.CipherSuite,
     rng: std.Random,
 ) !void {
-    const address = try Io.net.IpAddress.parse(cfg.host, cfg.port);
-    var listener = try address.listen(io, .{ .mode = .stream, .reuse_address = true });
-    defer listener.deinit(io);
-
     // Self-referential through the poller and the pool, so it never moves:
     // this frame lives as long as the process.
     var serve: Serve = .{
@@ -445,4 +514,30 @@ test "cookieValue extracts a named cookie, tolerating spaces" {
     try std.testing.expect(cookieValue("theme=dark; lang=en", "sn_session") == null);
     try std.testing.expect(cookieValue("", "sn_session") == null);
     try std.testing.expect(cookieValue("x_sn_session=nope", "sn_session") == null);
+}
+
+test "listenExclusive: a second listener on the same address and port is refused, not let in beside the first" {
+    // A second inkhold on a port in use must fail at startup: with SO_REUSEPORT
+    // it bound beside the first and took half its connections.
+    const io = std.testing.io;
+    var first = try listenExclusive(try Io.net.IpAddress.parse("127.0.0.1", 0));
+    defer first.deinit(io);
+    try std.testing.expectError(error.AddressInUse, listenExclusive(first.socket.address));
+}
+
+test "listenExclusive: a server stopped a moment ago binds its port again, past connections in TIME_WAIT" {
+    // SO_REUSEADDR is what lets a restart through: the server closes first, so
+    // its side of the connection waits out TIME_WAIT on the listening port.
+    const io = std.testing.io;
+    const address = address: {
+        var first = try listenExclusive(try Io.net.IpAddress.parse("127.0.0.1", 0));
+        defer first.deinit(io);
+        const client = try first.socket.address.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+        const accepted = try first.accept(io);
+        accepted.close(io);
+        break :address first.socket.address;
+    };
+    var again = try listenExclusive(address);
+    again.deinit(io);
 }

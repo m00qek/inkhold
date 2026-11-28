@@ -8,6 +8,7 @@
     .host = "127.0.0.1",
 
     // The port for everything: the tablet's sync, the browser app and HTTPS.
+    // Inkhold won't start on a port another program is already listening on.
     .port = 8089,
 
     // The database file, created on the first start.
