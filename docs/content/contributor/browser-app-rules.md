@@ -110,6 +110,9 @@ its `.mark` does.
   worker until the tab dies. It is sized never to refuse what opens today: a
   scanned page at the largest raster (16 M px) peaks near 580 MiB, a session
   of them near 730 MiB, since wasm memory is never returned. After that error
-  (or a trap) the worker drops the instance and the next open starts a fresh
-  one (`spentDecoder`, `browserLoader().reset`). A backstop, not a phone's
-  protection.
+  (or a trap) the instance is never used again: the request fails with its
+  usual message ("Couldn't draw this page"), and the worker reopens the same
+  document on a fresh instance (`spentDecoder`, `browserLoader().reset`,
+  `replaceSpentDecoder`); a failed open is not retried. Calls that answer
+  "nothing here" (words, links, the outline) throw instead when the instance
+  ran out, so it is replaced too. A backstop, not a phone's protection.

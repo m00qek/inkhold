@@ -253,7 +253,11 @@ export function browserLoader(
 export function spentDecoder(err: unknown): boolean {
   if (err instanceof WebAssembly.RuntimeError) return true;
   const message = err instanceof Error ? err.message : String(err);
-  return /malloc \(\d+ bytes\) failed|out of memory/i.test(message);
+  // MuPDF 1.28.1's `fitz/memory.c` ("malloc (n bytes) failed", "calloc (n x m
+  // bytes) failed", "realloc (n bytes) failed", "...; out of memory"), the
+  // image decoders' "insufficient memory", and this side's own "out of wasm
+  // memory".
+  return /\b(?:m|c|re)alloc \(.*\) failed|out of (?:wasm )?memory|insufficient memory/i.test(message);
 }
 
 // ---- typed wrapper ----

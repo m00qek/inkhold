@@ -81,3 +81,31 @@ const next = await instance(pdf);
 const again = next.ink_open_stream(BigInt(pdf.length));
 check(again >= 1, "a fresh instance opens the next document", `got ${again}`);
 check(next.ink_render(again, 0, 2) > 0n, "and renders it");
+
+// Every other call that allocates fails the same way, never as a trap: words,
+// links and the outline of an open document, and opening one. Squeezed to the
+// ceiling and every free block taken, as at the end of a heavy session.
+const outlined = fs.readFileSync(new URL("../fixtures/outlined-six-page.pdf", import.meta.url));
+function squeeze(x) {
+  x.memory.grow(CEILING_PAGES - x.memory.buffer.byteLength / 65536);
+  for (const size of [1 << 20, 1 << 16, 1 << 12, 256, 16]) while (x.ink_alloc(size)) {}
+}
+for (const [what, call] of [
+  ["ink_page_words", (x, d) => x.ink_page_words(d, 3)],
+  ["ink_page_links", (x, d) => x.ink_page_links(d, 3)],
+  ["ink_load_outline", (x, d) => x.ink_load_outline(d)],
+  ["ink_open_stream", (x) => x.ink_open_stream(BigInt(outlined.length))],
+]) {
+  const x = await instance(outlined);
+  const d = x.ink_open_stream(BigInt(outlined.length));
+  squeeze(x);
+  let r;
+  try {
+    r = call(x, d);
+  } catch (err) {
+    check(false, `${what} past the ceiling is an error, not a trap`, `${err.constructor.name}: ${err.message}`);
+    continue;
+  }
+  check(r < 0, `${what} past the ceiling fails`, `got ${r}`);
+  check(/alloc \(.*\) failed|out of memory/.test(lastError(x)), `${what} fails as MuPDF's out-of-memory error`, lastError(x));
+}
