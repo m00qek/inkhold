@@ -6,6 +6,7 @@
 import {
   DEFAULT_WASM_URL,
   browserLoader,
+  spentDecoder,
   type HostRead,
   type PdfDecoderExports,
 } from "./pdfLoader";
@@ -306,7 +307,12 @@ function handle(req: PdfRequest): Promise<void> {
         return;
       }
     }
-  })().catch((err: unknown) => {
+  })().catch(async (err: unknown) => {
+    // Out of memory at the ceiling, or a trap: the instance is spent. This
+    // request fails with the viewer's own message for it ("Couldn't draw this
+    // page"); the same document is reopened on a fresh instance, so the next
+    // request (another page, a lower zoom) works.
+    if (spentDecoder(err)) await replaceSpentDecoder(req.kind !== "open");
     ctx.postMessage({
       kind: "error",
       id: req.id,
@@ -316,7 +322,31 @@ function handle(req: PdfRequest): Promise<void> {
   });
 }
 
+/**
+ * Drops the spent instance and, when `reopen`, reopens the open document on a
+ * fresh one: not after a failed open, which would only fail the same way.
+ * Never throws: the queue must keep running whatever the instance did. A
+ * reopen that fails leaves no document, and the next request says so.
+ */
+async function replaceSpentDecoder(reopen: boolean): Promise<void> {
+  const reopenFrom = source;
+  try {
+    release();
+  } catch {
+    // Closing on a trapped instance can trap again: it is dropped either way.
+    doc = null;
+  }
+  loadDecoder.reset();
+  if (!reopen || !reopenFrom) return;
+  try {
+    await open(reopenFrom.url, reopenFrom.size);
+  } catch {
+    release();
+  }
+}
+
 ctx.addEventListener("message", (ev) => {
   const req = ev.data;
-  queue = queue.then(() => handle(req));
+  // Never left rejected: one failure must not stop every later request.
+  queue = queue.then(() => handle(req)).catch(() => undefined);
 });

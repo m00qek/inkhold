@@ -7,7 +7,17 @@ import { parsePageLinks } from "./pdfWire";
 import type { PdfLink } from "../core/types";
 import { parsePageWords, type PdfWord } from "./pdfWire";
 import { parseOutline, type PdfOutlineEntry } from "./pdfWire";
-import { lastError, type PdfDecoderExports } from "./pdfLoader";
+import { lastError, spentDecoder, type PdfDecoderExports } from "./pdfLoader";
+
+/**
+ * After a refused call that answers "nothing here" (`[]`): if the shim ran out
+ * of memory at its ceiling, throw instead, so the worker sees the instance is
+ * spent and replaces it (`spentDecoder`). Any other refusal stays `[]`.
+ */
+function throwIfSpent(x: PdfDecoderExports): void {
+  const why = lastError(x, "");
+  if (why && spentDecoder(new Error(why))) throw new Error(why);
+}
 
 /** A page's size in points (1/72"), not pixels. */
 export interface PdfPageSize {
@@ -165,7 +175,10 @@ export class AsyncPdfDocument {
     const call = this.c.pageLinks ?? x.ink_page_links;
     try {
       const packed = await call(this.alive(), page);
-      if (packed < 0n) return [];
+      if (packed < 0n) {
+        throwIfSpent(x);
+        return [];
+      }
       // Re-read `memory.buffer` here: the call allocates and may have suspended.
       const json = new TextDecoder().decode(
         new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
@@ -185,7 +198,10 @@ export class AsyncPdfDocument {
     const call = this.c.pageWords ?? x.ink_page_words;
     try {
       const packed = await call(this.alive(), page);
-      if (packed < 0n) return [];
+      if (packed < 0n) {
+        throwIfSpent(x);
+        return [];
+      }
       // Re-read `memory.buffer` here: the call allocates and may have suspended.
       const json = new TextDecoder().decode(
         new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
@@ -202,7 +218,10 @@ export class AsyncPdfDocument {
     const call = this.c.loadOutline ?? x.ink_load_outline;
     try {
       const packed = await call(this.alive());
-      if (packed < 0n) return [];
+      if (packed < 0n) {
+        throwIfSpent(x);
+        return [];
+      }
       // Re-read `memory.buffer` here: the call allocates and may have suspended.
       const json = new TextDecoder().decode(
         new Uint8Array(x.memory.buffer, Number(packed >> 32n), Number(packed & 0xffffffffn)),
