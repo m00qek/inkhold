@@ -210,6 +210,16 @@ test "a missing backup directory is named, and nothing is created in its place" 
         try testing.expect(std.mem.indexOf(u8, c.err, "is it mounted?") != null);
     }
     try testing.expectError(error.FileNotFound, inst.tmp.dir.access(testing.io, "nas-not-mounted", .{}));
+
+    // Nor a data folder (or its lock) on an empty target the restore never began.
+    var target = try bfix.Target.init();
+    defer target.deinit();
+    var tbuf: [256]u8 = undefined;
+    const tcfg = try configPath(target.tmp, target.root, &tbuf);
+    const c = try run(&.{ "--config", tcfg, "restore", missing });
+    defer c.deinit(testing.allocator);
+    try testing.expectEqual(exit_failed, c.code);
+    try testing.expectError(error.FileNotFound, target.tmp.dir.access(testing.io, "state/data", .{}));
 }
 
 test "a backup inside the live data is refused" {

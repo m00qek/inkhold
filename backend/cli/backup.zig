@@ -373,25 +373,28 @@ pub fn restore(gpa: std.mem.Allocator, io: Io, inv: Invocation, out: *Writer, er
         , .{ .b = st.bold, .r = st.reset, .h = cfg.host, .p = cfg.port });
         return exit_failed;
     }
+    var dir = (try openDir(io, inv.backup_dir, err, st)) orelse return exit_failed;
+    defer dir.close(io);
+
     // The port check misses a server on another port, or one still starting:
     // the data folder's lock (`serve_lock.zig`) does not, and held for the
     // whole run it keeps a server from starting halfway through the restore.
+    // After the backup opens, so a mistyped or unmounted one creates nothing.
     var data_dir = try Dir.cwd().createDirPathOpen(io, cfg.data_dir, .{});
     defer data_dir.close(io);
     var held_by: ?serve_lock.Holder = null;
-    const folder_lock = serve_lock.acquire(io, data_dir, &held_by) catch |e| switch (e) {
+    const folder_lock: ?serve_lock.Lock = serve_lock.acquire(io, data_dir, &held_by) catch |e| switch (e) {
         error.Locked => {
             try err.print("{[b]s}Another Inkhold is serving {[d]s}{[r]s}", .{ .b = st.bold, .r = st.reset, .d = cfg.data_dir });
             try serve_lock.writeHolder(err, held_by);
             try err.writeAll(". Stop it before restoring; nothing was touched.\n");
             return exit_failed;
         },
+        // A folder that cannot be locked restores as before, as `serve` serves.
+        error.FileLocksUnsupported, error.SystemResources => null,
         else => return e,
     };
-    defer folder_lock.release(io);
-
-    var dir = (try openDir(io, inv.backup_dir, err, st)) orelse return exit_failed;
-    defer dir.close(io);
+    defer if (folder_lock) |l| l.release(io);
 
     var r: backup.RestoreReport = .{};
     defer r.deinit(gpa);

@@ -46,11 +46,18 @@ pub fn run(gpa: std.mem.Allocator, io: Io, cfg: config.Config, routes: []const r
     // stores below.
     var data_dir = try std.Io.Dir.cwd().createDirPathOpen(io, cfg.data_dir, .{});
     defer data_dir.close(io);
-    const folder_lock = serve_lock.acquire(io, data_dir, held_by) catch |e| switch (e) {
+    const folder_lock: ?serve_lock.Lock = serve_lock.acquire(io, data_dir, held_by) catch |e| switch (e) {
         error.Locked => return error.DataFolderInUse,
+        // A folder that cannot be locked at all (a FUSE mount without locks,
+        // NFSv3 with its lock daemon down) serves as it did before this lock:
+        // refusing would stop an install that worked. Said once, in the log.
+        error.FileLocksUnsupported, error.SystemResources => unlocked: {
+            std.log.warn("cannot lock {s} ({t}): a second Inkhold on this folder would not be refused", .{ cfg.data_dir, e });
+            break :unlocked null;
+        },
         else => return e,
     };
-    defer folder_lock.release(io);
+    defer if (folder_lock) |l| l.release(io);
 
     // Before any thread exists, so every thread inherits the mask and only the
     // transport's stop thread takes SIGTERM/SIGINT (http/shutdown.zig).

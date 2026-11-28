@@ -78,10 +78,12 @@ pub fn acquireAs(io: Io, dir: Dir, pid: u32, host: []const u8, holder: *?Holder)
         else => return e,
     };
     errdefer file.close(io);
+    // The line is information only: a full disk or a failed write leaves a
+    // line nobody can read as a holder, never a server that won't start.
     var line_buf: [max_line]u8 = undefined;
     const line = std.fmt.bufPrint(&line_buf, "{d} {s}\n", .{ pid, host[0..@min(host.len, max_host)] }) catch unreachable;
-    try file.setLength(io, 0);
-    try file.writePositionalAll(io, line, 0);
+    file.setLength(io, 0) catch {};
+    file.writePositionalAll(io, line, 0) catch {};
     return .{ .file = file };
 }
 
@@ -162,6 +164,13 @@ test "a holder's line is information only: garbage names nobody, and nothing pas
     try std.testing.expectEqualStrings("hub", h.host());
 }
 
+/// Waits for `child` to exit, past signals that interrupt the wait.
+fn reap(child: std.os.linux.pid_t) void {
+    const linux = std.os.linux;
+    var status: i32 = 0;
+    while (linux.errno(linux.waitpid(child, &status, 0)) == .INTR) {}
+}
+
 test "a holder killed with SIGKILL leaves the folder free: the kernel drops its lock" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const io = std.testing.io;
@@ -189,8 +198,7 @@ test "a holder killed with SIGKILL leaves the folder free: the kernel drops its 
     var reaped = false;
     defer if (!reaped) {
         _ = linux.kill(child, linux.SIG.KILL);
-        var status: i32 = 0;
-        _ = linux.waitpid(child, &status, 0);
+        reap(child);
     };
 
     // Until the child holds it, this taker gets it (and gives it back). A
@@ -206,8 +214,7 @@ test "a holder killed with SIGKILL leaves the folder free: the kernel drops its 
         if (Io.Clock.awake.now(io).toMilliseconds() > deadline) return error.ChildNeverHeldTheLock;
     }
     _ = linux.kill(child, linux.SIG.KILL);
-    var status: i32 = 0;
-    _ = linux.waitpid(child, &status, 0);
+    reap(child);
     reaped = true;
     const lock = try acquireAs(io, tmp.dir, 1, "parent", &holder);
     lock.release(io);
