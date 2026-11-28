@@ -1,5 +1,8 @@
-import { test, expect, type Page } from "@playwright/test";
-import { signedIn, freezeMotion } from "./helpers/app";
+import { test, expect, type Locator, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
+import { signedIn, freezeMotion, cardButton, dropFiles, railSettled } from "./helpers/app";
+import { mockApi } from "./helpers/mockApi";
+import { AXE_TAGS } from "./helpers/semantics";
 import { servePdf } from "./pdfViewer.shared";
 
 // One design language: the same thing looks and sits the same on every screen.
@@ -119,4 +122,101 @@ test.describe("on a phone", () => {
       await expect(page.getByRole("searchbox", { name: "Search notes" })).toBeFocused();
     }
   });
+});
+
+// One checkbox (`.check` in `02-app-shell-rail.css`): every one in the app,
+// on a desktop and under a finger. Scoped to the boxes: the admin console's
+// other controls are not this rule's to judge.
+test.describe("every checkbox", () => {
+  const PASSWORD = "inkhold";
+
+  /** The admin console unlocked, with no backup ever run, so its reminder shows. */
+  async function adminConsole(page: Page): Promise<void> {
+    await mockApi(page, { "user/me": { json: { success: true, email: "ana@household.lan", isAdmin: true, mustChangePassword: false } } });
+    await page.addInitScript(() => {
+      (globalThis as { __snFakeBackups?: unknown }).__snFakeBackups = { runs: [] };
+    });
+    await page.goto("/#/admin");
+    await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
+    await page.getByRole("button", { name: "Unlock console" }).click();
+  }
+
+  const BOXES: { name: string; open: (page: Page) => Promise<Locator> }[] = [
+    {
+      name: "the account's search switch",
+      open: async (page) => {
+        await page.goto("/#/account");
+        return page.getByRole("checkbox", { name: /Search inside documents/ });
+      },
+    },
+    {
+      name: "the admin's backup reminder",
+      open: async (page) => {
+        await adminConsole(page);
+        return page.getByRole("checkbox", { name: "Remind admins when nothing is backed up" });
+      },
+    },
+    {
+      name: "the new person's administrator box",
+      open: async (page) => {
+        await adminConsole(page);
+        await page.getByRole("button", { name: "Add person" }).click();
+        return page.getByRole("checkbox", { name: /Also an administrator/ });
+      },
+    },
+    {
+      name: "the upload conflict's do-the-same box",
+      open: async (page) => {
+        await page.goto("/#/folder/note");
+        await railSettled(page);
+        await expect(cardButton(page, "Ideas & scratch")).toBeVisible();
+        const files = [{ name: "Trip notes.pdf" }, { name: "Trip plan.pdf" }];
+        await dropFiles(page, "#gallery", files);
+        for (const f of files) await expect(cardButton(page, f.name)).toBeVisible();
+        // Both clash: the dialog offers to do the same for the other.
+        await dropFiles(page, "#gallery", files);
+        return page.locator("dialog.conflict").getByRole("checkbox");
+      },
+    },
+  ];
+
+  for (const v of [
+    { name: "desktop", width: 1280, height: 900, touch: false, min: 24 },
+    { name: "touch", width: 390, height: 844, touch: true, min: 44 },
+  ]) {
+    test.describe(v.name, () => {
+      // No motion: a dialog measured mid-way through its opening scale is short.
+      test.use({ viewport: { width: v.width, height: v.height }, hasTouch: v.touch, reducedMotion: "reduce" });
+      for (const b of BOXES) {
+        test(`${b.name}: filled with ink, at least ${v.min}px, named, and nothing axe finds on it`, async ({ page }) => {
+          await signedIn(page);
+          const box = await b.open(page);
+          await expect(box).toBeVisible();
+          await expect(box).toHaveAccessibleName(/\S/);
+          // Every id it names exists: its label's `for`, its description.
+          const dangling = await box.evaluate((el) =>
+            [el.id ? document.querySelector(`label[for="${el.id}"]`)?.getAttribute("for") : null, ...(el.getAttribute("aria-describedby") ?? "").split(/\s+/)]
+              .filter((id): id is string => !!id)
+              .filter((id) => !document.getElementById(id)),
+          );
+          expect(dangling).toEqual([]);
+          const r = (await box.boundingBox())!;
+          expect(Math.min(r.width, r.height)).toBeGreaterThanOrEqual(v.min);
+          // Ink, never the accent: compared with a probe painted in `--ink` beside it.
+          const [accent, ink] = await box.evaluate((el) => {
+            const probe = document.createElement("span");
+            probe.style.color = "var(--ink)";
+            el.parentElement!.append(probe);
+            const out = [getComputedStyle(el).accentColor, getComputedStyle(probe).color];
+            probe.remove();
+            return out;
+          });
+          expect(accent).toBe(ink);
+          await box.evaluate((el) => el.setAttribute("data-axe-box", ""));
+          const res = await new AxeBuilder({ page }).include("[data-axe-box]").withTags(AXE_TAGS).analyze();
+          expect(res.violations.map((x) => x.id)).toEqual([]);
+        });
+      }
+    });
+  }
 });

@@ -70,7 +70,7 @@ export function createAdminDialogs(host: HTMLElement): AdminDialogs {
       // Address only: the server stores no name.
       const email = field({ id: "admin-new-email", label: "Email", type: "email", autofocus: true });
       email.input.placeholder = "name@household.lan";
-      const makeAdmin = el("input", { id: "admin-new-admin", type: "checkbox" });
+      const makeAdmin = el("input", { id: "admin-new-admin", type: "checkbox", class: "check__box" });
 
       const { done } = dialog(
         host,
@@ -84,7 +84,7 @@ export function createAdminDialogs(host: HTMLElement): AdminDialogs {
             email.row,
             el(
               "label",
-              { class: "admin-check" },
+              { class: "admin-check check" },
               makeAdmin,
               el("span", { text: "Also an administrator" }),
               el("small", { text: "Administrators can add, reset and delete household accounts." }),

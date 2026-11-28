@@ -22,7 +22,7 @@ export interface CheckOptions {
   readonly minTarget: number;
 }
 
-const AXE_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
+export const AXE_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"];
 
 /** axe-core's findings, one rule per entry. */
 async function axe(page: Page): Promise<Findings> {
@@ -86,6 +86,9 @@ function structure(opts: CheckOptions): Record<string, string[]> {
     if (e.hasAttribute("data-no-address") || e.hasAttribute("aria-expanded") || e.hasAttribute("aria-pressed") || e.hasAttribute("aria-haspopup")) continue;
     if (shown(e) && !e.closest("[role=menu]")) add("navigates-by-button", e);
   }
+
+  // One checkbox (`.check`, design-language.md): a new one joins it, or this says so.
+  for (const e of document.querySelectorAll("input[type=checkbox]")) if (!e.classList.contains("check__box")) add("checkbox-not-shared", e);
 
   // Collections are lists.
   for (const e of document.querySelectorAll(".card,.todo-hit,.coverage__list > *")) if (shown(e) && !e.closest("li")) add("collection-not-list", e);

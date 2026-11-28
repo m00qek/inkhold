@@ -39,12 +39,12 @@ export function openConflictDialog(req: ConflictRequest): Promise<ConflictAnswer
   });
 
   const restId = "conflict-rest";
-  const restBox = el("input", { class: "conflict__rest-box", type: "checkbox", id: restId }) as HTMLInputElement;
+  const restBox = el("input", { class: "conflict__rest-box check__box", type: "checkbox", id: restId }) as HTMLInputElement;
   const rest =
     req.remaining > 0
       ? el(
           "label",
-          { class: "conflict__rest", for: restId },
+          { class: "conflict__rest check", for: restId },
           restBox,
           el("span", {
             text:

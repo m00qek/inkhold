@@ -41,12 +41,12 @@ export function backupsDetail(b: AdminBackups, busy: boolean, act: BackupsAction
   // means something: nothing has succeeded yet, or it is already off.
   let setting: HTMLElement | null = null;
   if (b.neverDismissed || !b.runs.some((r) => r.lastOkAt !== null)) {
-    const box = el("input", { type: "checkbox", id: "admin-backup-remind", disabled: busy }) as HTMLInputElement;
+    const box = el("input", { type: "checkbox", class: "check__box", id: "admin-backup-remind", disabled: busy }) as HTMLInputElement;
     box.checked = !b.neverDismissed;
     box.addEventListener("change", () => act.onDismiss(!box.checked));
     setting = el(
       "label",
-      { class: "admin-check admin-backups__setting" },
+      { class: "admin-check check admin-backups__setting" },
       box,
       el("span", { text: "Remind admins when nothing is backed up" }),
       el("small", { text: "Turn this off if the server is backed up some other way. A failing backup is always shown." }),

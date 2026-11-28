@@ -32,6 +32,32 @@
   border-radius: 2px;
 }
 
+/* One checkbox, on every screen (design-language.md): a native box in its
+   label, so the words toggle it too. On is filled with ink, as the toggles
+   are, never the accent, which is the focus ring's. The box is a target of
+   its own, so at least the target minimum, which grows on a touch screen.
+   Each page keeps only its layout (`.admin-check`, `.acct-check`,
+   `.conflict__rest`). Scoped as the rest of the shell, at no specificity, so
+   a page's layout rule wins without trying. */
+:where(.sn-root) .check {
+  cursor: pointer;
+}
+:where(.sn-root) .check:has(.check__box:disabled) {
+  cursor: default;
+}
+:where(.sn-root) .check__box {
+  flex: none;
+  inline-size: var(--hit-target-min);
+  block-size: var(--hit-target-min);
+  margin: 0;
+  accent-color: var(--ink);
+}
+:where(.sn-root) .check small {
+  font-size: var(--fs-caption);
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
 /* ---- App grid: rail | main, divided by the red margin rule ---- */
 .app {
   display: grid;

@@ -311,3 +311,19 @@ export async function freezeMotion(page: Page): Promise<void> {
   });
   await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
 }
+
+/** A live `DataTransfer`: drop and the picker enter the app through different events. */
+export async function dropFiles(page: Page, selector: string, files: { name: string; size?: number }[]): Promise<void> {
+  await page.evaluate(
+    ({ selector, files }) => {
+      const target = document.querySelector(selector);
+      if (!target) throw new Error(`no drop target: ${selector}`);
+      const dt = new DataTransfer();
+      for (const f of files) dt.items.add(new File([new Uint8Array(f.size ?? 2048)], f.name));
+      for (const type of ["dragenter", "dragover", "drop"]) {
+        target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+      }
+    },
+    { selector, files },
+  );
+}
