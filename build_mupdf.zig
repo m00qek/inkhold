@@ -21,11 +21,11 @@ const mupdf_wasm_only = [_][]const u8{
 // costs +51 KB brotli in the browser and +313 KB on the Pi's server, which links
 // it too: one flag set keeps the two agreeing on a document, and the server
 // only reads JPX headers (a page's size), never decodes. Formats kept: PDF,
-// EPUB, FB2, CBZ, XPS.
+// EPUB, FB2, CBZ, XPS. The fonts are the one difference (TOFU, below): it
+// touches only reflowable books, which the server doesn't lay out.
 const mupdf_trim_flags = [_][]const u8{
     "-DNDEBUG",
 
-    "-DTOFU",
     "-DTOFU_CJK",
     "-DNO_CJK",
 
@@ -59,10 +59,16 @@ const mupdf_trim_flags = [_][]const u8{
 /// different site in `cmsxform.c` on armv6), so a narrower opt-out does not work.
 const mupdf_vendor_only = [_][]const u8{"-fno-sanitize=undefined"};
 
-const mupdf_wasm_flags = mupdf_wasm_only ++ mupdf_trim_flags;
+// The browser lays out books (EPUB), whose default face is Charis SIL: a book
+// set in a stand-in breaks its lines, and pages, elsewhere than the tablet's
+// reader does. So the wasm build keeps the SIL fonts (TOFU_NOTO, not TOFU),
+// and Noto Serif for what Charis lacks: ~480 KB, embedded by
+// `webapp/wasm/book_fonts.zig`. The server lays out no book and keeps only
+// the base 14.
+const mupdf_wasm_flags = mupdf_wasm_only ++ mupdf_trim_flags ++ [_][]const u8{"-DTOFU_NOTO"};
 
 /// Native flags: no exception-handling contract and no `mkstemp` stub needed.
-const mupdf_native_flags = mupdf_trim_flags;
+const mupdf_native_flags = mupdf_trim_flags ++ [_][]const u8{"-DTOFU"};
 
 /// Per-library build flags, mirroring MuPDF's own `Makelists` (`*_BUILD_CFLAGS`).
 const mupdf_freetype_flags = [_][]const u8{

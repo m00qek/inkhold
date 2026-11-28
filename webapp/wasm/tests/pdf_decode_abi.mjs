@@ -17,6 +17,7 @@ import "./pdf_decode_abi/links.mjs";
 import "./pdf_decode_abi/words.mjs";
 import "./pdf_decode_abi/outline.mjs";
 import "./pdf_decode_abi/memory_cap.mjs";
+import "./pdf_decode_abi/book.mjs";
 import { failureCount } from "./pdf_decode_abi/harness.mjs";
 import { pdf } from "./pdf_decode_abi/harness.mjs";
 import { width, height } from "./pdf_decode_abi/render.mjs";

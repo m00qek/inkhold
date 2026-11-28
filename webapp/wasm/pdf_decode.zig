@@ -19,6 +19,10 @@
 
 const std = @import("std");
 
+comptime {
+    _ = @import("book_fonts.zig");
+}
+
 // ---- pdf_shim.c ----
 const Document = opaque {};
 const Pixmap = opaque {};

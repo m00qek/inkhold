@@ -8,6 +8,64 @@
  * keeps one large page's resources across a re-render. */
 #define INK_STORE_LIMIT (16 << 20)
 
+/* A book (EPUB, FB2: reflowable) is laid out as the tablet's reader lays it
+ * out, so its pages are the tablet's pages and its ink lands where it was
+ * written: a 1200 x 1600 box with a 100/3 em, the numbers at which stock
+ * MuPDF 1.17 (the reader's) reproduces the tablet's own page 33 of Moby Dick.
+ * Layout is not scale-invariant: 288 x 384 with 8, the same proportions,
+ * paginates differently, and an em of 33 or 33.4 does too. Never applied to
+ * a PDF, XPS or CBZ: their pages are fixed. */
+#define INK_BOOK_WIDTH 1200.0f
+#define INK_BOOK_HEIGHT 1600.0f
+#define INK_BOOK_EM (100.0f / 3.0f)
+
+/* What our MuPDF does that the tablet's 1.17 does not, undone before layout.
+ * 1.17 ignores `hyphens: auto` (books ask for it; we would break words where
+ * the tablet doesn't) but breaks at a soft hyphen (U+00AD), which `manual`
+ * keeps and `none` would not; and it doesn't know `hgroup`, so gives it no
+ * margins. Each
+ * rule here moved real line or page breaks; more will join as books show
+ * them. A user stylesheet: it applies to every HTML document, and only those. */
+static const char ink_tablet_css[] =
+	"* { hyphens: manual !important }\n"
+	"hgroup { margin-top: 0 !important; margin-bottom: 0 !important }\n";
+
+/* Noto Serif, from book_fonts.zig: MuPDF's own fallback face for a character
+ * Charis lacks in these scripts (fitz/font-table.h), which TOFU_NOTO leaves
+ * out with every other Noto face. Handed back through MuPDF's public
+ * system-fallback hook, so its layout is untouched: the same face it would
+ * have picked, for the same scripts; any other script finds none, as before. */
+extern const unsigned char ink_noto_serif[];
+extern const unsigned int ink_noto_serif_size;
+static fz_font *g_noto_serif;
+
+static fz_font *ink_fallback_font(fz_context *ctx, int script, int language, int serif, int bold, int italic)
+{
+	(void)language;
+	(void)serif;
+	(void)bold;
+	(void)italic;
+	switch (script)
+	{
+	case UCDN_SCRIPT_LATIN:
+	case UCDN_SCRIPT_GREEK:
+	case UCDN_SCRIPT_CYRILLIC:
+	case UCDN_SCRIPT_COMMON:
+	case UCDN_SCRIPT_INHERITED:
+	case UCDN_SCRIPT_UNKNOWN:
+		break;
+	default:
+		return NULL;
+	}
+	/* One font for every script slot: MuPDF keeps what it gets per slot. */
+	if (!g_noto_serif)
+	{
+		g_noto_serif = fz_new_font_from_memory(ctx, "Noto Serif", ink_noto_serif, (int)ink_noto_serif_size, 0, 0);
+		fz_set_font_embedding(ctx, g_noto_serif, 1);
+	}
+	return fz_keep_font(ctx, g_noto_serif);
+}
+
 fz_context *g_ctx;
 
 /* Last MuPDF error message: return codes say which call failed, not why. */
@@ -46,7 +104,11 @@ fz_context *ink_shim_context(void)
 	if (!g_ctx)
 		return NULL;
 	fz_try(g_ctx)
+	{
 		fz_register_document_handlers(g_ctx);
+		fz_set_user_css(g_ctx, ink_tablet_css);
+		fz_install_load_system_font_funcs(g_ctx, NULL, NULL, ink_fallback_font);
+	}
 	fz_catch(g_ctx)
 	{
 		ink_record_error(g_ctx);
@@ -54,6 +116,14 @@ fz_context *ink_shim_context(void)
 		g_ctx = NULL;
 	}
 	return g_ctx;
+}
+
+/* Lays a book out at the tablet's page size (see INK_BOOK_WIDTH); a fixed-page
+ * document is left as it is. Throws, as MuPDF does: callers are in `fz_try`. */
+static void ink_layout_book(fz_context *ctx, fz_document *doc)
+{
+	if (fz_is_document_reflowable(ctx, doc))
+		fz_layout_document(ctx, doc, INK_BOOK_WIDTH, INK_BOOK_HEIGHT, INK_BOOK_EM);
 }
 
 /* Opens bytes allocated with libc `malloc`, consuming `data` on every path.
@@ -77,12 +147,14 @@ fz_document *ink_shim_open(void *data, unsigned int len)
 		buf = fz_new_buffer_from_data(ctx, (unsigned char *)data, (size_t)len);
 		data = NULL; /* the buffer owns the bytes from here on */
 		doc = fz_open_document_with_buffer(ctx, "", buf);
+		ink_layout_book(ctx, doc);
 	}
 	fz_always(ctx)
 		fz_drop_buffer(ctx, buf);
 	fz_catch(ctx)
 	{
 		ink_record_error(ctx);
+		fz_drop_document(ctx, doc); /* open, if laying the book out failed */
 		free(data); /* non-NULL only if the buffer itself could not be made */
 		return NULL;
 	}
@@ -197,12 +269,14 @@ fz_document *ink_shim_open_stream(long long total)
 		st = NULL; /* the stream owns it, and drops it with `ink_stream_drop` */
 		stm->seek = ink_stream_seek;
 		doc = fz_open_document_with_stream(ctx, "", stm);
+		ink_layout_book(ctx, doc);
 	}
 	fz_always(ctx)
 		fz_drop_stream(ctx, stm);
 	fz_catch(ctx)
 	{
 		ink_record_error(ctx);
+		fz_drop_document(ctx, doc); /* open, if laying the book out failed */
 		fz_free(ctx, st); /* non-NULL only if `fz_new_stream` itself failed */
 		return NULL;
 	}

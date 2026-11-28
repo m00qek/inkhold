@@ -16,9 +16,13 @@ emulator="$*"
 run() { $emulator "$@"; }
 
 dir=$(mktemp -d)
-trap 'kill "$pid" 2>/dev/null || true; rm -rf "$dir"' EXIT
+trap 'kill "${pid:-}" 2>/dev/null || true; rm -rf "$dir"' EXIT
 cd "$dir"
 tar -xzf "$archive"
+
+# The licences of what the browser app bundles travel with it.
+[ -s webapp/dist/THIRD-PARTY-NOTICES.txt ] || { echo "no webapp/dist/THIRD-PARTY-NOTICES.txt in the archive" >&2; exit 1; }
+echo "ok   third-party notices"
 
 got=$(run ./inkhold --version)
 [ "$got" = "inkhold $version" ] || { echo "--version says '$got', want 'inkhold $version'" >&2; exit 1; }
