@@ -226,6 +226,14 @@ fn manifestRow(f: *Fixture, b: *Bufs, tok: *const [32]u8, id: u64) !struct { md5
     return error.NotInManifest;
 }
 
+/// Returns once the real clock, the one the handlers stamp with, has left the
+/// current millisecond: a step after this happens strictly later.
+fn pastThisMillisecond() void {
+    const io = testing.io;
+    const now = std.Io.Clock.real.now(io).toMilliseconds();
+    while (std.Io.Clock.real.now(io).toMilliseconds() <= now) {}
+}
+
 test "the comment, edited in the browser: a new md5 the tablet takes, waiting until it asks; nothing else changes" {
     const f = try Fixture.init();
     defer f.deinit();
@@ -249,6 +257,9 @@ test "the comment, edited in the browser: a new md5 the tablet takes, waiting un
     }
     // The tablet's next sync: a new md5 and a later time, so its app takes the
     // server's copy; asking for the manifest is the fetch, and nothing waits.
+    // Later than the edit: in its own millisecond the edit would still wait,
+    // by the rule (`changedSince`: at counts as after), not what this tests.
+    pastThisMillisecond();
     const after = try manifestRow(f, &b, &ana.tablet, id);
     try testing.expect(!std.mem.eql(u8, &before.md5, &after.md5));
     try testing.expect(after.modified > before.modified);
